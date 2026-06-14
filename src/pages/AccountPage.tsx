@@ -519,8 +519,14 @@ function DeleteAccountButton({ email }: { email: string }) {
     setError(null)
     const res = await deleteAccount()
     setBusy(false)
-    if (res.error) setError(res.error)
-    // On success the user is signed out and the page re-renders.
+    if (res.error) {
+      setError(res.error)
+      return
+    }
+    // On success the user is signed out and the page re-renders to the much
+    // shorter signed-out view; reset scroll so there's no blank gap below.
+    setOpen(false)
+    window.scrollTo({ top: 0 })
   }
 
   return (

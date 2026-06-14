@@ -161,6 +161,57 @@ Dashboard → **Authentication** → **URL Configuration**:
 Click **Save**. The **Site URL** is just the default fallback; localhost keeps
 working as long as it stays in the Redirect URLs list.
 
+### Step 4b — (Optional) Enable Google / GitHub login
+
+Email/password and magic links work out of the box. Social logins must each be
+configured, or the buttons return `provider is not enabled`. Your Supabase
+callback URL (used below) is:
+
+```
+https://<your-ref>.supabase.co/auth/v1/callback
+```
+
+**GitHub**
+
+1. GitHub → **Settings → Developer settings → OAuth Apps → New OAuth App**.
+2. **Homepage URL:** `https://<your-github-username>.github.io/LearnWithDeiva/`
+   **Authorization callback URL:** `https://<your-ref>.supabase.co/auth/v1/callback`
+3. Copy the **Client ID**, generate a **Client secret**.
+4. Supabase → **Authentication → Providers → GitHub** → enable, paste both → **Save**.
+
+**Google**
+
+1. [Google Cloud Console](https://console.cloud.google.com) → create/select a
+   project (top bar → project dropdown → **New Project**).
+2. **APIs & Services → OAuth consent screen** → **User type: External** →
+   **Create**. Fill in app name + your support/developer emails → **Save**.
+   - While the app is in **Testing** mode, only emails added under **Test
+     users** can sign in — add your own Google email there. Click **Publish
+     app** to allow anyone.
+3. **APIs & Services → Credentials → + Create Credentials → OAuth client ID →
+   Web application**:
+   - **Authorized JavaScript origins:** `http://localhost:5173` and
+     `https://<your-github-username>.github.io`
+   - **Authorized redirect URI:** `https://<your-ref>.supabase.co/auth/v1/callback`
+4. **Create**, then copy the **Client ID** + **Client secret** from the dialog
+   (re-openable later from the Credentials list).
+5. Supabase → **Authentication → Providers → Google** → enable, paste both →
+   **Save**.
+
+Then tell the app which buttons to show by listing the enabled providers in your
+env — and as a repo **Variable** for the live site (see Step 6):
+
+```bash
+VITE_OAUTH_PROVIDERS=google,github
+```
+
+Leave it empty to hide the social buttons entirely. Buttons only appear for the
+providers you list here, so users never hit the "not enabled" error. Restart
+`npm run dev` after editing `.env`.
+
+> **`redirect_uri_mismatch`?** The redirect URI must be *exactly* the Supabase
+> callback above — `https`, no trailing slash, correct project ref.
+
 ### Step 5 — Add the keys for local dev
 
 Copy `.env.example` to `.env` (the `.env` file is gitignored — never commit it)
@@ -176,19 +227,26 @@ Then **restart** `npm run dev` (Vite reads env vars only at startup). A
 
 ### Step 6 — Add the keys for GitHub Pages
 
-The cloud build doesn't see your local `.env`, so add the keys as repo secrets:
+The cloud build doesn't see your local `.env`, so add the values in the repo:
+Repo → **Settings** → **Secrets and variables** → **Actions**.
 
-Repo → **Settings** → **Secrets and variables** → **Actions** →
-**New repository secret** (create both):
+On the **Secrets** tab → **New repository secret** (create both):
 
 | Name | Value |
 |------|-------|
 | `VITE_SUPABASE_URL` | your Project URL |
 | `VITE_SUPABASE_ANON_KEY` | your anon / publishable key |
 
-The deploy workflow (`.github/workflows/deploy.yml`) already forwards them to
-the build. Push to `main` (or re-run the latest **Actions** workflow) to deploy
-with login enabled.
+If you enabled social logins (Step 4b), also add this on the **Variables** tab
+(it's not secret) → **New repository variable**:
+
+| Name | Value |
+|------|-------|
+| `VITE_OAUTH_PROVIDERS` | e.g. `google` or `google,github` |
+
+The deploy workflow (`.github/workflows/deploy.yml`) already forwards all of
+these to the build. Push to `main` (or re-run the latest **Actions** workflow)
+to deploy with login enabled.
 
 > The publishable key **will be visible** in the deployed JS — that's by
 > design and safe, because Row Level Security ensures each user can only
@@ -213,9 +271,11 @@ with login enabled.
   **Authentication → Providers → Email → "Confirm email"**.
 - **Login works locally but not live** → repo secrets not set, or you need to
   re-run the deploy after adding them.
-- **Google/GitHub buttons error** → those providers must be enabled and
-  configured under **Authentication → Providers** (each needs its own OAuth
-  client). Email/password and magic links need no extra setup.
+- **`provider is not enabled` / Google-GitHub buttons error** → that provider
+  isn't configured under **Authentication → Providers** (each needs its own
+  OAuth client — see Step 4b). Only list configured providers in
+  `VITE_OAUTH_PROVIDERS` so the buttons don't show before they work.
+  Email/password and magic links need no extra setup.
 
 ## Deployment (GitHub Pages)
 
