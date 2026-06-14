@@ -81,14 +81,12 @@ export function SubjectPage() {
               </span>
             ))}
           </div>
-          {completedInSubject(subject.id) > 0 && (
-            <div className="mt-5 max-w-md">
-              <ProgressBar
-                value={completedInSubject(subject.id)}
-                total={subject.topicCount}
-              />
-            </div>
-          )}
+          <div className="mt-5 max-w-md">
+            <ProgressBar
+              value={completedInSubject(subject.id)}
+              total={subject.topicCount}
+            />
+          </div>
         </Container>
       </section>
 

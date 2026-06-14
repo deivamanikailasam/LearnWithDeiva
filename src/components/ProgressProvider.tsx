@@ -5,6 +5,7 @@ import {
   topicKey,
   type ProgressContextValue,
 } from '../lib/progressContext'
+import { flattenTopics, getSubject } from '../content/registry'
 
 const COMPLETED_KEY = 'lwd-completed'
 const BOOKMARKS_KEY = 'lwd-bookmarks'
@@ -55,8 +56,17 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       toggleComplete: (s, t) => toggle(setCompleted, topicKey(s, t)),
       isBookmarked: (s, t) => bookmarks.has(topicKey(s, t)),
       toggleBookmark: (s, t) => toggle(setBookmarks, topicKey(s, t)),
-      completedInSubject: (s) =>
-        [...completed].filter((k) => k.startsWith(`${s}::`)).length,
+      // Count only topics that currently exist, so the number stays in sync
+      // with the content whenever topics/subtopics are added or removed
+      // (and stale localStorage keys never inflate the total).
+      completedInSubject: (s) => {
+        const subject = getSubject(s)
+        if (!subject) return 0
+        return flattenTopics(subject).reduce(
+          (n, t) => (completed.has(topicKey(s, t.id)) ? n + 1 : n),
+          0,
+        )
+      },
     }),
     [completed, bookmarks, toggle],
   )

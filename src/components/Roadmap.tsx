@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import type { Roadmap as RoadmapData, RoadmapNode } from '../types/content'
 import { paths } from '../lib/paths'
+import { useProgress } from '../lib/progressContext'
 
 function NodeCard({
   subjectId,
@@ -10,7 +11,9 @@ function NodeCard({
   subjectId: string
   node: RoadmapNode
 }) {
+  const { isComplete } = useProgress()
   const optional = node.status === 'optional'
+  const done = node.topicId ? isComplete(subjectId, node.topicId) : false
   const inner = (
     <div
       className={clsx(
@@ -18,13 +21,25 @@ function NodeCard({
         node.topicId
           ? 'cursor-pointer hover:-translate-y-0.5 hover:shadow-md'
           : 'opacity-90',
-        optional
-          ? 'border-dashed border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-900/50'
-          : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900',
+        done
+          ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-500/40 dark:bg-emerald-500/10'
+          : optional
+            ? 'border-dashed border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-900/50'
+            : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900',
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <p className="font-semibold">{node.title}</p>
+        <p className="flex items-center gap-2 font-semibold">
+          {done && (
+            <span
+              className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-500 text-xs text-white"
+              title="Completed"
+            >
+              ✓
+            </span>
+          )}
+          {node.title}
+        </p>
         {optional ? (
           <span className="chip">optional</span>
         ) : (
