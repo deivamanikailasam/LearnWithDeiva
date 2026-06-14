@@ -6,7 +6,7 @@ import { Breadcrumb } from '../components/Breadcrumb'
 import { Roadmap } from '../components/Roadmap'
 import { TopicTree } from '../components/TopicTree'
 import { ProgressBar } from '../components/ProgressBar'
-import { getSubject } from '../content/registry'
+import { getSubject, subjectLevelRange } from '../content/registry'
 import { paths } from '../lib/paths'
 import { useProgress } from '../lib/progressContext'
 
@@ -33,6 +33,9 @@ export function SubjectPage() {
     { id: 'roadmap', label: '🗺️ Roadmap', hidden: !subject.roadmap },
     { id: 'topics', label: '📚 All Topics' },
   ]
+
+  const range = subjectLevelRange(subject)
+  const levelLabel = range.min === range.max ? range.min : `${range.min} – ${range.max}`
 
   return (
     <div>
@@ -70,7 +73,7 @@ export function SubjectPage() {
             {subject.description}
           </p>
           <div className="mt-5 flex flex-wrap items-center gap-2">
-            <span className="chip capitalize">⚡ {subject.level}</span>
+            <span className="chip capitalize">⚡ {levelLabel}</span>
             <span className="chip">📚 {subject.topicCount} topics</span>
             {subject.estimatedHours ? (
               <span className="chip">⏱️ ~{subject.estimatedHours} hours</span>

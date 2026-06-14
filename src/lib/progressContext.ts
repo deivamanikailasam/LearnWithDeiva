@@ -10,12 +10,17 @@ import { createContext, useContext } from 'react'
 export type SyncStatus = 'local' | 'syncing' | 'synced' | 'error'
 
 export interface ProgressContextValue {
-  /** Set of "subjectId::topicId" keys for completed topics. */
-  completed: Set<string>
+  /**
+   * Map of "subjectId::topicId" → completion timestamp (epoch ms). A timestamp
+   * of `0` means the completion time is unknown (e.g. migrated legacy data).
+   */
+  completed: Map<string, number>
   /** Set of "subjectId::topicId" keys for bookmarked topics. */
   bookmarks: Set<string>
   isComplete: (subjectId: string, topicId: string) => boolean
   toggleComplete: (subjectId: string, topicId: string) => void
+  /** Epoch ms when the topic was marked complete, or undefined if not/unknown. */
+  completedAt: (subjectId: string, topicId: string) => number | undefined
   isBookmarked: (subjectId: string, topicId: string) => boolean
   toggleBookmark: (subjectId: string, topicId: string) => void
   completedInSubject: (subjectId: string) => number

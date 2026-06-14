@@ -58,6 +58,8 @@ export interface TopicMeta {
   tags: string[]
   /** When set, this topic is a subtopic of another topic in the subject. */
   parentId?: string
+  /** Explicit learning time in hours. When absent it is estimated by level. */
+  hours?: number
 }
 
 /* ------------------------------------------------------------------ */

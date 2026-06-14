@@ -2,7 +2,17 @@ import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import type { Roadmap as RoadmapData, RoadmapNode } from '../types/content'
 import { paths } from '../lib/paths'
+import { getTopic } from '../content/registry'
 import { useProgress } from '../lib/progressContext'
+
+const levelStyles: Record<string, string> = {
+  beginner:
+    'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300',
+  intermediate:
+    'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300',
+  advanced:
+    'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300',
+}
 
 function NodeCard({
   subjectId,
@@ -14,6 +24,9 @@ function NodeCard({
   const { isComplete } = useProgress()
   const optional = node.status === 'optional'
   const done = node.topicId ? isComplete(subjectId, node.topicId) : false
+  const linked = node.topicId ? getTopic(subjectId, node.topicId) : undefined
+  const level = linked?.topic.level
+  const subCount = linked?.topic.subtopics.length ?? 0
   const inner = (
     <div
       className={clsx(
@@ -50,6 +63,16 @@ function NodeCard({
       </div>
       {node.description && (
         <p className="mt-1.5 text-sm text-slate-500">{node.description}</p>
+      )}
+      {(level || subCount > 0) && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          {level && (
+            <span className={clsx('chip capitalize', levelStyles[level] ?? '')}>
+              {level}
+            </span>
+          )}
+          {subCount > 0 && <span className="chip">{subCount} subtopics</span>}
+        </div>
       )}
       {node.topicId && (
         <span className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-brand-600 dark:text-brand-400">

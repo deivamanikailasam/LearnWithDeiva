@@ -1,10 +1,12 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
 import { Breadcrumb } from '../components/Breadcrumb'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionView } from '../components/sections/SectionView'
-import { flattenTopics, getTopic } from '../content/registry'
+import { TopicTree } from '../components/TopicTree'
+import { flattenTopics, getAncestors, getTopic } from '../content/registry'
 import { SECTION_DESCRIPTORS } from '../content/sections'
 import { paths } from '../lib/paths'
 import { useScrollSpy } from '../lib/useScrollSpy'
@@ -13,7 +15,9 @@ import { useProgress } from '../lib/progressContext'
 export function TopicPage() {
   const { subjectId = '', topicId = '' } = useParams()
   const found = getTopic(subjectId, topicId)
-  const { isComplete, toggleComplete, isBookmarked, toggleBookmark } = useProgress()
+  const { isComplete, toggleComplete, isBookmarked, toggleBookmark, completedAt } =
+    useProgress()
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const available = useMemo(
     () =>
@@ -37,10 +41,15 @@ export function TopicPage() {
   }
 
   const { subject, topic } = found
+  const ancestors = getAncestors(subject.id, topic.id)
+  const completedTs = isComplete(subject.id, topic.id)
+    ? completedAt(subject.id, topic.id)
+    : undefined
   const flat = flattenTopics(subject)
   const idx = flat.findIndex((t) => t.id === topic.id)
   const prev = idx > 0 ? flat[idx - 1] : undefined
   const next = idx < flat.length - 1 ? flat[idx + 1] : undefined
+  const hasSections = available.length > 0
 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
@@ -52,6 +61,10 @@ export function TopicPage() {
         items={[
           { label: 'Subjects', to: paths.subjects() },
           { label: subject.title, to: paths.subject(subject.id) },
+          ...ancestors.map((a) => ({
+            label: a.title,
+            to: paths.topic(subject.id, a.id),
+          })),
           { label: topic.title },
         ]}
       />
@@ -72,7 +85,7 @@ export function TopicPage() {
         <div className="mt-4 flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => toggleComplete(subject.id, topic.id)}
+            onClick={() => setConfirmOpen(true)}
             className={
               isComplete(subject.id, topic.id)
                 ? 'btn bg-emerald-600 text-white hover:bg-emerald-700'
@@ -89,10 +102,16 @@ export function TopicPage() {
             {isBookmarked(subject.id, topic.id) ? '★ Bookmarked' : '☆ Bookmark'}
           </button>
         </div>
+        {completedTs && (
+          <p className="mt-2 text-sm text-emerald-600 dark:text-emerald-400">
+            ✓ Completed on {new Date(completedTs).toLocaleString()}
+          </p>
+        )}
       </header>
 
       <div className="mt-8 gap-10 lg:flex">
         {/* Sticky section navigator */}
+        {hasSections && (
         <aside className="mb-8 lg:order-2 lg:mb-0 lg:w-60 lg:shrink-0">
           <nav className="lg:sticky lg:top-24">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
@@ -122,24 +141,27 @@ export function TopicPage() {
             </ul>
           </nav>
         </aside>
+        )}
 
         {/* Sections */}
         <div className="min-w-0 flex-1 lg:order-1">
           {topic.subtopics.length > 0 && (
-            <div className="mb-8 rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
-              <p className="mb-2 text-sm font-semibold">Subtopics</p>
-              <div className="flex flex-wrap gap-2">
-                {topic.subtopics.map((sub) => (
-                  <Link
-                    key={sub.id}
-                    to={paths.topic(subject.id, sub.id)}
-                    className="chip hover:border-brand-300 hover:text-brand-600"
-                  >
-                    {sub.title} →
-                  </Link>
-                ))}
+            <section className="mb-10">
+              <div className="mb-3 flex items-baseline justify-between gap-3">
+                <h2 className="flex items-center gap-2 text-2xl font-bold">
+                  <span>🧭</span> Subtopics
+                </h2>
+                <span className="text-sm text-slate-400">
+                  {topic.subtopics.length} direct ·{' '}
+                  {flattenTopics({ ...subject, topics: topic.subtopics }).length} total
+                </span>
               </div>
-            </div>
+              <TopicTree
+                subjectId={subject.id}
+                topics={topic.subtopics}
+                defaultExpanded={!hasSections && topic.subtopics.length <= 12}
+              />
+            </section>
           )}
 
           <div className="space-y-12">
@@ -178,6 +200,37 @@ export function TopicPage() {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        tone={isComplete(subject.id, topic.id) ? 'danger' : 'default'}
+        title={
+          isComplete(subject.id, topic.id)
+            ? 'Remove completion?'
+            : 'Mark as complete?'
+        }
+        message={
+          isComplete(subject.id, topic.id) ? (
+            <>
+              This removes <span className="font-semibold">{topic.title}</span> from
+              your completed list.
+            </>
+          ) : (
+            <>
+              This records <span className="font-semibold">{topic.title}</span> as
+              completed with the current date and time.
+            </>
+          )
+        }
+        confirmLabel={
+          isComplete(subject.id, topic.id) ? 'Remove' : 'Mark complete'
+        }
+        onConfirm={() => {
+          toggleComplete(subject.id, topic.id)
+          setConfirmOpen(false)
+        }}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </Container>
   )
 }

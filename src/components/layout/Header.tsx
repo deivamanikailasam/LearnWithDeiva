@@ -7,6 +7,7 @@ import { UserMenu } from '../auth/UserMenu'
 const navItems = [
   { to: paths.home(), label: 'Home', end: true },
   { to: paths.subjects(), label: 'Subjects', end: false },
+  { to: paths.calendar(), label: 'Calendar', end: false },
 ]
 
 export function Header() {

@@ -5,7 +5,8 @@ import { Link } from 'react-router-dom'
 import { Container } from '../components/Container'
 import { ProgressBar } from '../components/ProgressBar'
 import { SyncIndicator } from '../components/SyncIndicator'
-import { subjects, getTopic } from '../content/registry'
+import { subjects, getTopic, getAncestors } from '../content/registry'
+import type { Subject, Topic } from '../types/content'
 import { paths } from '../lib/paths'
 import { useAuth } from '../lib/authContext'
 import { useProgress } from '../lib/progressContext'
@@ -17,16 +18,38 @@ const AuthModal = lazy(() =>
 const inputClass =
   'w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none transition focus:border-brand-400 focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-800'
 
-function resolveKeys(keys: Set<string>) {
-  return [...keys]
-    .map((key) => {
-      const [subjectId, topicId] = key.split('::')
-      return getTopic(subjectId, topicId)
-    })
-    .filter((x): x is NonNullable<typeof x> => Boolean(x))
+interface ResolvedTopic {
+  key: string
+  subject: Subject
+  topic: Topic
+  /** Root → … → direct parent, for showing the full path. */
+  ancestors: Topic[]
+  /** Epoch ms the topic was completed (only set for the completed list). */
+  completedAt?: number
 }
 
-type ResolvedTopic = NonNullable<ReturnType<typeof getTopic>>
+function resolveKeys(keys: Iterable<string>): ResolvedTopic[] {
+  return [...keys]
+    .map((key): ResolvedTopic | undefined => {
+      const sep = key.indexOf('::')
+      if (sep === -1) return undefined
+      const subjectId = key.slice(0, sep)
+      const topicId = key.slice(sep + 2)
+      const found = getTopic(subjectId, topicId)
+      if (!found) return undefined
+      return { key, ...found, ancestors: getAncestors(subjectId, topicId) }
+    })
+    .filter((x): x is ResolvedTopic => Boolean(x))
+}
+
+function formatDate(ms?: number): string | undefined {
+  if (!ms) return undefined
+  return new Date(ms).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
 
 export function AccountPage() {
   const { enabled, loading, user, signOut } = useAuth()
@@ -34,7 +57,13 @@ export function AccountPage() {
     useProgress()
   const [authOpen, setAuthOpen] = useState(false)
 
-  const completedTopics = useMemo(() => resolveKeys(completed), [completed])
+  const completedTopics = useMemo(
+    () =>
+      resolveKeys(completed.keys())
+        .map((r) => ({ ...r, completedAt: completed.get(r.key) }))
+        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0)),
+    [completed],
+  )
   const bookmarkedTopics = useMemo(() => resolveKeys(bookmarks), [bookmarks])
 
   const onClearCompleted = () => {
@@ -286,19 +315,29 @@ function TopicLinkList({ items, empty }: { items: ResolvedTopic[]; empty: string
     )
   return (
     <div className="grid gap-2 sm:grid-cols-2">
-      {items.map(({ subject, topic }) => (
-        <Link
-          key={`${subject.id}-${topic.id}`}
-          to={paths.topic(subject.id, topic.id)}
-          className="card flex items-center justify-between gap-2 p-3"
-        >
-          <span className="min-w-0">
-            <span className="block text-xs text-slate-400">{subject.title}</span>
-            <span className="block truncate font-medium">{topic.title}</span>
-          </span>
-          <span className="shrink-0 text-slate-300">→</span>
-        </Link>
-      ))}
+      {items.map(({ subject, topic, ancestors, completedAt }) => {
+        const date = formatDate(completedAt)
+        return (
+          <Link
+            key={`${subject.id}-${topic.id}`}
+            to={paths.topic(subject.id, topic.id)}
+            className="card flex items-center justify-between gap-2 p-3"
+          >
+            <span className="min-w-0">
+              <span className="block truncate text-xs text-slate-400">
+                {[subject.title, ...ancestors.map((a) => a.title)].join(' › ')}
+              </span>
+              <span className="block truncate font-medium">{topic.title}</span>
+              {date && (
+                <span className="mt-0.5 block text-xs text-emerald-600 dark:text-emerald-400">
+                  ✓ Completed {date}
+                </span>
+              )}
+            </span>
+            <span className="chip shrink-0 capitalize">{topic.level}</span>
+          </Link>
+        )
+      })}
     </div>
   )
 }

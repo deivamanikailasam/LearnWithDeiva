@@ -8,6 +8,7 @@
  * tree consumed by the rest of the app.
  */
 import type {
+  Difficulty,
   Roadmap,
   SectionKey,
   Subject,
@@ -118,8 +119,38 @@ function buildRegistry(): Subject[] {
 
 export const subjects: Subject[] = buildRegistry()
 
+const subjectById = new Map(subjects.map((s) => [s.id, s]))
+
+/**
+ * Flat lookup indexes built once at module load so resolving a topic (or its
+ * ancestor chain) is O(1) — important now that subjects can hold thousands of
+ * deeply nested topics and pages like /account resolve many keys at once.
+ */
+interface TopicEntry {
+  subject: Subject
+  topic: Topic
+  parent?: Topic
+  /** Root → … → direct parent (excludes the topic itself). */
+  ancestors: Topic[]
+}
+const topicIndex = new Map<string, TopicEntry>()
+for (const subject of subjects) {
+  const walk = (topics: Topic[], ancestors: Topic[]) => {
+    for (const t of topics) {
+      topicIndex.set(`${subject.id}::${t.id}`, {
+        subject,
+        topic: t,
+        parent: ancestors[ancestors.length - 1],
+        ancestors,
+      })
+      if (t.subtopics.length) walk(t.subtopics, [...ancestors, t])
+    }
+  }
+  walk(subject.topics, [])
+}
+
 export function getSubject(id: string): Subject | undefined {
-  return subjects.find((s) => s.id === id)
+  return subjectById.get(id)
 }
 
 /** Flatten a subject's topic tree (roots + all subtopics) into one list. */
@@ -139,9 +170,39 @@ export function getTopic(
   subjectId: string,
   topicId: string,
 ): { subject: Subject; topic: Topic } | undefined {
-  const subject = getSubject(subjectId)
-  if (!subject) return undefined
-  const topic = flattenTopics(subject).find((t) => t.id === topicId)
-  if (!topic) return undefined
-  return { subject, topic }
+  const entry = topicIndex.get(`${subjectId}::${topicId}`)
+  if (!entry) return undefined
+  return { subject: entry.subject, topic: entry.topic }
+}
+
+/** Root → … → direct parent chain for a topic (empty for top-level topics). */
+export function getAncestors(subjectId: string, topicId: string): Topic[] {
+  return topicIndex.get(`${subjectId}::${topicId}`)?.ancestors ?? []
+}
+
+const LEVEL_ORDER: Record<Difficulty, number> = {
+  beginner: 0,
+  intermediate: 1,
+  advanced: 2,
+}
+const LEVEL_BY_ORDER: Difficulty[] = ['beginner', 'intermediate', 'advanced']
+
+/**
+ * The span of difficulty levels across a subject's topics, e.g.
+ * `{ min: 'beginner', max: 'advanced' }`. A single subject-level label is
+ * misleading when topics range from beginner to advanced.
+ */
+export function subjectLevelRange(subject: Subject): {
+  min: Difficulty
+  max: Difficulty
+} {
+  let min = LEVEL_ORDER.advanced
+  let max = LEVEL_ORDER.beginner
+  for (const t of flattenTopics(subject)) {
+    const o = LEVEL_ORDER[t.level]
+    if (o < min) min = o
+    if (o > max) max = o
+  }
+  if (min > max) return { min: subject.level, max: subject.level }
+  return { min: LEVEL_BY_ORDER[min], max: LEVEL_BY_ORDER[max] }
 }
