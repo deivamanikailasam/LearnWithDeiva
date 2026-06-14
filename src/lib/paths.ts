@@ -7,4 +7,5 @@ export const paths = {
     `/subjects/${subjectId}/topics/${topicId}`,
   search: (query?: string) =>
     query ? `/search?q=${encodeURIComponent(query)}` : '/search',
+  account: () => '/account',
 }

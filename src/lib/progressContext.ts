@@ -1,5 +1,14 @@
 import { createContext, useContext } from 'react'
 
+/**
+ * Where the user's data currently lives / its sync state.
+ * - `local`   — no account; stored only in this browser.
+ * - `syncing` — a cloud write is in flight.
+ * - `synced`  — cloud is up to date.
+ * - `error`   — last cloud write failed (data is still safe locally).
+ */
+export type SyncStatus = 'local' | 'syncing' | 'synced' | 'error'
+
 export interface ProgressContextValue {
   /** Set of "subjectId::topicId" keys for completed topics. */
   completed: Set<string>
@@ -10,6 +19,13 @@ export interface ProgressContextValue {
   isBookmarked: (subjectId: string, topicId: string) => boolean
   toggleBookmark: (subjectId: string, topicId: string) => void
   completedInSubject: (subjectId: string) => number
+  /** Clears all completed topics (and syncs the empty state). */
+  clearCompleted: () => void
+  /** Clears all bookmarks (and syncs the empty state). */
+  clearBookmarks: () => void
+  syncStatus: SyncStatus
+  /** Epoch ms of the last successful cloud sync, or null. */
+  lastSyncedAt: number | null
 }
 
 export function topicKey(subjectId: string, topicId: string): string {

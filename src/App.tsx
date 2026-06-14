@@ -18,6 +18,9 @@ const TopicPage = lazy(() =>
 const SearchPage = lazy(() =>
   import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })),
 )
+const AccountPage = lazy(() =>
+  import('./pages/AccountPage').then((m) => ({ default: m.AccountPage })),
+)
 const NotFoundPage = lazy(() =>
   import('./pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })),
 )
@@ -46,6 +49,7 @@ const router = createHashRouter([
         element: lazyRoute(<TopicPage />),
       },
       { path: '/search', element: lazyRoute(<SearchPage />) },
+      { path: '/account', element: lazyRoute(<AccountPage />) },
       { path: '*', element: lazyRoute(<NotFoundPage />) },
     ],
   },

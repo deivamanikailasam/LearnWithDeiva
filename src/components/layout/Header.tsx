@@ -2,6 +2,7 @@ import { Link, NavLink } from 'react-router-dom'
 import { paths } from '../../lib/paths'
 import { ThemeToggle } from './ThemeToggle'
 import { useSearchPalette } from '../search/searchPaletteContext'
+import { UserMenu } from '../auth/UserMenu'
 
 const navItems = [
   { to: paths.home(), label: 'Home', end: true },
@@ -55,6 +56,7 @@ export function Header() {
         </button>
 
         <ThemeToggle />
+        <UserMenu />
       </div>
     </header>
   )
