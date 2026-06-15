@@ -61,11 +61,15 @@ const SECTION_RANK = new Map(SECTION_ORDER.map((k, i) => [k, i]))
  * Mirrors `SUBJECT_EXTRA_DESCRIPTORS` in src/content/sections.ts.
  */
 const SUBJECT_EXTRA_FILES = [
-  { file: 'interview.json', key: 'interview', section: 'interview-questions', slug: 'interview' },
-  { file: 'scenarios.json', key: 'scenarios', section: 'scenario-questions', slug: 'scenarios' },
-  { file: 'case-studies.json', key: 'caseStudies', section: 'case-studies', slug: 'case-studies' },
-  { file: 'projects.json', key: 'projects', section: 'projects', slug: 'projects' },
-  { file: 'quiz.json', key: 'quiz', section: 'exam-prep', slug: 'quiz' },
+  { file: 'interview.json', key: 'interview', section: 'interview-questions', slug: 'interview', label: 'Interview Prep' },
+  { file: 'scenarios.json', key: 'scenarios', section: 'scenario-questions', slug: 'scenarios', label: 'Scenarios' },
+  { file: 'case-studies.json', key: 'caseStudies', section: 'case-studies', slug: 'case-studies', label: 'Case Studies' },
+  { file: 'projects.json', key: 'projects', section: 'projects', slug: 'projects', label: 'Projects' },
+  { file: 'quiz.json', key: 'quiz', section: 'exam-prep', slug: 'quiz', label: 'Quizzes' },
+  { file: 'resources.json', key: 'resources', slug: 'resources', label: 'Resources' },
+  { file: 'pitfalls.json', key: 'pitfalls', slug: 'pitfalls', label: 'Pitfalls & Best Practices' },
+  { file: 'cheat-sheet.json', key: 'cheatsheet', slug: 'cheat-sheet', label: 'Cheat Sheet' },
+  { file: 'glossary.json', key: 'glossary', slug: 'glossary', label: 'Glossary' },
 ]
 
 const LEVEL_ORDER = { beginner: 0, intermediate: 1, advanced: 2 }
@@ -243,32 +247,47 @@ async function loadSubjectExtras(subjectDir) {
   return extras
 }
 
-/** Pull searchable units out of a subject's extras. */
+/** Pull searchable units out of a subject's extras (works for every category). */
 function extractSubjectExtraDocs(subjectMeta, extras) {
   const docs = []
-  for (const { key, section, slug } of SUBJECT_EXTRA_FILES) {
+  for (const { key, section, slug, label } of SUBJECT_EXTRA_FILES) {
     const data = extras[key]
     if (!data || !Array.isArray(data.items)) continue
     data.items.forEach((it, i) => {
-      const title =
-        it.question ?? it.title ?? `${SECTION_LABELS[section]} ${i + 1}`
-      const text =
+      const title = it.question ?? it.title ?? it.label ?? it.term ?? `${label} ${i + 1}`
+      const text = clip(
         it.answer ??
-        it.description ??
-        `${it.scenario ?? ''} ${it.context ?? ''} ${it.problem ?? ''} ` +
-          `${it.solution ?? ''} ${it.outcome ?? ''} ${it.explanation ?? ''}`
-      docs.push({
+          it.definition ??
+          it.description ??
+          it.why ??
+          [
+            it.scenario,
+            it.context,
+            it.problem,
+            it.solution,
+            it.outcome,
+            it.explanation,
+            it.avoid,
+            it.prefer,
+            it.author,
+            Array.isArray(it.entries) ? it.entries.map((e) => e.label).join(' ') : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
+      )
+      const doc = {
         id: `${subjectMeta.id}/extra/${key}/${i}`,
         type: 'section',
         subjectId: subjectMeta.id,
         subjectTitle: subjectMeta.title,
-        sectionKey: section,
-        sectionLabel: SECTION_LABELS[section],
+        sectionLabel: section ? SECTION_LABELS[section] : label,
         title,
-        text: clip(text),
+        text,
         tags: subjectMeta.tags ?? [],
         url: `/subjects/${subjectMeta.id}/${slug}`,
-      })
+      }
+      if (section) doc.sectionKey = section
+      docs.push(doc)
     })
   }
   return docs

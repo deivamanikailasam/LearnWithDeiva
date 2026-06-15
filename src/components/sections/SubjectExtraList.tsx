@@ -2,14 +2,27 @@ import { Fragment } from 'react'
 import { WindowVirtualizer } from 'virtua'
 import type {
   CaseStudyItem,
+  CheatSheetGroup,
   ExamQuestion,
+  PitfallItem,
   ProjectItem,
   QAItem,
+  ResourceItem,
   ScenarioItem,
-  SectionKey,
+  SubjectExtraKey,
   SubjectExtras,
+  SynonymItem,
 } from '../../types/content'
-import { CaseStudyCard, InterviewQA, ProjectCard, ScenarioCard } from './SectionView'
+import {
+  CaseStudyCard,
+  CheatSheetGroupCard,
+  GlossaryTerm,
+  InterviewQA,
+  PitfallCard,
+  ProjectCard,
+  ResourceCard,
+  ScenarioCard,
+} from './SectionView'
 import { QuizItem } from './QuizItem'
 
 /**
@@ -19,20 +32,37 @@ import { QuizItem } from './QuizItem'
  */
 const VIRTUALIZE_THRESHOLD = 30
 
-type ExtraItem = QAItem | ScenarioItem | CaseStudyItem | ProjectItem | ExamQuestion
+type ExtraItem =
+  | QAItem
+  | ScenarioItem
+  | CaseStudyItem
+  | ProjectItem
+  | ExamQuestion
+  | ResourceItem
+  | PitfallItem
+  | CheatSheetGroup
+  | SynonymItem
 
-function renderItem(sectionKey: SectionKey, item: ExtraItem, index: number) {
-  switch (sectionKey) {
-    case 'interview-questions':
+function renderItem(key: SubjectExtraKey, item: ExtraItem, index: number) {
+  switch (key) {
+    case 'interview':
       return <InterviewQA item={item as QAItem} />
-    case 'scenario-questions':
+    case 'scenarios':
       return <ScenarioCard item={item as ScenarioItem} />
-    case 'case-studies':
+    case 'caseStudies':
       return <CaseStudyCard item={item as CaseStudyItem} />
     case 'projects':
       return <ProjectCard item={item as ProjectItem} />
-    case 'exam-prep':
+    case 'quiz':
       return <QuizItem item={item as ExamQuestion} index={index} />
+    case 'resources':
+      return <ResourceCard item={item as ResourceItem} />
+    case 'pitfalls':
+      return <PitfallCard item={item as PitfallItem} />
+    case 'cheatsheet':
+      return <CheatSheetGroupCard group={item as CheatSheetGroup} />
+    case 'glossary':
+      return <GlossaryTerm item={item as SynonymItem} />
     default:
       return null
   }
@@ -43,11 +73,11 @@ function renderItem(sectionKey: SectionKey, item: ExtraItem, index: number) {
  * (projects in a 2-up grid); large lists are virtualized as a single column.
  */
 export function SubjectExtraList({
-  sectionKey,
+  extraKey,
   data,
 }: {
-  sectionKey: SectionKey
-  data: NonNullable<SubjectExtras[keyof SubjectExtras]>
+  extraKey: SubjectExtraKey
+  data: NonNullable<SubjectExtras[SubjectExtraKey]>
 }) {
   const items = (data.items ?? []) as ExtraItem[]
 
@@ -56,18 +86,18 @@ export function SubjectExtraList({
       <WindowVirtualizer>
         {items.map((item, i) => (
           <div key={i} className="pb-4">
-            {renderItem(sectionKey, item, i)}
+            {renderItem(extraKey, item, i)}
           </div>
         ))}
       </WindowVirtualizer>
     )
   }
 
-  const isGrid = sectionKey === 'projects'
+  const isGrid = extraKey === 'projects' || extraKey === 'glossary'
   return (
     <div className={isGrid ? 'grid gap-4 md:grid-cols-2' : 'space-y-4'}>
       {items.map((item, i) => (
-        <Fragment key={i}>{renderItem(sectionKey, item, i)}</Fragment>
+        <Fragment key={i}>{renderItem(extraKey, item, i)}</Fragment>
       ))}
     </div>
   )

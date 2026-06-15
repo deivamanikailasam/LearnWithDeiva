@@ -38,39 +38,13 @@ export const SECTION_ICONS: Record<SectionKey, string> = Object.fromEntries(
  * source of truth for how this material looks.
  */
 export const SUBJECT_EXTRA_DESCRIPTORS: SubjectExtraDescriptor[] = [
-  {
-    key: 'interview',
-    slug: 'interview',
-    label: 'Interview Prep',
-    icon: '🎤',
-    sectionKey: 'interview-questions',
-  },
-  {
-    key: 'scenarios',
-    slug: 'scenarios',
-    label: 'Scenarios',
-    icon: '🧩',
-    sectionKey: 'scenario-questions',
-  },
-  {
-    key: 'caseStudies',
-    slug: 'case-studies',
-    label: 'Case Studies',
-    icon: '📊',
-    sectionKey: 'case-studies',
-  },
-  {
-    key: 'projects',
-    slug: 'projects',
-    label: 'Projects',
-    icon: '🛠️',
-    sectionKey: 'projects',
-  },
-  {
-    key: 'quiz',
-    slug: 'quiz',
-    label: 'Quizzes',
-    icon: '📝',
-    sectionKey: 'exam-prep',
-  },
+  { key: 'interview', slug: 'interview', label: 'Interview Prep', icon: '🎤' },
+  { key: 'scenarios', slug: 'scenarios', label: 'Scenarios', icon: '🧩' },
+  { key: 'caseStudies', slug: 'case-studies', label: 'Case Studies', icon: '📊' },
+  { key: 'projects', slug: 'projects', label: 'Projects', icon: '🛠️' },
+  { key: 'quiz', slug: 'quiz', label: 'Quizzes', icon: '📝' },
+  { key: 'resources', slug: 'resources', label: 'Resources', icon: '📚' },
+  { key: 'pitfalls', slug: 'pitfalls', label: 'Pitfalls & Best Practices', icon: '⚠️' },
+  { key: 'cheatsheet', slug: 'cheat-sheet', label: 'Cheat Sheet', icon: '📋' },
+  { key: 'glossary', slug: 'glossary', label: 'Glossary', icon: '🔤' },
 ]

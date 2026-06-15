@@ -181,6 +181,52 @@ export interface CoursePrepSection {
   modules: CourseModule[]
 }
 
+/* ----- subject-level-only payloads (no per-topic equivalent) ----- */
+
+/** Subject-wide glossary; reuses the topic-level term/definition shape. */
+export interface GlossarySection {
+  items: SynonymItem[]
+}
+
+export interface ResourceItem {
+  title: string
+  type: 'article' | 'video' | 'book' | 'course' | 'docs' | 'tool' | 'reference'
+  url: string
+  description?: string
+  author?: string
+}
+export interface ResourcesSection {
+  items: ResourceItem[]
+}
+
+export interface PitfallItem {
+  title: string
+  /** The mistake / anti-pattern to avoid. */
+  avoid: string
+  /** The recommended approach. */
+  prefer: string
+  /** Why it matters. */
+  why?: string
+}
+export interface PitfallsSection {
+  items: PitfallItem[]
+}
+
+export interface CheatSheetEntry {
+  label: string
+  code?: string
+  language?: string
+  note?: string
+}
+export interface CheatSheetGroup {
+  title: string
+  entries: CheatSheetEntry[]
+}
+export interface CheatSheetSection {
+  /** Grouped quick-reference entries; one virtualized card per group. */
+  items: CheatSheetGroup[]
+}
+
 /** Discriminated union of all section kinds, keyed by file name. */
 export interface TopicSections {
   explanation?: ExplanationSection
@@ -212,6 +258,10 @@ export interface SubjectExtras {
   caseStudies?: CaseStudiesSection
   projects?: ProjectsSection
   quiz?: ExamPrepSection
+  resources?: ResourcesSection
+  pitfalls?: PitfallsSection
+  cheatsheet?: CheatSheetSection
+  glossary?: GlossarySection
 }
 
 export type SubjectExtraKey = keyof SubjectExtras
@@ -225,15 +275,13 @@ export interface SubjectExtrasManifest {
   counts: Partial<Record<SubjectExtraKey, number>>
 }
 
-/** UI metadata for a subject-level extra: its tab, URL slug and renderer. */
+/** UI metadata for a subject-level extra: its tab and URL slug. */
 export interface SubjectExtraDescriptor {
   key: SubjectExtraKey
   /** URL segment under `/subjects/:id/`. */
   slug: string
   label: string
   icon: string
-  /** The existing topic-section renderer this extra reuses. */
-  sectionKey: SectionKey
 }
 
 /* ------------------------------------------------------------------ */

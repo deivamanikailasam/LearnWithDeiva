@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
@@ -39,6 +39,20 @@ export function SubjectPage() {
     () => SUBJECT_EXTRA_DESCRIPTORS.find((d) => d.slug === view),
     [view],
   )
+
+  // When the user switches tabs, bring the tab bar to the top of the viewport
+  // (just below the sticky header) so the selected content is immediately
+  // visible — instead of `ScrollRestoration` snapping back to the hero. We
+  // skip the first render so landing on the page still shows the hero.
+  const tabBarRef = useRef<HTMLDivElement>(null)
+  const isInitialView = useRef(true)
+  useEffect(() => {
+    if (isInitialView.current) {
+      isInitialView.current = false
+      return
+    }
+    tabBarRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [view])
 
   // Only the active category's items are fetched, and only when its tab is open.
   const { data: extraData, loading: extraLoading } = useAsync(
@@ -155,7 +169,10 @@ export function SubjectPage() {
 
       {/* Tabs */}
       <Container className="py-8">
-        <div className="mb-6 flex flex-wrap gap-1 rounded-xl border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900">
+        <div
+          ref={tabBarRef}
+          className="mb-6 flex scroll-mt-20 flex-wrap gap-1 rounded-xl border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900"
+        >
           {tabs
             .filter((t) => !t.hidden)
             .map((t) => (
@@ -201,7 +218,7 @@ export function SubjectPage() {
                 <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
               </div>
             ) : (extraData?.items.length ?? 0) > 0 ? (
-              <SubjectExtraList sectionKey={activeExtra.sectionKey} data={extraData!} />
+              <SubjectExtraList extraKey={activeExtra.key} data={extraData!} />
             ) : (
               <div className="card grid place-items-center p-12 text-center">
                 <p className="text-4xl">{activeExtra.icon}</p>
