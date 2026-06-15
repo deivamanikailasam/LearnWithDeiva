@@ -225,13 +225,13 @@ export function CalendarPage() {
   }
 
   return (
-    <Container className="py-8">
-      <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
+    <Container className="py-6 sm:py-8">
+      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <button
             type="button"
             onClick={goToday}
-            className="rounded-lg border border-slate-200 px-3.5 py-1.5 text-sm font-semibold transition hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+            className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold transition hover:bg-slate-50 sm:px-3.5 dark:border-slate-700 dark:hover:bg-slate-800"
           >
             Today
           </button>
@@ -243,7 +243,7 @@ export function CalendarPage() {
               ›
             </NavBtn>
           </div>
-          <h1 className="text-lg font-bold tracking-tight sm:text-xl">{title}</h1>
+          <h1 className="text-base font-bold tracking-tight sm:text-xl">{title}</h1>
         </div>
 
         <ViewSwitcher view={view} onChange={setView} />
@@ -302,21 +302,20 @@ function StatsBar({
     },
   ]
   return (
-    <div className="mb-5 flex flex-wrap gap-3">
+    <div className="mb-5 grid grid-cols-2 gap-2.5 sm:flex sm:flex-wrap sm:gap-3">
       {items.map((i) => (
         <div
           key={i.label}
-          style={{ flex: '1 1 160px', minWidth: 150 }}
-          className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+          className="flex flex-1 items-center gap-2.5 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:gap-3 sm:p-4 sm:min-w-[150px] sm:basis-[160px] dark:border-slate-800 dark:bg-slate-900"
         >
-          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-lg dark:bg-brand-500/10">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-50 text-base sm:h-10 sm:w-10 sm:text-lg dark:bg-brand-500/10">
             {i.icon}
           </span>
           <div className="min-w-0">
-            <div className="text-xl font-extrabold leading-none text-brand-600 dark:text-brand-400">
+            <div className="text-lg font-extrabold leading-none text-brand-600 sm:text-xl dark:text-brand-400">
               {i.value}
             </div>
-            <div className="mt-1 truncate text-xs font-medium text-slate-500">
+            <div className="mt-1 text-xs font-medium leading-tight text-slate-500">
               {i.label}
             </div>
           </div>
@@ -402,9 +401,10 @@ function MonthGrid({
         {WEEKDAYS.map((w) => (
           <div
             key={w}
-            className="py-2 text-center text-xs font-semibold uppercase tracking-wide text-slate-400"
+            className="py-2 text-center text-[10px] font-semibold uppercase tracking-wide text-slate-400 sm:text-xs"
           >
-            {w}
+            <span className="hidden xs:inline">{w}</span>
+            <span className="xs:hidden">{w.charAt(0)}</span>
           </div>
         ))}
       </div>
@@ -417,9 +417,8 @@ function MonthGrid({
           return (
             <div
               key={k}
-              style={{ minHeight: 118 }}
               className={clsx(
-                'flex flex-col gap-1 border-b border-r border-slate-100 p-2 dark:border-slate-800/70',
+                'flex min-h-[64px] flex-col gap-1 border-b border-r border-slate-100 p-1 sm:min-h-[118px] sm:p-2 dark:border-slate-800/70',
                 i % 7 === 6 && 'border-r-0',
                 !inMonth && 'bg-slate-50/60 dark:bg-slate-950/30',
               )}
@@ -427,9 +426,8 @@ function MonthGrid({
               <button
                 type="button"
                 onClick={() => onOpenDay(date)}
-                style={{ height: 28, width: 28 }}
                 className={clsx(
-                  'grid shrink-0 place-items-center rounded-full text-sm font-semibold transition',
+                  'grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-semibold transition sm:h-7 sm:w-7 sm:text-sm',
                   isToday
                     ? 'bg-brand-500 text-white'
                     : inMonth
@@ -439,7 +437,32 @@ function MonthGrid({
               >
                 {date.getDate()}
               </button>
-              <div className="flex flex-col gap-1">
+
+              {/* Compact dot indicator for very small screens */}
+              {events.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onOpenDay(date)}
+                  aria-label={`${events.length} item${events.length === 1 ? '' : 's'}`}
+                  className="flex items-center gap-0.5 self-start rounded px-0.5 sm:hidden"
+                >
+                  {events.slice(0, 3).map((e) => (
+                    <span
+                      key={e.key}
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: accentOf(e.subject) }}
+                    />
+                  ))}
+                  {events.length > 3 && (
+                    <span className="text-[9px] font-semibold text-slate-500">
+                      +{events.length - 3}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {/* Pill list for ≥sm screens */}
+              <div className="hidden flex-col gap-1 sm:flex">
                 {events.slice(0, 3).map((e) => (
                   <EventPill key={e.key} entry={e} />
                 ))}
@@ -522,10 +545,10 @@ function TimeGrid({
 
   return (
     <div className="overflow-x-auto">
-      <div style={days.length > 1 ? { minWidth: 680 } : undefined}>
+      <div style={days.length > 1 ? { minWidth: 600 } : undefined}>
         {/* day headers */}
         <div className="flex border-b border-slate-200 dark:border-slate-800">
-          <div className="w-16 shrink-0" />
+          <div className="w-12 shrink-0 sm:w-16" />
           <div
             className="grid flex-1"
             style={{ gridTemplateColumns: `repeat(${days.length}, minmax(0, 1fr))` }}
@@ -539,12 +562,12 @@ function TimeGrid({
                   onClick={() => onOpenDay(d)}
                   className="flex flex-col items-center gap-1 border-l border-slate-100 py-2 transition hover:bg-slate-50 dark:border-slate-800/70 dark:hover:bg-slate-800/40"
                 >
-                  <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400 sm:text-xs">
                     {WEEKDAYS[d.getDay()]}
                   </span>
                   <span
                     className={clsx(
-                      'grid h-8 w-8 place-items-center rounded-full text-sm font-bold',
+                      'grid h-7 w-7 place-items-center rounded-full text-xs font-bold sm:h-8 sm:w-8 sm:text-sm',
                       isToday
                         ? 'bg-brand-500 text-white'
                         : 'text-slate-700 dark:text-slate-200',
@@ -561,7 +584,7 @@ function TimeGrid({
         {/* time grid */}
         <div className="flex">
           {/* hour gutter */}
-          <div className="w-16 shrink-0">
+          <div className="w-12 shrink-0 sm:w-16">
             {hours.map((h) => (
               <div
                 key={h}
@@ -569,8 +592,8 @@ function TimeGrid({
                 className="relative"
               >
                 <span
-                  style={{ top: -8, right: 8 }}
-                  className="absolute text-xs text-slate-400"
+                  style={{ top: -8 }}
+                  className="absolute right-1.5 text-[10px] text-slate-400 sm:right-2 sm:text-xs"
                 >
                   {hourLabel(h)}
                 </span>

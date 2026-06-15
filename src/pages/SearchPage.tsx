@@ -48,30 +48,30 @@ export function SearchPage() {
   }
 
   return (
-    <Container className="py-10">
-      <h1 className="text-3xl font-extrabold">Search</h1>
+    <Container className="py-6 sm:py-10">
+      <h1 className="text-2xl font-extrabold sm:text-3xl">Search</h1>
 
-      <div className="mt-5 flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-1 focus-within:border-brand-400 dark:border-slate-700 dark:bg-slate-900">
+      <div className="mt-4 flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-1 focus-within:border-brand-400 sm:mt-5 sm:px-4 dark:border-slate-700 dark:bg-slate-900">
         <span className="text-slate-400">🔍</span>
         <input
           autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search subjects, topics, code, questions…"
-          className="flex-1 bg-transparent py-3 text-base outline-none placeholder:text-slate-400"
+          className="flex-1 bg-transparent py-2.5 text-sm outline-none placeholder:text-slate-400 sm:py-3 sm:text-base"
         />
       </div>
 
       {/* Filters */}
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900">
+      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="inline-flex w-full overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 sm:w-auto dark:border-slate-800 dark:bg-slate-900">
           {typeFilters.map((f) => (
             <button
               key={f.id}
               type="button"
               onClick={() => setType(f.id)}
               className={clsx(
-                'rounded-lg px-3 py-1.5 text-sm font-medium transition',
+                'flex-1 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition sm:flex-initial',
                 type === f.id
                   ? 'bg-brand-600 text-white'
                   : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800',
@@ -88,7 +88,7 @@ export function SearchPage() {
         <select
           value={subjectId}
           onChange={(e) => setSubjectId(e.target.value)}
-          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-slate-700 dark:bg-slate-900"
+          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none sm:w-auto dark:border-slate-700 dark:bg-slate-900"
         >
           <option value="">All subjects</option>
           {subjects?.map((s) => (

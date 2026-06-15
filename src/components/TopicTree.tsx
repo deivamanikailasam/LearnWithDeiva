@@ -72,7 +72,7 @@ function TopicNode({
         <Link
           to={paths.topic(subjectId, topic.id)}
           className={clsx(
-            'flex flex-1 items-center justify-between gap-3 rounded-xl border p-3.5 transition hover:shadow-md',
+            'flex min-w-0 flex-1 items-center justify-between gap-2 rounded-xl border p-3 transition hover:shadow-md sm:gap-3 sm:p-3.5',
             isActive
               ? 'border-brand-300 bg-brand-50 dark:border-brand-500/40 dark:bg-brand-500/10'
               : done
@@ -122,7 +122,7 @@ function TopicNode({
       </div>
 
       {hasChildren && expanded && (
-        <ul className="ml-4 mt-2 space-y-2 border-l border-slate-200 pl-4 dark:border-slate-800">
+        <ul className="ml-2 mt-2 space-y-2 border-l border-slate-200 pl-2 sm:ml-4 sm:pl-4 dark:border-slate-800">
           {topic.subtopics.map((sub) => (
             <TopicNode
               key={sub.id}

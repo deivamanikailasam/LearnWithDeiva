@@ -59,29 +59,33 @@ export function CodeBlock({
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-800 bg-[#282c34]">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2">
-        <span className="text-xs font-medium text-slate-400">{title ?? language}</span>
+      <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2 sm:px-4">
+        <span className="truncate text-xs font-medium text-slate-400">
+          {title ?? language}
+        </span>
         <button
           type="button"
           onClick={copy}
-          className="rounded-md px-2 py-1 text-xs font-semibold text-slate-300 transition hover:bg-white/10"
+          className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-slate-300 transition hover:bg-white/10"
         >
           {copied ? '✓ Copied' : 'Copy'}
         </button>
       </div>
-      <SyntaxHighlighter
-        language={language}
-        style={oneDark}
-        customStyle={{
-          margin: 0,
-          background: 'transparent',
-          fontSize: '0.85rem',
-          padding: '1rem',
-        }}
-        codeTagProps={{ style: { fontFamily: 'var(--font-mono, monospace)' } }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      <div className="overflow-x-auto">
+        <SyntaxHighlighter
+          language={language}
+          style={oneDark}
+          customStyle={{
+            margin: 0,
+            background: 'transparent',
+            fontSize: '0.8rem',
+            padding: '0.875rem',
+          }}
+          codeTagProps={{ style: { fontFamily: 'var(--font-mono, monospace)' } }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
     </div>
   )
 }

@@ -54,14 +54,14 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/50 px-4 pt-[12vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/50 px-3 pt-4 backdrop-blur-sm sm:px-4 sm:pt-[12vh]"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl sm:max-h-[80vh] dark:border-slate-700 dark:bg-slate-900"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
+        <div className="flex items-center gap-3 border-b border-slate-200 px-3 sm:px-4 dark:border-slate-800">
           <span className="text-slate-400">🔍</span>
           <input
             ref={inputRef}
@@ -71,15 +71,23 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
               setActive(0)
             }}
             onKeyDown={onKeyDown}
-            placeholder="Search subjects, topics, code, questions…"
-            className="flex-1 bg-transparent py-4 text-base outline-none placeholder:text-slate-400"
+            placeholder="Search subjects, topics, code…"
+            className="flex-1 bg-transparent py-3 text-sm outline-none placeholder:text-slate-400 sm:py-4 sm:text-base"
           />
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close search"
+            className="grid h-8 w-8 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 sm:hidden dark:hover:bg-slate-800"
+          >
+            ✕
+          </button>
           <kbd className="hidden rounded border border-slate-300 px-1.5 text-xs text-slate-400 sm:inline dark:border-slate-600">
             Esc
           </kbd>
         </div>
 
-        <div className="max-h-[55vh] overflow-y-auto p-2">
+        <div className="flex-1 overflow-y-auto p-2">
           {!query.trim() && (
             <p className="p-6 text-center text-sm text-slate-400">
               Type to search across everything. Use ↑ ↓ to navigate, ↵ to open.

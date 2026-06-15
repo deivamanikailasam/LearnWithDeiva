@@ -45,13 +45,13 @@ export function NotFoundPage() {
   }
 
   return (
-    <Container className="py-24 text-center">
-      <p className="text-7xl font-extrabold text-brand-500">404</p>
-      <h1 className="mt-4 text-2xl font-bold">Page not found</h1>
-      <p className="mt-2 text-slate-500">
+    <Container className="py-16 text-center sm:py-24">
+      <p className="text-6xl font-extrabold text-brand-500 sm:text-7xl">404</p>
+      <h1 className="mt-3 text-xl font-bold sm:mt-4 sm:text-2xl">Page not found</h1>
+      <p className="mt-2 text-sm text-slate-500 sm:text-base">
         The page you’re looking for doesn’t exist or has moved.
       </p>
-      <Link to={paths.home()} className="btn-primary mt-6">
+      <Link to={paths.home()} className="btn-primary mt-5 sm:mt-6">
         Back home
       </Link>
     </Container>

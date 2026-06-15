@@ -96,7 +96,7 @@ export function TopicPage() {
   }
 
   return (
-    <Container className="py-10">
+    <Container className="py-6 sm:py-10">
       <Breadcrumb
         items={[
           { label: 'Subjects', to: paths.subjects() },
@@ -109,12 +109,14 @@ export function TopicPage() {
         ]}
       />
 
-      <header className="mt-5">
-        <h1 className="text-3xl font-extrabold sm:text-4xl">{topic.title}</h1>
-        <p className="mt-2 max-w-3xl text-lg text-slate-600 dark:text-slate-400">
+      <header className="mt-4 sm:mt-5">
+        <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">
+          {topic.title}
+        </h1>
+        <p className="mt-2 max-w-3xl text-base text-slate-600 sm:text-lg dark:text-slate-400">
           {topic.summary}
         </p>
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 sm:mt-4 sm:gap-2">
           <span className="chip capitalize">⚡ {topic.level}</span>
           <span className="chip">⏱️ {formatDuration(subtreeMinutes(topic))}</span>
           {topic.tags.map((t) => (
@@ -129,8 +131,8 @@ export function TopicPage() {
             onClick={() => setConfirmOpen(true)}
             className={
               isComplete(subject.id, topic.id)
-                ? 'btn bg-emerald-600 text-white hover:bg-emerald-700'
-                : 'btn-ghost border border-slate-200 dark:border-slate-700'
+                ? 'btn flex-1 bg-emerald-600 text-white hover:bg-emerald-700 xs:flex-initial'
+                : 'btn-ghost flex-1 border border-slate-200 xs:flex-initial dark:border-slate-700'
             }
           >
             {isComplete(subject.id, topic.id) ? '✓ Completed' : 'Mark as complete'}
@@ -138,7 +140,7 @@ export function TopicPage() {
           <button
             type="button"
             onClick={() => toggleBookmark(subject.id, topic.id)}
-            className="btn-ghost border border-slate-200 dark:border-slate-700"
+            className="btn-ghost flex-1 border border-slate-200 xs:flex-initial dark:border-slate-700"
           >
             {isBookmarked(subject.id, topic.id) ? '★ Bookmarked' : '☆ Bookmark'}
           </button>
@@ -150,7 +152,7 @@ export function TopicPage() {
         )}
       </header>
 
-      <div className="mt-8 gap-10 lg:flex">
+      <div className="mt-6 gap-8 sm:mt-8 lg:flex lg:gap-10">
         {/* Sticky section navigator */}
         {hasSections && (
         <aside className="mb-8 lg:order-2 lg:mb-0 lg:w-60 lg:shrink-0">
@@ -188,11 +190,11 @@ export function TopicPage() {
         <div className="min-w-0 flex-1 lg:order-1">
           {topic.subtopics.length > 0 && (
             <section className="mb-10">
-              <div className="mb-3 flex items-baseline justify-between gap-3">
-                <h2 className="flex items-center gap-2 text-2xl font-bold">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2 sm:gap-3">
+                <h2 className="flex items-center gap-2 text-xl font-bold sm:text-2xl">
                   <span>🧭</span> Subtopics
                 </h2>
-                <span className="text-sm text-slate-400">
+                <span className="text-xs text-slate-400 sm:text-sm">
                   {topic.subtopics.length} direct · {countDescendants(topic)} total
                 </span>
               </div>
@@ -209,10 +211,10 @@ export function TopicPage() {
               <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
             </div>
           ) : (
-            <div className="space-y-12">
+            <div className="space-y-10 sm:space-y-12">
               {available.map((d) => (
                 <section key={d.key} id={`section-${d.key}`} className="scroll-mt-24">
-                  <h2 className="mb-4 flex items-center gap-2 text-2xl font-bold">
+                  <h2 className="mb-3 flex items-center gap-2 text-xl font-bold sm:mb-4 sm:text-2xl">
                     <span>{d.icon}</span>
                     {d.label}
                   </h2>
@@ -223,7 +225,7 @@ export function TopicPage() {
           )}
 
           {/* Prev / next */}
-          <div className="mt-14 grid gap-3 border-t border-slate-200 pt-6 dark:border-slate-800 sm:grid-cols-2">
+          <div className="mt-10 grid gap-3 border-t border-slate-200 pt-5 dark:border-slate-800 sm:mt-14 sm:grid-cols-2 sm:pt-6">
             {prev ? (
               <Link to={paths.topic(subject.id, prev.id)} className="card p-4">
                 <span className="text-xs text-slate-400">← Previous</span>

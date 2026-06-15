@@ -73,12 +73,12 @@ export function AccountPage() {
   // Not configured → local-only mode.
   if (!enabled) {
     return (
-      <Container className="py-12">
+      <Container className="py-8 sm:py-12">
         <PageHeading
           title="Your account"
           subtitle="Login isn’t enabled on this deployment, so your progress and bookmarks live only in this browser."
         />
-        <div className="mt-8 space-y-6">
+        <div className="mt-6 space-y-5 sm:mt-8 sm:space-y-6">
           <Stats completedCount={completed.size} bookmarkCount={bookmarks.size} />
           <Activity completedTopics={completedTopics} bookmarkedTopics={bookmarkedTopics} />
           <DangerZone
@@ -125,17 +125,17 @@ export function AccountPage() {
   const email = user.email ?? ''
 
   return (
-    <Container className="py-12">
+    <Container className="py-8 sm:py-12">
       <ProfileHeader email={email} onSignOut={() => signOut()} />
 
-      <div className="mt-6 space-y-6">
+      <div className="mt-6 space-y-5 sm:space-y-6">
         <Stats completedCount={completed.size} bookmarkCount={bookmarks.size} />
 
         <SubjectProgress completedInSubject={completedInSubject} />
 
         <Activity completedTopics={completedTopics} bookmarkedTopics={bookmarkedTopics} />
 
-        <div className="grid gap-6 lg:grid-cols-2">
+        <div className="grid gap-5 sm:gap-6 lg:grid-cols-2">
           <ChangeEmail currentEmail={email} />
           <ChangePassword />
         </div>
@@ -157,8 +157,12 @@ export function AccountPage() {
 function PageHeading({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div>
-      <h1 className="text-3xl font-extrabold tracking-tight">{title}</h1>
-      {subtitle && <p className="mt-2 max-w-2xl text-slate-500">{subtitle}</p>}
+      <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{title}</h1>
+      {subtitle && (
+        <p className="mt-1.5 max-w-2xl text-sm text-slate-500 sm:mt-2 sm:text-base">
+          {subtitle}
+        </p>
+      )}
     </div>
   )
 }
@@ -180,8 +184,8 @@ function Panel({
 }) {
   const base =
     tone === 'danger'
-      ? 'rounded-2xl border border-rose-200 bg-rose-50/60 p-6 shadow-sm dark:border-rose-500/30 dark:bg-rose-500/5'
-      : 'rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900'
+      ? 'rounded-2xl border border-rose-200 bg-rose-50/60 p-4 shadow-sm sm:p-6 dark:border-rose-500/30 dark:bg-rose-500/5'
+      : 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6 dark:border-slate-800 dark:bg-slate-900'
   const iconBg =
     tone === 'danger'
       ? 'bg-rose-100 text-rose-600 dark:bg-rose-500/10 dark:text-rose-300'
@@ -216,17 +220,17 @@ function Panel({
 function ProfileHeader({ email, onSignOut }: { email: string; onSignOut: () => void }) {
   const initials = email.split('@')[0].slice(0, 2).toUpperCase() || '?'
   return (
-    <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
-      <div className="flex items-center gap-4">
-        <div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-lg font-bold text-white shadow-inner">
+    <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-6 dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-center gap-3 sm:gap-4">
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-base font-bold text-white shadow-inner sm:h-14 sm:w-14 sm:text-lg">
           {initials}
         </div>
         <div className="min-w-0">
-          <h1 className="text-2xl font-extrabold tracking-tight">Your account</h1>
-          <p className="truncate text-sm text-slate-500">{email}</p>
+          <h1 className="text-xl font-extrabold tracking-tight sm:text-2xl">Your account</h1>
+          <p className="truncate text-xs text-slate-500 sm:text-sm">{email}</p>
         </div>
       </div>
-      <div className="flex items-center gap-3 sm:justify-end">
+      <div className="flex flex-wrap items-center gap-3 sm:justify-end">
         <SyncIndicator />
         <button
           type="button"
@@ -255,20 +259,20 @@ function Stats({
     { icon: '📚', label: 'Topics available', value: totalTopics },
   ]
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
       {items.map((i) => (
         <div
           key={i.label}
-          className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+          className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:gap-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900"
         >
-          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-brand-50 text-xl dark:bg-brand-500/10">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-lg sm:h-12 sm:w-12 sm:text-xl dark:bg-brand-500/10">
             {i.icon}
           </span>
           <div className="min-w-0">
-            <div className="text-2xl font-extrabold leading-none text-brand-600 dark:text-brand-400">
+            <div className="text-xl font-extrabold leading-none text-brand-600 sm:text-2xl dark:text-brand-400">
               {i.value}
             </div>
-            <div className="mt-1 truncate text-xs font-medium text-slate-500">{i.label}</div>
+            <div className="mt-1 text-xs font-medium text-slate-500">{i.label}</div>
           </div>
         </div>
       ))}

@@ -7,9 +7,9 @@ export function SubjectsPage() {
   const { data: subjects, loading } = useAsync(() => loadSubjectIndex(), [])
 
   return (
-    <Container className="py-12">
-      <h1 className="text-3xl font-extrabold">All subjects</h1>
-      <p className="mt-2 text-slate-500">
+    <Container className="py-8 sm:py-12">
+      <h1 className="text-2xl font-extrabold sm:text-3xl">All subjects</h1>
+      <p className="mt-1.5 text-sm text-slate-500 sm:mt-2 sm:text-base">
         {subjects
           ? `${subjects.length} subject${subjects.length === 1 ? '' : 's'} to explore.`
           : 'Loading subjects…'}
@@ -17,7 +17,7 @@ export function SubjectsPage() {
       {loading && !subjects ? (
         <SubjectGridSkeleton />
       ) : (
-        <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-6 grid gap-4 sm:mt-8 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3">
           {subjects?.map((subject) => (
             <SubjectCard key={subject.id} subject={subject} />
           ))}
@@ -29,7 +29,7 @@ export function SubjectsPage() {
 
 function SubjectGridSkeleton() {
   return (
-    <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="mt-6 grid gap-4 sm:mt-8 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3">
       {Array.from({ length: 6 }).map((_, i) => (
         <div
           key={i}
