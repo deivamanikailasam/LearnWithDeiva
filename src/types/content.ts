@@ -22,6 +22,10 @@ export interface SubjectMeta {
   gradient: [string, string]
   tags: string[]
   level: Difficulty
+  /** Total estimated study time across all topics, in minutes. Computed at
+   *  build time by summing each topic's level-based (or explicit) duration. */
+  estimatedMinutes?: number
+  /** @deprecated Legacy hand-authored total; replaced by `estimatedMinutes`. */
   estimatedHours?: number
 }
 

@@ -5,6 +5,7 @@ import { WindowVirtualizer } from 'virtua'
 import type { Topic } from '../types/content'
 import { paths } from '../lib/paths'
 import { useProgress } from '../lib/progressContext'
+import { formatDuration, subtreeMinutes } from '../lib/duration'
 
 function sectionCount(topic: Topic): number {
   return topic.sectionKeys.length
@@ -103,6 +104,9 @@ function TopicNode({
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <span className="chip hidden sm:inline-flex">
+              ⏱️ {formatDuration(subtreeMinutes(topic))}
+            </span>
             <span className={clsx('chip capitalize', levelStyles[topic.level] ?? '')}>
               {topic.level}
             </span>

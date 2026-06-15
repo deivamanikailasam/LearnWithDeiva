@@ -4,10 +4,11 @@ import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
 import { resolveTopicKeys } from '../content/data'
-import type { Difficulty, Subject, Topic } from '../types/content'
+import type { Subject, Topic } from '../types/content'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
+import { formatDuration, topicMinutes } from '../lib/duration'
 
 type View = 'day' | 'week' | 'month'
 
@@ -31,23 +32,6 @@ const MONTHS = [
 ]
 const ROW_H = 56 // px per hour in the time grid
 const BLOCK = 50 * 60 * 1000 // visual footprint of a point-in-time event
-
-// No per-topic duration exists in the content, so learning time is estimated
-// from difficulty. These are deliberately simple, transparent figures.
-const HOURS_BY_LEVEL: Record<Difficulty, number> = {
-  beginner: 0.5,
-  intermediate: 1,
-  advanced: 1.5,
-}
-function estHours(topic: Topic): number {
-  // Prefer an explicit `hours` value from the content; otherwise estimate.
-  if (typeof topic.hours === 'number' && topic.hours >= 0) return topic.hours
-  return HOURS_BY_LEVEL[topic.level] ?? 1
-}
-function fmtHours(h: number): string {
-  const v = Math.round(h * 10) / 10
-  return `${Number.isInteger(v) ? v : v.toFixed(1)}h`
-}
 
 function dayKey(d: Date): string {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
@@ -173,7 +157,7 @@ export function CalendarPage() {
     const inRange = entries.filter(
       (e) => e.ts && e.ts >= period.start && e.ts < period.end,
     )
-    const hours = inRange.reduce((h, e) => h + estHours(e.topic), 0)
+    const minutes = inRange.reduce((m, e) => m + topicMinutes(e.topic), 0)
     const activeDays = new Set(inRange.map((e) => dayKey(new Date(e.ts)))).size
 
     // Current streak is global (not tied to the filter): consecutive days
@@ -189,8 +173,8 @@ export function CalendarPage() {
 
     return {
       completed: inRange.length,
-      hours,
-      avg: period.days ? hours / period.days : 0,
+      minutes,
+      avg: period.days ? minutes / period.days : 0,
       activeDays,
       streak,
     }
@@ -298,7 +282,7 @@ function StatsBar({
 }: {
   stats: {
     completed: number
-    hours: number
+    minutes: number
     avg: number
     activeDays: number
     streak: number
@@ -308,8 +292,8 @@ function StatsBar({
   const noun = view === 'day' ? 'day' : view === 'week' ? 'week' : 'month'
   const items = [
     { icon: '✓', value: stats.completed, label: `Completed this ${noun}` },
-    { icon: '⏱️', value: fmtHours(stats.hours), label: `Hours this ${noun}` },
-    { icon: '📊', value: fmtHours(stats.avg), label: 'Avg hrs / day' },
+    { icon: '⏱️', value: formatDuration(stats.minutes), label: `Time this ${noun}` },
+    { icon: '📊', value: formatDuration(stats.avg), label: 'Avg / day' },
     { icon: '🗓️', value: stats.activeDays, label: `Active days this ${noun}` },
     {
       icon: '🔥',

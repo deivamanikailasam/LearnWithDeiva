@@ -10,6 +10,7 @@ import { loadSubject, subjectLevelRange } from '../content/data'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
+import { formatDuration } from '../lib/duration'
 
 type Tab = 'roadmap' | 'topics'
 
@@ -87,8 +88,8 @@ export function SubjectPage() {
           <div className="mt-5 flex flex-wrap items-center gap-2">
             <span className="chip capitalize">⚡ {levelLabel}</span>
             <span className="chip">📚 {subject.topicCount} topics</span>
-            {subject.estimatedHours ? (
-              <span className="chip">⏱️ ~{subject.estimatedHours} hours</span>
+            {subject.estimatedMinutes ? (
+              <span className="chip">⏱️ ~{formatDuration(subject.estimatedMinutes)}</span>
             ) : null}
             {subject.tags.map((t) => (
               <span key={t} className="chip">

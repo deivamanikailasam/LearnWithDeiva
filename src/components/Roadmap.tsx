@@ -8,6 +8,7 @@ import type {
 import { paths } from '../lib/paths'
 import { findTopic } from '../content/data'
 import { useProgress } from '../lib/progressContext'
+import { formatDuration, subtreeMinutes } from '../lib/duration'
 
 const levelStyles: Record<string, string> = {
   beginner:
@@ -32,6 +33,7 @@ function NodeCard({
   const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
   const level = linked?.level
   const subCount = linked?.subtopics.length ?? 0
+  const minutes = linked ? subtreeMinutes(linked) : 0
   const inner = (
     <div
       className={clsx(
@@ -69,7 +71,7 @@ function NodeCard({
       {node.description && (
         <p className="mt-1.5 text-sm text-slate-500">{node.description}</p>
       )}
-      {(level || subCount > 0) && (
+      {(level || subCount > 0 || minutes > 0) && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           {level && (
             <span className={clsx('chip capitalize', levelStyles[level] ?? '')}>
@@ -77,6 +79,7 @@ function NodeCard({
             </span>
           )}
           {subCount > 0 && <span className="chip">{subCount} subtopics</span>}
+          {minutes > 0 && <span className="chip">⏱️ {formatDuration(minutes)}</span>}
         </div>
       )}
       {node.topicId && (
@@ -113,13 +116,23 @@ export function Roadmap({
       <ol className="relative space-y-10">
         {/* vertical connector line */}
         <span className="absolute left-[15px] top-2 bottom-2 hidden w-px bg-gradient-to-b from-brand-400 to-violet-400 sm:block" />
-        {roadmap.stages.map((stage, idx) => (
+        {roadmap.stages.map((stage, idx) => {
+          const stageMinutes = stage.nodes.reduce((sum, node) => {
+            const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
+            return sum + (linked ? subtreeMinutes(linked) : 0)
+          }, 0)
+          return (
           <li key={stage.id} className="relative sm:pl-12">
             <span className="absolute left-0 top-0 hidden h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-brand-500 to-violet-500 text-sm font-bold text-white shadow sm:grid">
               {idx + 1}
             </span>
             <div className="mb-4">
-              <h3 className="text-lg font-bold">{stage.title}</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-lg font-bold">{stage.title}</h3>
+                {stageMinutes > 0 && (
+                  <span className="chip">⏱️ {formatDuration(stageMinutes)}</span>
+                )}
+              </div>
               {stage.summary && (
                 <p className="text-sm text-slate-500">{stage.summary}</p>
               )}
@@ -130,7 +143,8 @@ export function Roadmap({
               ))}
             </div>
           </li>
-        ))}
+          )
+        })}
       </ol>
     </div>
   )

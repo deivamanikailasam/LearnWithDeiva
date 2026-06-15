@@ -57,12 +57,6 @@ export function HomePage() {
               </div>
               topics
             </div>
-            <div>
-              <div className="text-2xl font-bold text-slate-800 dark:text-slate-200">
-                12
-              </div>
-              sections / topic
-            </div>
           </div>
         </Container>
       </section>

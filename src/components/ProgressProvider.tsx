@@ -269,6 +269,21 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
   const clearCompleted = useCallback(() => setCompleted(new Map()), [])
   const clearBookmarks = useCallback(() => setBookmarks(new Set()), [])
 
+  // Per-subject completed counts, derived in a single pass whenever the
+  // completed set changes. Listing surfaces (e.g. the subjects grid) can render
+  // a progress bar per card with an O(1) lookup instead of each card rescanning
+  // every completed key.
+  const completedCountsBySubject = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const key of completed.keys()) {
+      const sep = key.indexOf('::')
+      if (sep === -1) continue
+      const subjectId = key.slice(0, sep)
+      counts.set(subjectId, (counts.get(subjectId) ?? 0) + 1)
+    }
+    return counts
+  }, [completed])
+
   const value = useMemo<ProgressContextValue>(
     () => ({
       completed,
@@ -278,15 +293,11 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       completedAt: (s, t) => completed.get(topicKey(s, t)) || undefined,
       isBookmarked: (s, t) => bookmarks.has(topicKey(s, t)),
       toggleBookmark: (s, t) => toggleBookmarkKey(topicKey(s, t)),
-      // Count completed topics by subject prefix. Kept content-free so this
-      // app-wide provider never has to load any topic data; ProgressBar clamps
-      // to 100% so the rare stale localStorage key can't overflow the bar.
-      completedInSubject: (s) => {
-        const prefix = `${s}::`
-        let n = 0
-        for (const key of completed.keys()) if (key.startsWith(prefix)) n++
-        return n
-      },
+      // Completed topic count per subject, via the precomputed map (O(1)).
+      // Kept content-free so this app-wide provider never has to load any topic
+      // data; ProgressBar clamps to 100% so a rare stale localStorage key can't
+      // overflow the bar.
+      completedInSubject: (s) => completedCountsBySubject.get(s) ?? 0,
       clearCompleted,
       clearBookmarks,
       syncStatus,
@@ -295,6 +306,7 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
     [
       completed,
       bookmarks,
+      completedCountsBySubject,
       toggleCompleteKey,
       toggleBookmarkKey,
       clearCompleted,

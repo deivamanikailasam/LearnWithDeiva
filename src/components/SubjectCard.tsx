@@ -2,14 +2,12 @@ import { Link } from 'react-router-dom'
 import type { SubjectIndexEntry } from '../types/content'
 import { paths } from '../lib/paths'
 import { useProgress } from '../lib/progressContext'
+import { formatDuration } from '../lib/duration'
 import { ProgressBar } from './ProgressBar'
 
 export function SubjectCard({ subject }: { subject: SubjectIndexEntry }) {
   const { completedInSubject } = useProgress()
   const done = completedInSubject(subject.id)
-  const range = subject.levelRange
-  const levelLabel =
-    range.min === range.max ? range.min : `${range.min} – ${range.max}`
   return (
     <Link
       to={paths.subject(subject.id)}
@@ -37,14 +35,13 @@ export function SubjectCard({ subject }: { subject: SubjectIndexEntry }) {
       </p>
 
       <div className="mt-auto flex flex-wrap items-center gap-2">
-        <span className="chip capitalize">{levelLabel}</span>
         <span className="chip">{subject.topicCount} topics</span>
-        {subject.estimatedHours ? (
-          <span className="chip">~{subject.estimatedHours}h</span>
+        {subject.estimatedMinutes ? (
+          <span className="chip">~{formatDuration(subject.estimatedMinutes)}</span>
         ) : null}
       </div>
 
-      {done > 0 && <ProgressBar value={done} total={subject.topicCount} />}
+      <ProgressBar value={done} total={subject.topicCount} />
     </Link>
   )
 }

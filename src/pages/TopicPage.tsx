@@ -19,6 +19,7 @@ import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
 import { useProgress } from '../lib/progressContext'
+import { formatDuration, subtreeMinutes } from '../lib/duration'
 
 /** Count every descendant of a topic (used for the "N total" subtopics label). */
 function countDescendants(topic: { subtopics: { subtopics: unknown[] }[] }): number {
@@ -115,6 +116,7 @@ export function TopicPage() {
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <span className="chip capitalize">⚡ {topic.level}</span>
+          <span className="chip">⏱️ {formatDuration(subtreeMinutes(topic))}</span>
           {topic.tags.map((t) => (
             <span key={t} className="chip">
               #{t}

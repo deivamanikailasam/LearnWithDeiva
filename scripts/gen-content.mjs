@@ -58,6 +58,29 @@ const SECTION_RANK = new Map(SECTION_ORDER.map((k, i) => [k, i]))
 const LEVEL_ORDER = { beginner: 0, intermediate: 1, advanced: 2 }
 const LEVEL_BY_ORDER = ['beginner', 'intermediate', 'advanced']
 
+// Base study time per topic, by difficulty, in minutes. Mirrors
+// `MINUTES_BY_LEVEL` in src/lib/duration.ts — keep the two in sync.
+const MINUTES_BY_LEVEL = { beginner: 30, intermediate: 60, advanced: 90 }
+
+/** Estimated study time for a single topic node, in minutes. */
+function topicMinutes(node) {
+  if (typeof node.hours === 'number' && node.hours >= 0) {
+    return Math.round(node.hours * 60)
+  }
+  return MINUTES_BY_LEVEL[node.level] ?? 60
+}
+
+/**
+ * Rolled-up study time for a topic node: a node with subtopics is a pure
+ * aggregate (sum of its subtopics), a leaf contributes its own time. Mirrors
+ * `subtreeMinutes` in src/lib/duration.ts.
+ */
+function subtreeMinutes(node) {
+  const subs = node.subtopics ?? []
+  if (subs.length === 0) return topicMinutes(node)
+  return subs.reduce((sum, s) => sum + subtreeMinutes(s), 0)
+}
+
 /** Read + parse a JSON file, returning `undefined` if it doesn't exist. */
 async function readJson(file) {
   try {
@@ -264,6 +287,10 @@ export async function generateContent({ log = false, force = true } = {}) {
         ? { min: meta.level, max: meta.level }
         : { min: LEVEL_BY_ORDER[min], max: LEVEL_BY_ORDER[max] }
 
+    // Total estimated study time: roll up each top-level topic (a parent is a
+    // pure aggregate of its subtopics; leaves contribute their own time).
+    const estimatedMinutes = roots.reduce((sum, n) => sum + subtreeMinutes(n), 0)
+
     const subjectMetaOut = {
       id: meta.id,
       title: meta.title,
@@ -273,7 +300,7 @@ export async function generateContent({ log = false, force = true } = {}) {
       gradient: meta.gradient,
       tags: meta.tags ?? [],
       level: meta.level,
-      estimatedHours: meta.estimatedHours,
+      estimatedMinutes,
       topicCount: nodes.length,
       levelRange,
       hasRoadmap: Boolean(roadmap),
