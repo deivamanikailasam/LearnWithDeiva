@@ -55,6 +55,19 @@ const SECTION_LABELS = {
 }
 const SECTION_RANK = new Map(SECTION_ORDER.map((k, i) => [k, i]))
 
+/**
+ * Subject-level extras: optional per-subject files surfaced as tabs on the
+ * subject page. Each maps to an existing section renderer for display + search.
+ * Mirrors `SUBJECT_EXTRA_DESCRIPTORS` in src/content/sections.ts.
+ */
+const SUBJECT_EXTRA_FILES = [
+  { file: 'interview.json', key: 'interview', section: 'interview-questions', slug: 'interview' },
+  { file: 'scenarios.json', key: 'scenarios', section: 'scenario-questions', slug: 'scenarios' },
+  { file: 'case-studies.json', key: 'caseStudies', section: 'case-studies', slug: 'case-studies' },
+  { file: 'projects.json', key: 'projects', section: 'projects', slug: 'projects' },
+  { file: 'quiz.json', key: 'quiz', section: 'exam-prep', slug: 'quiz' },
+]
+
 const LEVEL_ORDER = { beginner: 0, intermediate: 1, advanced: 2 }
 const LEVEL_BY_ORDER = ['beginner', 'intermediate', 'advanced']
 
@@ -218,6 +231,49 @@ function extractSectionDocs(subject, topicNode, sections) {
   return docs
 }
 
+/** Load a subject's optional extra files into a single `extras` object. */
+async function loadSubjectExtras(subjectDir) {
+  const extras = {}
+  await Promise.all(
+    SUBJECT_EXTRA_FILES.map(async ({ file, key }) => {
+      const data = await readJson(path.join(subjectDir, file))
+      if (data && Array.isArray(data.items)) extras[key] = data
+    }),
+  )
+  return extras
+}
+
+/** Pull searchable units out of a subject's extras. */
+function extractSubjectExtraDocs(subjectMeta, extras) {
+  const docs = []
+  for (const { key, section, slug } of SUBJECT_EXTRA_FILES) {
+    const data = extras[key]
+    if (!data || !Array.isArray(data.items)) continue
+    data.items.forEach((it, i) => {
+      const title =
+        it.question ?? it.title ?? `${SECTION_LABELS[section]} ${i + 1}`
+      const text =
+        it.answer ??
+        it.description ??
+        `${it.scenario ?? ''} ${it.context ?? ''} ${it.problem ?? ''} ` +
+          `${it.solution ?? ''} ${it.outcome ?? ''} ${it.explanation ?? ''}`
+      docs.push({
+        id: `${subjectMeta.id}/extra/${key}/${i}`,
+        type: 'section',
+        subjectId: subjectMeta.id,
+        subjectTitle: subjectMeta.title,
+        sectionKey: section,
+        sectionLabel: SECTION_LABELS[section],
+        title,
+        text: clip(text),
+        tags: subjectMeta.tags ?? [],
+        url: `/subjects/${subjectMeta.id}/${slug}`,
+      })
+    })
+  }
+  return docs
+}
+
 export async function generateContent({ log = false, force = true } = {}) {
   const start = Date.now()
 
@@ -244,6 +300,7 @@ export async function generateContent({ log = false, force = true } = {}) {
     const meta = await readJson(path.join(subjectDir, 'subject.json'))
     if (!meta) continue
     const roadmap = await readJson(path.join(subjectDir, 'roadmap.json'))
+    const extras = await loadSubjectExtras(subjectDir)
 
     const topicIds = await listDirs(path.join(subjectDir, 'topics'))
     const loaded = (
@@ -322,6 +379,30 @@ export async function generateContent({ log = false, force = true } = {}) {
       )
     }
 
+    // Subject-level extras. Split so the subject page only pays for what it
+    // shows: a tiny counts manifest (always emitted, for the tab badges) plus
+    // one file per non-empty category, fetched lazily when its tab is opened.
+    const subjectOutDir = path.join(OUT_DIR, 'subjects', subjectId)
+    await mkdir(subjectOutDir, { recursive: true })
+    const extraCounts = {}
+    const presentExtras = SUBJECT_EXTRA_FILES.filter(
+      ({ key }) => Array.isArray(extras[key]?.items) && extras[key].items.length,
+    )
+    for (const { key } of presentExtras) extraCounts[key] = extras[key].items.length
+    await writeFile(
+      path.join(subjectOutDir, 'extras.json'),
+      JSON.stringify({ counts: extraCounts }),
+    )
+    if (presentExtras.length) {
+      const extraDir = path.join(subjectOutDir, 'extras')
+      await mkdir(extraDir, { recursive: true })
+      await Promise.all(
+        presentExtras.map(({ key }) =>
+          writeFile(path.join(extraDir, `${key}.json`), JSON.stringify(extras[key])),
+        ),
+      )
+    }
+
     // Index entry (no topics) for cards / stats.
     indexEntries.push(subjectMetaOut)
 
@@ -336,6 +417,7 @@ export async function generateContent({ log = false, force = true } = {}) {
       tags: meta.tags ?? [],
       url: `/subjects/${subjectId}`,
     })
+    searchDocs.push(...extractSubjectExtraDocs({ id: subjectId, title: meta.title, tags: meta.tags }, extras))
     const sectionsById = new Map(loaded.map((t) => [t.meta.id, t.sections]))
     for (const n of nodes) {
       searchDocs.push({

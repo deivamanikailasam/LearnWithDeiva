@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import type {
   ApplicationsSection,
   CaseStudiesSection,
+  CaseStudyItem,
   CodeSection,
   CoursePrepSection,
   Difficulty,
@@ -9,8 +10,11 @@ import type {
   ExplanationSection,
   InterviewQuestionsSection,
   MaterialsSection,
+  ProjectItem,
   ProjectsSection,
+  QAItem,
   ReferencesSection,
+  ScenarioItem,
   ScenarioQuestionsSection,
   SectionKey,
   SynonymsSection,
@@ -166,26 +170,91 @@ function ReferencesView({ data }: { data: ReferencesSection }) {
   )
 }
 
+/* ----- item-level renderers (also reused by the subject-level lists) ----- */
+
+export function ProjectCard({ item }: { item: ProjectItem }) {
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-semibold">🛠️ {item.title}</p>
+        <DifficultyBadge level={item.difficulty} />
+      </div>
+      <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+        {item.description}
+      </p>
+      {item.requirements?.length ? (
+        <ul className="mt-3 list-inside list-disc space-y-1 text-sm text-slate-500">
+          {item.requirements.map((req) => (
+            <li key={req}>{req}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
+export function InterviewQA({ item }: { item: QAItem }) {
+  return (
+    <Collapsible title={item.question} badge={<DifficultyBadge level={item.difficulty} />}>
+      <Markdown>{item.answer}</Markdown>
+      {item.tags?.length ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {item.tags.map((t) => (
+            <span key={t} className="chip">
+              #{t}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </Collapsible>
+  )
+}
+
+export function ScenarioCard({ item }: { item: ScenarioItem }) {
+  return (
+    <div className="card p-5">
+      <div className="rounded-lg border-l-4 border-brand-400 bg-brand-50 p-3 text-sm text-slate-700 dark:bg-brand-500/10 dark:text-slate-300">
+        <span className="font-semibold">Scenario: </span>
+        {item.scenario}
+      </div>
+      <p className="mt-3 font-semibold">🧩 {item.question}</p>
+      <Collapsible title="Reveal answer">
+        <Markdown>{item.answer}</Markdown>
+      </Collapsible>
+    </div>
+  )
+}
+
+const caseStudyRows: { label: string; key: keyof CaseStudyItem }[] = [
+  { label: 'Context', key: 'context' },
+  { label: 'Problem', key: 'problem' },
+  { label: 'Solution', key: 'solution' },
+  { label: 'Outcome', key: 'outcome' },
+]
+
+export function CaseStudyCard({ item }: { item: CaseStudyItem }) {
+  return (
+    <div className="card p-5">
+      <p className="text-lg font-bold">📊 {item.title}</p>
+      <dl className="mt-3 space-y-3">
+        {caseStudyRows.map((r) => (
+          <div key={r.key}>
+            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              {r.label}
+            </dt>
+            <dd className="text-sm text-slate-600 dark:text-slate-400">{item[r.key]}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
 function ProjectsView({ data }: { data: ProjectsSection }) {
   return (
     <div className="grid gap-4 md:grid-cols-2">
       {data.items.map((p) => (
-        <div key={p.title} className="card p-5">
-          <div className="flex items-center justify-between gap-2">
-            <p className="font-semibold">🛠️ {p.title}</p>
-            <DifficultyBadge level={p.difficulty} />
-          </div>
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-            {p.description}
-          </p>
-          {p.requirements?.length ? (
-            <ul className="mt-3 list-inside list-disc space-y-1 text-sm text-slate-500">
-              {p.requirements.map((req) => (
-                <li key={req}>{req}</li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
+        <ProjectCard key={p.title} item={p} />
       ))}
     </div>
   )
@@ -195,22 +264,7 @@ function InterviewView({ data }: { data: InterviewQuestionsSection }) {
   return (
     <div className="space-y-3">
       {data.items.map((q, i) => (
-        <Collapsible
-          key={`${q.question}-${i}`}
-          title={q.question}
-          badge={<DifficultyBadge level={q.difficulty} />}
-        >
-          <Markdown>{q.answer}</Markdown>
-          {q.tags?.length ? (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {q.tags.map((t) => (
-                <span key={t} className="chip">
-                  #{t}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </Collapsible>
+        <InterviewQA key={`${q.question}-${i}`} item={q} />
       ))}
     </div>
   )
@@ -220,44 +274,17 @@ function ScenarioView({ data }: { data: ScenarioQuestionsSection }) {
   return (
     <div className="space-y-3">
       {data.items.map((s, i) => (
-        <div key={`${s.question}-${i}`} className="card p-5">
-          <div className="rounded-lg border-l-4 border-brand-400 bg-brand-50 p-3 text-sm text-slate-700 dark:bg-brand-500/10 dark:text-slate-300">
-            <span className="font-semibold">Scenario: </span>
-            {s.scenario}
-          </div>
-          <p className="mt-3 font-semibold">🧩 {s.question}</p>
-          <Collapsible title="Reveal answer">
-            <Markdown>{s.answer}</Markdown>
-          </Collapsible>
-        </div>
+        <ScenarioCard key={`${s.question}-${i}`} item={s} />
       ))}
     </div>
   )
 }
 
 function CaseStudiesView({ data }: { data: CaseStudiesSection }) {
-  const rows: { label: string; key: 'context' | 'problem' | 'solution' | 'outcome' }[] = [
-    { label: 'Context', key: 'context' },
-    { label: 'Problem', key: 'problem' },
-    { label: 'Solution', key: 'solution' },
-    { label: 'Outcome', key: 'outcome' },
-  ]
   return (
     <div className="space-y-5">
       {data.items.map((c) => (
-        <div key={c.title} className="card p-5">
-          <p className="text-lg font-bold">📊 {c.title}</p>
-          <dl className="mt-3 space-y-3">
-            {rows.map((r) => (
-              <div key={r.key}>
-                <dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  {r.label}
-                </dt>
-                <dd className="text-sm text-slate-600 dark:text-slate-400">{c[r.key]}</dd>
-              </div>
-            ))}
-          </dl>
-        </div>
+        <CaseStudyCard key={c.title} item={c} />
       ))}
     </div>
   )

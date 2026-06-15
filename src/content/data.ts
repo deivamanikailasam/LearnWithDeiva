@@ -17,6 +17,9 @@ import type {
   Difficulty,
   LevelRange,
   Subject,
+  SubjectExtraKey,
+  SubjectExtras,
+  SubjectExtrasManifest,
   SubjectIndexEntry,
   Topic,
   TopicSections,
@@ -86,6 +89,49 @@ export function loadTopicSections(
       dataUrl(`subjects/${subjectId}/sections/${topicId}.json`),
     ).catch(() => ({}) as TopicSections)
     sectionsCache.set(key, p)
+  }
+  return p
+}
+
+/* --------------------------- per-subject extras -------------------------- */
+
+const extrasManifestCache = new Map<string, Promise<SubjectExtrasManifest>>()
+const extraCache = new Map<string, Promise<SubjectExtras[SubjectExtraKey]>>()
+
+/**
+ * The tiny counts manifest for a subject's extras (interview / scenarios /
+ * case studies / projects / quiz). Cheap to load on every subject page — it
+ * carries only item counts, not the (potentially large) bodies. Cached.
+ */
+export function loadSubjectExtrasManifest(
+  id: string,
+): Promise<SubjectExtrasManifest> {
+  let p = extrasManifestCache.get(id)
+  if (!p) {
+    p = fetchJson<SubjectExtrasManifest>(dataUrl(`subjects/${id}/extras.json`))
+      .then((m) => ({ counts: m.counts ?? {} }))
+      .catch(() => ({ counts: {} }))
+    extrasManifestCache.set(id, p)
+  }
+  return p
+}
+
+/**
+ * One category of a subject's extras, loaded only when its tab is opened so a
+ * large interview/quiz bank never blocks the rest of the page. Cached per
+ * `(subject, category)`; a missing file resolves to an empty section.
+ */
+export function loadSubjectExtra(
+  id: string,
+  key: SubjectExtraKey,
+): Promise<SubjectExtras[SubjectExtraKey]> {
+  const cacheKey = `${id}::${key}`
+  let p = extraCache.get(cacheKey)
+  if (!p) {
+    p = fetchJson<NonNullable<SubjectExtras[SubjectExtraKey]>>(
+      dataUrl(`subjects/${id}/extras/${key}.json`),
+    ).catch(() => ({ items: [] }) as NonNullable<SubjectExtras[SubjectExtraKey]>)
+    extraCache.set(cacheKey, p)
   }
   return p
 }

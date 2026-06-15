@@ -200,6 +200,43 @@ export interface TopicSections {
 export type SectionKey = keyof TopicSections
 
 /* ------------------------------------------------------------------ */
+/* Subject-level extras — aggregate prep material shown on the subject  */
+/* page itself, authored once per subject (independent of any topic).   */
+/* Each lives in its own optional file: src/content/subjects/<id>/      */
+/* <interview|scenarios|case-studies|projects|quiz>.json.               */
+/* ------------------------------------------------------------------ */
+
+export interface SubjectExtras {
+  interview?: InterviewQuestionsSection
+  scenarios?: ScenarioQuestionsSection
+  caseStudies?: CaseStudiesSection
+  projects?: ProjectsSection
+  quiz?: ExamPrepSection
+}
+
+export type SubjectExtraKey = keyof SubjectExtras
+
+/**
+ * Tiny per-subject manifest listing how many items each extra has. Loaded on
+ * every subject page (for the tab count badges) without pulling the — possibly
+ * very large — item bodies, which are fetched per category on demand.
+ */
+export interface SubjectExtrasManifest {
+  counts: Partial<Record<SubjectExtraKey, number>>
+}
+
+/** UI metadata for a subject-level extra: its tab, URL slug and renderer. */
+export interface SubjectExtraDescriptor {
+  key: SubjectExtraKey
+  /** URL segment under `/subjects/:id/`. */
+  slug: string
+  label: string
+  icon: string
+  /** The existing topic-section renderer this extra reuses. */
+  sectionKey: SectionKey
+}
+
+/* ------------------------------------------------------------------ */
 /* Assembled, in-memory shapes used by the UI.                         */
 /* ------------------------------------------------------------------ */
 

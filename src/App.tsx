@@ -47,6 +47,7 @@ const router = createHashRouter([
       { path: '/', element: <HomePage /> },
       { path: '/subjects', element: lazyRoute(<SubjectsPage />) },
       { path: '/subjects/:subjectId', element: lazyRoute(<SubjectPage />) },
+      { path: '/subjects/:subjectId/:view', element: lazyRoute(<SubjectPage />) },
       {
         path: '/subjects/:subjectId/topics/:topicId',
         element: lazyRoute(<TopicPage />),
