@@ -3,9 +3,10 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
-import { getTopic } from '../content/registry'
+import { resolveTopicKeys } from '../content/data'
 import type { Difficulty, Subject, Topic } from '../types/content'
 import { paths } from '../lib/paths'
+import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
 
 type View = 'day' | 'week' | 'month'
@@ -114,17 +115,23 @@ export function CalendarPage() {
   const [view, setView] = useState<View>('month')
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()))
 
+  const { data: resolved } = useAsync(
+    () => resolveTopicKeys(completed.keys()),
+    [completed],
+  )
   const entries = useMemo<Entry[]>(() => {
+    if (!resolved) return []
     const out: Entry[] = []
-    for (const [key, ts] of completed) {
-      const sep = key.indexOf('::')
-      if (sep === -1) continue
-      const found = getTopic(key.slice(0, sep), key.slice(sep + 2))
-      if (!found) continue
-      out.push({ key, ts, subject: found.subject, topic: found.topic })
+    for (const r of resolved) {
+      out.push({
+        key: r.key,
+        ts: completed.get(r.key) ?? 0,
+        subject: r.subject,
+        topic: r.topic,
+      })
     }
     return out
-  }, [completed])
+  }, [resolved, completed])
 
   const byDay = useMemo(() => {
     const m = new Map<string, Entry[]>()

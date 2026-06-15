@@ -5,9 +5,10 @@ import { Link } from 'react-router-dom'
 import { Container } from '../components/Container'
 import { ProgressBar } from '../components/ProgressBar'
 import { SyncIndicator } from '../components/SyncIndicator'
-import { subjects, getTopic, getAncestors } from '../content/registry'
-import type { Subject, Topic } from '../types/content'
+import { loadSubjectIndex, resolveTopicKeys } from '../content/data'
+import type { ResolvedTopic as ResolvedTopicBase } from '../content/data'
 import { paths } from '../lib/paths'
+import { useAsync } from '../lib/useAsync'
 import { useAuth } from '../lib/authContext'
 import { useProgress } from '../lib/progressContext'
 
@@ -18,28 +19,9 @@ const AuthModal = lazy(() =>
 const inputClass =
   'w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none transition focus:border-brand-400 focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-800'
 
-interface ResolvedTopic {
-  key: string
-  subject: Subject
-  topic: Topic
-  /** Root → … → direct parent, for showing the full path. */
-  ancestors: Topic[]
+interface ResolvedTopic extends ResolvedTopicBase {
   /** Epoch ms the topic was completed (only set for the completed list). */
   completedAt?: number
-}
-
-function resolveKeys(keys: Iterable<string>): ResolvedTopic[] {
-  return [...keys]
-    .map((key): ResolvedTopic | undefined => {
-      const sep = key.indexOf('::')
-      if (sep === -1) return undefined
-      const subjectId = key.slice(0, sep)
-      const topicId = key.slice(sep + 2)
-      const found = getTopic(subjectId, topicId)
-      if (!found) return undefined
-      return { key, ...found, ancestors: getAncestors(subjectId, topicId) }
-    })
-    .filter((x): x is ResolvedTopic => Boolean(x))
 }
 
 function formatDate(ms?: number): string | undefined {
@@ -57,14 +39,23 @@ export function AccountPage() {
     useProgress()
   const [authOpen, setAuthOpen] = useState(false)
 
-  const completedTopics = useMemo(
-    () =>
-      resolveKeys(completed.keys())
-        .map((r) => ({ ...r, completedAt: completed.get(r.key) }))
-        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0)),
+  const { data: resolvedCompleted } = useAsync(
+    () => resolveTopicKeys(completed.keys()),
     [completed],
   )
-  const bookmarkedTopics = useMemo(() => resolveKeys(bookmarks), [bookmarks])
+  const { data: resolvedBookmarks } = useAsync(
+    () => resolveTopicKeys(bookmarks),
+    [bookmarks],
+  )
+
+  const completedTopics = useMemo<ResolvedTopic[]>(
+    () =>
+      (resolvedCompleted ?? [])
+        .map((r) => ({ ...r, completedAt: completed.get(r.key) }))
+        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0)),
+    [resolvedCompleted, completed],
+  )
+  const bookmarkedTopics = resolvedBookmarks ?? []
 
   const onClearCompleted = () => {
     if (completed.size === 0) return
@@ -256,7 +247,8 @@ function Stats({
   completedCount: number
   bookmarkCount: number
 }) {
-  const totalTopics = subjects.reduce((sum, s) => sum + s.topicCount, 0)
+  const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
+  const totalTopics = subjects?.reduce((sum, s) => sum + s.topicCount, 0) ?? 0
   const items = [
     { icon: '✓', label: 'Topics completed', value: completedCount },
     { icon: '★', label: 'Bookmarks', value: bookmarkCount },
@@ -289,10 +281,11 @@ function SubjectProgress({
 }: {
   completedInSubject: (subjectId: string) => number
 }) {
+  const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
   return (
     <Panel title="Progress by subject" icon="🗺️">
       <div className="grid gap-4 sm:grid-cols-2">
-        {subjects.map((s) => (
+        {subjects?.map((s) => (
           <Link key={s.id} to={paths.subject(s.id)} className="card p-4">
             <div className="mb-2 flex items-center gap-2">
               <span className="text-xl">{s.icon}</span>

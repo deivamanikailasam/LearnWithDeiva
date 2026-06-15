@@ -1,20 +1,21 @@
 import { Link } from 'react-router-dom'
 import { Container } from '../components/Container'
 import { SubjectCard } from '../components/SubjectCard'
-import { getTopic, subjects } from '../content/registry'
+import { loadSubjectIndex, resolveTopicKeys } from '../content/data'
 import { paths } from '../lib/paths'
+import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
 
 export function HomePage() {
-  const totalTopics = subjects.reduce((sum, s) => sum + s.topicCount, 0)
+  const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
   const { bookmarks, completed } = useProgress()
 
-  const bookmarked = [...bookmarks]
-    .map((key) => {
-      const [subjectId, topicId] = key.split('::')
-      return getTopic(subjectId, topicId)
-    })
-    .filter((x): x is NonNullable<typeof x> => Boolean(x))
+  const totalTopics = subjects?.reduce((sum, s) => sum + s.topicCount, 0) ?? 0
+
+  const { data: bookmarked } = useAsync(
+    () => resolveTopicKeys(bookmarks),
+    [bookmarks],
+  )
 
   return (
     <div>
@@ -46,13 +47,13 @@ export function HomePage() {
           <div className="mt-10 flex items-center justify-center gap-8 text-sm text-slate-500">
             <div>
               <div className="text-2xl font-bold text-slate-800 dark:text-slate-200">
-                {subjects.length}
+                {subjects?.length ?? '—'}
               </div>
               subjects
             </div>
             <div>
               <div className="text-2xl font-bold text-slate-800 dark:text-slate-200">
-                {totalTopics}
+                {totalTopics || '—'}
               </div>
               topics
             </div>
@@ -67,14 +68,14 @@ export function HomePage() {
       </section>
 
       {/* My learning */}
-      {(bookmarked.length > 0 || completed.size > 0) && (
+      {((bookmarked && bookmarked.length > 0) || completed.size > 0) && (
         <Container className="pt-14">
           <div className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold">📌 My learning</h2>
               <span className="chip">{completed.size} topics completed</span>
             </div>
-            {bookmarked.length > 0 ? (
+            {bookmarked && bookmarked.length > 0 ? (
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {bookmarked.map(({ subject, topic }) => (
                   <Link
@@ -111,7 +112,7 @@ export function HomePage() {
           </Link>
         </div>
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {subjects.map((subject) => (
+          {subjects?.map((subject) => (
             <SubjectCard key={subject.id} subject={subject} />
           ))}
         </div>

@@ -1,14 +1,18 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import clsx from 'clsx'
+import { WindowVirtualizer } from 'virtua'
 import type { Topic } from '../types/content'
 import { paths } from '../lib/paths'
-import { SECTION_DESCRIPTORS } from '../content/sections'
 import { useProgress } from '../lib/progressContext'
 
 function sectionCount(topic: Topic): number {
-  return SECTION_DESCRIPTORS.filter((d) => topic.sections[d.key]).length
+  return topic.sectionKeys.length
 }
+
+// Above this many top-level topics the root list is windowed so only the rows
+// near the viewport are mounted; below it we render plainly (identical markup).
+const VIRTUALIZE_THRESHOLD = 30
 
 const levelStyles: Record<string, string> = {
   beginner:
@@ -143,18 +147,30 @@ export function TopicTree({
   /** Expand the first level by default (used on a topic's own page). */
   defaultExpanded?: boolean
 }) {
-  return (
-    <ul className="space-y-2.5">
-      {topics.map((topic) => (
-        <TopicNode
-          key={topic.id}
-          subjectId={subjectId}
-          topic={topic}
-          currentTopicId={currentTopicId}
-          depth={0}
-          defaultExpanded={defaultExpanded}
-        />
-      ))}
-    </ul>
+  const renderNode = (topic: Topic) => (
+    <TopicNode
+      key={topic.id}
+      subjectId={subjectId}
+      topic={topic}
+      currentTopicId={currentTopicId}
+      depth={0}
+      defaultExpanded={defaultExpanded}
+    />
   )
+
+  // Large root lists are virtualized against the window scroll so rendering
+  // cost stays flat regardless of how many top-level topics a subject has.
+  if (topics.length > VIRTUALIZE_THRESHOLD) {
+    return (
+      <WindowVirtualizer>
+        {topics.map((topic) => (
+          <div key={topic.id} className="pb-2.5">
+            {renderNode(topic)}
+          </div>
+        ))}
+      </WindowVirtualizer>
+    )
+  }
+
+  return <ul className="space-y-2.5">{topics.map(renderNode)}</ul>
 }

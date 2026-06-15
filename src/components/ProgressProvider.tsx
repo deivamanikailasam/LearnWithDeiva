@@ -6,7 +6,6 @@ import {
   type ProgressContextValue,
   type SyncStatus,
 } from '../lib/progressContext'
-import { flattenTopics, getSubject } from '../content/registry'
 import { PROGRESS_TABLE, isSupabaseConfigured, loadSupabase } from '../lib/supabase'
 import { useAuth } from '../lib/authContext'
 
@@ -279,16 +278,14 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       completedAt: (s, t) => completed.get(topicKey(s, t)) || undefined,
       isBookmarked: (s, t) => bookmarks.has(topicKey(s, t)),
       toggleBookmark: (s, t) => toggleBookmarkKey(topicKey(s, t)),
-      // Count only topics that currently exist, so the number stays in sync
-      // with the content whenever topics/subtopics are added or removed
-      // (and stale localStorage keys never inflate the total).
+      // Count completed topics by subject prefix. Kept content-free so this
+      // app-wide provider never has to load any topic data; ProgressBar clamps
+      // to 100% so the rare stale localStorage key can't overflow the bar.
       completedInSubject: (s) => {
-        const subject = getSubject(s)
-        if (!subject) return 0
-        return flattenTopics(subject).reduce(
-          (n, t) => (completed.has(topicKey(s, t.id)) ? n + 1 : n),
-          0,
-        )
+        const prefix = `${s}::`
+        let n = 0
+        for (const key of completed.keys()) if (key.startsWith(prefix)) n++
+        return n
       },
       clearCompleted,
       clearBookmarks,

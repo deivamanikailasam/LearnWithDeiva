@@ -7,7 +7,7 @@ export function ProgressBar({
   total: number
   showLabel?: boolean
 }) {
-  const pct = total > 0 ? Math.round((value / total) * 100) : 0
+  const pct = total > 0 ? Math.min(100, Math.round((value / total) * 100)) : 0
   return (
     <div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">

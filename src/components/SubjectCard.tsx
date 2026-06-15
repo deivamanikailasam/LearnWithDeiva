@@ -1,14 +1,13 @@
 import { Link } from 'react-router-dom'
-import type { Subject } from '../types/content'
+import type { SubjectIndexEntry } from '../types/content'
 import { paths } from '../lib/paths'
-import { subjectLevelRange } from '../content/registry'
 import { useProgress } from '../lib/progressContext'
 import { ProgressBar } from './ProgressBar'
 
-export function SubjectCard({ subject }: { subject: Subject }) {
+export function SubjectCard({ subject }: { subject: SubjectIndexEntry }) {
   const { completedInSubject } = useProgress()
   const done = completedInSubject(subject.id)
-  const range = subjectLevelRange(subject)
+  const range = subject.levelRange
   const levelLabel =
     range.min === range.max ? range.min : `${range.min} – ${range.max}`
   return (

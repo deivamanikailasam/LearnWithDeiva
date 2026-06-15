@@ -6,17 +6,29 @@ import { Breadcrumb } from '../components/Breadcrumb'
 import { Roadmap } from '../components/Roadmap'
 import { TopicTree } from '../components/TopicTree'
 import { ProgressBar } from '../components/ProgressBar'
-import { getSubject, subjectLevelRange } from '../content/registry'
+import { loadSubject, subjectLevelRange } from '../content/data'
 import { paths } from '../lib/paths'
+import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
 
 type Tab = 'roadmap' | 'topics'
 
 export function SubjectPage() {
   const { subjectId = '' } = useParams()
-  const subject = getSubject(subjectId)
+  const { data: subject, loading } = useAsync(
+    () => loadSubject(subjectId),
+    [subjectId],
+  )
   const { completedInSubject } = useProgress()
-  const [tab, setTab] = useState<Tab>(subject?.roadmap ? 'roadmap' : 'topics')
+  const [tab, setTab] = useState<Tab>('roadmap')
+
+  if (loading && !subject) {
+    return (
+      <Container className="flex min-h-[50vh] items-center justify-center py-16">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
+      </Container>
+    )
+  }
 
   if (!subject) {
     return (
@@ -116,7 +128,7 @@ export function SubjectPage() {
         </div>
 
         {tab === 'roadmap' && subject.roadmap ? (
-          <Roadmap subjectId={subject.id} roadmap={subject.roadmap} />
+          <Roadmap subject={subject} roadmap={subject.roadmap} />
         ) : (
           <TopicTree subjectId={subject.id} topics={subject.topics} />
         )}

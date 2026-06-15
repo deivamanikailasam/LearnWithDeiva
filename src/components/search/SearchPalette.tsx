@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { search } from '../../lib/search'
+import { searchContent } from '../../lib/search'
 import { paths } from '../../lib/paths'
+import { useAsync } from '../../lib/useAsync'
 import { SearchResultItem } from './SearchResultItem'
 
 const LIMIT = 8
@@ -13,7 +14,10 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const results = useMemo(() => search(query, { limit: LIMIT }), [query])
+  const { data: results = [] } = useAsync(
+    () => searchContent(query, { limit: LIMIT }),
+    [query],
+  )
 
   useEffect(() => {
     inputRef.current?.focus()

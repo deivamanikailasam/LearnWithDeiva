@@ -199,9 +199,19 @@ export type SectionKey = keyof TopicSections
 /* Assembled, in-memory shapes used by the UI.                         */
 /* ------------------------------------------------------------------ */
 
+/** The min/max difficulty span across a subject's topics. */
+export interface LevelRange {
+  min: Difficulty
+  max: Difficulty
+}
+
 export interface Topic extends TopicMeta {
   subjectId: string
-  sections: TopicSections
+  /**
+   * Which sections this topic provides, in canonical order. The heavy section
+   * bodies are fetched separately (per topic) and are not part of the tree.
+   */
+  sectionKeys: SectionKey[]
   /** Direct subtopics (topics whose parentId === this.id). */
   subtopics: Topic[]
 }
@@ -211,6 +221,18 @@ export interface Subject extends SubjectMeta {
   topics: Topic[]
   /** Total number of topics including subtopics. */
   topicCount: number
+  levelRange: LevelRange
+}
+
+/**
+ * Lightweight subject record used by listing/stat surfaces (home, subjects,
+ * account). Carries no topic tree — just enough to render a card. Loaded from
+ * the tiny `data/index.json` so those pages don't pull any topic data.
+ */
+export interface SubjectIndexEntry extends SubjectMeta {
+  topicCount: number
+  levelRange: LevelRange
+  hasRoadmap: boolean
 }
 
 export interface SectionDescriptor {

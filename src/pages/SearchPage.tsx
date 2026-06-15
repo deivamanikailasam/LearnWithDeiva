@@ -1,11 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
 import { SearchResultItem } from '../components/search/SearchResultItem'
-import { search } from '../lib/search'
+import { searchContent } from '../lib/search'
 import type { SearchDocType } from '../lib/search'
-import { subjects } from '../content/registry'
+import { loadSubjectIndex } from '../content/data'
+import { useAsync } from '../lib/useAsync'
 import { paths } from '../lib/paths'
 
 const typeFilters: { id: SearchDocType | 'all'; label: string }[] = [
@@ -23,28 +24,28 @@ export function SearchPage() {
   const [type, setType] = useState<SearchDocType | 'all'>('all')
   const [subjectId, setSubjectId] = useState<string>('')
 
+  const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
+
   // The URL `q` param is the single source of truth (shareable / bookmarkable).
   const setQuery = (next: string) =>
     setParams(next ? { q: next } : {}, { replace: true })
 
-  const results = useMemo(
-    () =>
-      search(query, {
-        subjectId: subjectId || undefined,
-        types: type === 'all' ? undefined : [type],
-      }),
-    [query, subjectId, type],
+  // All matches for the current query+subject; the type tabs filter this list
+  // client-side and derive their badge counts from it.
+  const { data: allResults = [], loading } = useAsync(
+    () => searchContent(query, { subjectId: subjectId || undefined }),
+    [query, subjectId],
   )
 
-  const counts = useMemo(() => {
-    const all = search(query, { subjectId: subjectId || undefined })
-    return {
-      all: all.length,
-      subject: all.filter((r) => r.type === 'subject').length,
-      topic: all.filter((r) => r.type === 'topic').length,
-      section: all.filter((r) => r.type === 'section').length,
-    }
-  }, [query, subjectId])
+  const results =
+    type === 'all' ? allResults : allResults.filter((r) => r.type === type)
+
+  const counts = {
+    all: allResults.length,
+    subject: allResults.filter((r) => r.type === 'subject').length,
+    topic: allResults.filter((r) => r.type === 'topic').length,
+    section: allResults.filter((r) => r.type === 'section').length,
+  }
 
   return (
     <Container className="py-10">
@@ -90,7 +91,7 @@ export function SearchPage() {
           className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-slate-700 dark:bg-slate-900"
         >
           <option value="">All subjects</option>
-          {subjects.map((s) => (
+          {subjects?.map((s) => (
             <option key={s.id} value={s.id}>
               {s.title}
             </option>
@@ -104,6 +105,8 @@ export function SearchPage() {
           <p className="py-10 text-center text-slate-400">
             Start typing to search across all subjects, topics and content.
           </p>
+        ) : loading && results.length === 0 ? (
+          <p className="py-10 text-center text-slate-400">Searching…</p>
         ) : results.length === 0 ? (
           <p className="py-10 text-center text-slate-400">
             No results found for “{query}”.

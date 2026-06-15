@@ -1,8 +1,12 @@
 import { Link } from 'react-router-dom'
 import clsx from 'clsx'
-import type { Roadmap as RoadmapData, RoadmapNode } from '../types/content'
+import type {
+  Roadmap as RoadmapData,
+  RoadmapNode,
+  Subject,
+} from '../types/content'
 import { paths } from '../lib/paths'
-import { getTopic } from '../content/registry'
+import { findTopic } from '../content/data'
 import { useProgress } from '../lib/progressContext'
 
 const levelStyles: Record<string, string> = {
@@ -15,18 +19,19 @@ const levelStyles: Record<string, string> = {
 }
 
 function NodeCard({
-  subjectId,
+  subject,
   node,
 }: {
-  subjectId: string
+  subject: Subject
   node: RoadmapNode
 }) {
+  const subjectId = subject.id
   const { isComplete } = useProgress()
   const optional = node.status === 'optional'
   const done = node.topicId ? isComplete(subjectId, node.topicId) : false
-  const linked = node.topicId ? getTopic(subjectId, node.topicId) : undefined
-  const level = linked?.topic.level
-  const subCount = linked?.topic.subtopics.length ?? 0
+  const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
+  const level = linked?.level
+  const subCount = linked?.subtopics.length ?? 0
   const inner = (
     <div
       className={clsx(
@@ -92,10 +97,10 @@ function NodeCard({
 }
 
 export function Roadmap({
-  subjectId,
+  subject,
   roadmap,
 }: {
-  subjectId: string
+  subject: Subject
   roadmap: RoadmapData
 }) {
   return (
@@ -121,7 +126,7 @@ export function Roadmap({
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {stage.nodes.map((node) => (
-                <NodeCard key={node.id} subjectId={subjectId} node={node} />
+                <NodeCard key={node.id} subject={subject} node={node} />
               ))}
             </div>
           </li>

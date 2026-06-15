@@ -6,30 +6,71 @@ import { Breadcrumb } from '../components/Breadcrumb'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionView } from '../components/sections/SectionView'
 import { TopicTree } from '../components/TopicTree'
-import { flattenTopics, getAncestors, getTopic } from '../content/registry'
+import {
+  findTopic,
+  flattenTopics,
+  getAncestors,
+  loadSubject,
+  loadTopicSections,
+} from '../content/data'
+import type { TopicSections } from '../types/content'
 import { SECTION_DESCRIPTORS } from '../content/sections'
 import { paths } from '../lib/paths'
+import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
 import { useProgress } from '../lib/progressContext'
 
+/** Count every descendant of a topic (used for the "N total" subtopics label). */
+function countDescendants(topic: { subtopics: { subtopics: unknown[] }[] }): number {
+  let n = 0
+  for (const sub of topic.subtopics) {
+    n += 1 + countDescendants(sub as never)
+  }
+  return n
+}
+
 export function TopicPage() {
   const { subjectId = '', topicId = '' } = useParams()
-  const found = getTopic(subjectId, topicId)
+  const { data: subject, loading: subjectLoading } = useAsync(
+    () => loadSubject(subjectId),
+    [subjectId],
+  )
+  const topic = useMemo(
+    () => (subject ? findTopic(subject, topicId) : undefined),
+    [subject, topicId],
+  )
   const { isComplete, toggleComplete, isBookmarked, toggleBookmark, completedAt } =
     useProgress()
   const [confirmOpen, setConfirmOpen] = useState(false)
 
   const available = useMemo(
     () =>
-      found
-        ? SECTION_DESCRIPTORS.filter((d) => found.topic.sections[d.key])
+      topic
+        ? SECTION_DESCRIPTORS.filter((d) => topic.sectionKeys.includes(d.key))
         : [],
-    [found],
+    [topic],
   )
   const sectionIds = useMemo(() => available.map((d) => `section-${d.key}`), [available])
   const activeId = useScrollSpy(sectionIds)
 
-  if (!found) {
+  const hasSections = available.length > 0
+  const { data: sections, loading: sectionsLoading } = useAsync(
+    () =>
+      hasSections
+        ? loadTopicSections(subjectId, topicId)
+        : Promise.resolve({} as TopicSections),
+    [subjectId, topicId, hasSections],
+  )
+
+  if (subjectLoading && !subject) {
+    return (
+      <Container className="flex min-h-[50vh] items-center justify-center py-16">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
+      </Container>
+    )
+  }
+
+  if (!subject || !topic) {
     return (
       <Container className="py-16 text-center">
         <p className="text-lg">Topic not found.</p>
@@ -40,8 +81,7 @@ export function TopicPage() {
     )
   }
 
-  const { subject, topic } = found
-  const ancestors = getAncestors(subject.id, topic.id)
+  const ancestors = getAncestors(subject, topic.id)
   const completedTs = isComplete(subject.id, topic.id)
     ? completedAt(subject.id, topic.id)
     : undefined
@@ -49,7 +89,6 @@ export function TopicPage() {
   const idx = flat.findIndex((t) => t.id === topic.id)
   const prev = idx > 0 ? flat[idx - 1] : undefined
   const next = idx < flat.length - 1 ? flat[idx + 1] : undefined
-  const hasSections = available.length > 0
 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
@@ -152,8 +191,7 @@ export function TopicPage() {
                   <span>🧭</span> Subtopics
                 </h2>
                 <span className="text-sm text-slate-400">
-                  {topic.subtopics.length} direct ·{' '}
-                  {flattenTopics({ ...subject, topics: topic.subtopics }).length} total
+                  {topic.subtopics.length} direct · {countDescendants(topic)} total
                 </span>
               </div>
               <TopicTree
@@ -164,17 +202,23 @@ export function TopicPage() {
             </section>
           )}
 
-          <div className="space-y-12">
-            {available.map((d) => (
-              <section key={d.key} id={`section-${d.key}`} className="scroll-mt-24">
-                <h2 className="mb-4 flex items-center gap-2 text-2xl font-bold">
-                  <span>{d.icon}</span>
-                  {d.label}
-                </h2>
-                <SectionView sectionKey={d.key} sections={topic.sections} />
-              </section>
-            ))}
-          </div>
+          {hasSections && sectionsLoading && !sections ? (
+            <div className="flex min-h-[30vh] items-center justify-center">
+              <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
+            </div>
+          ) : (
+            <div className="space-y-12">
+              {available.map((d) => (
+                <section key={d.key} id={`section-${d.key}`} className="scroll-mt-24">
+                  <h2 className="mb-4 flex items-center gap-2 text-2xl font-bold">
+                    <span>{d.icon}</span>
+                    {d.label}
+                  </h2>
+                  <SectionView sectionKey={d.key} sections={sections ?? {}} />
+                </section>
+              ))}
+            </div>
+          )}
 
           {/* Prev / next */}
           <div className="mt-14 grid gap-3 border-t border-slate-200 pt-6 dark:border-slate-800 sm:grid-cols-2">
