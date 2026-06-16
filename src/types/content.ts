@@ -48,7 +48,6 @@ export interface RoadmapStage {
 
 export interface Roadmap {
   title: string
-  description?: string
   stages: RoadmapStage[]
 }
 

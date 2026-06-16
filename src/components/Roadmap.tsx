@@ -108,11 +108,6 @@ export function Roadmap({
 }) {
   return (
     <div>
-      {roadmap.description && (
-        <p className="mb-6 max-w-2xl text-sm text-slate-600 sm:mb-8 sm:text-base dark:text-slate-400">
-          {roadmap.description}
-        </p>
-      )}
       <ol className="relative space-y-8 sm:space-y-10">
         {/* vertical connector line */}
         <span className="absolute left-[15px] top-2 bottom-2 hidden w-px bg-gradient-to-b from-brand-400 to-violet-400 sm:block" />
