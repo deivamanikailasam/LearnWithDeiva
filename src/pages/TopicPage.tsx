@@ -7,11 +7,13 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionView } from '../components/sections/SectionView'
 import { TopicTree } from '../components/TopicTree'
 import {
+  collectSubtreeIds,
   findTopic,
   flattenTopics,
   getAncestors,
   loadSubject,
   loadTopicSections,
+  planCompletionCascade,
 } from '../content/data'
 import type { TopicSections } from '../types/content'
 import { SECTION_DESCRIPTORS } from '../content/sections'
@@ -40,8 +42,13 @@ export function TopicPage() {
     () => (subject ? findTopic(subject, topicId) : undefined),
     [subject, topicId],
   )
-  const { isComplete, toggleComplete, isBookmarked, toggleBookmark, completedAt } =
-    useProgress()
+  const {
+    isComplete,
+    setCompletedKeys,
+    isBookmarked,
+    toggleBookmark,
+    completedAt,
+  } = useProgress()
   const [confirmOpen, setConfirmOpen] = useState(false)
 
   const available = useMemo(
@@ -257,24 +264,38 @@ export function TopicPage() {
             ? 'Remove completion?'
             : 'Mark as complete?'
         }
-        message={
-          isComplete(subject.id, topic.id) ? (
+        message={(() => {
+          const subtreeSize = Math.max(0, collectSubtreeIds(topic).length - 1)
+          const subPart =
+            subtreeSize > 0
+              ? ` and the ${subtreeSize} subtopic${subtreeSize === 1 ? '' : 's'} below it`
+              : ''
+          return isComplete(subject.id, topic.id) ? (
             <>
-              This removes <span className="font-semibold">{topic.title}</span> from
-              your completed list.
+              This unmarks <span className="font-semibold">{topic.title}</span>
+              {subPart}. Any parent topics will also be unmarked since they
+              require all subtopics to be complete.
             </>
           ) : (
             <>
-              This records <span className="font-semibold">{topic.title}</span> as
-              completed with the current date and time.
+              This records <span className="font-semibold">{topic.title}</span>
+              {subPart} as completed. Parent topics auto-complete when all
+              their subtopics are done.
             </>
           )
-        }
+        })()}
         confirmLabel={
           isComplete(subject.id, topic.id) ? 'Remove' : 'Mark complete'
         }
         onConfirm={() => {
-          toggleComplete(subject.id, topic.id)
+          const willComplete = !isComplete(subject.id, topic.id)
+          const plan = planCompletionCascade(
+            subject,
+            topic,
+            willComplete,
+            (id) => isComplete(subject.id, id),
+          )
+          setCompletedKeys(plan.addKeys, plan.removeKeys)
           setConfirmOpen(false)
         }}
         onCancel={() => setConfirmOpen(false)}

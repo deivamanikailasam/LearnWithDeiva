@@ -266,6 +266,29 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  const setCompletedKeys = useCallback(
+    (addKeys: Iterable<string>, removeKeys: Iterable<string>) => {
+      setCompleted((prev) => {
+        const next = new Map(prev)
+        let changed = false
+        for (const key of removeKeys) {
+          if (next.delete(key)) changed = true
+        }
+        const now = Date.now()
+        for (const key of addKeys) {
+          // Preserve the original timestamp on re-add so "first finished"
+          // never resets when a parent gets auto-marked from a child cascade.
+          if (!next.has(key)) {
+            next.set(key, now)
+            changed = true
+          }
+        }
+        return changed ? next : prev
+      })
+    },
+    [],
+  )
+
   const clearCompleted = useCallback(() => setCompleted(new Map()), [])
   const clearBookmarks = useCallback(() => setBookmarks(new Set()), [])
 
@@ -290,6 +313,7 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       bookmarks,
       isComplete: (s, t) => completed.has(topicKey(s, t)),
       toggleComplete: (s, t) => toggleCompleteKey(topicKey(s, t)),
+      setCompletedKeys,
       completedAt: (s, t) => completed.get(topicKey(s, t)) || undefined,
       isBookmarked: (s, t) => bookmarks.has(topicKey(s, t)),
       toggleBookmark: (s, t) => toggleBookmarkKey(topicKey(s, t)),
@@ -308,6 +332,7 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       bookmarks,
       completedCountsBySubject,
       toggleCompleteKey,
+      setCompletedKeys,
       toggleBookmarkKey,
       clearCompleted,
       clearBookmarks,

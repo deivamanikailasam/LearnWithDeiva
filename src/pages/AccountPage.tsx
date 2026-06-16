@@ -307,7 +307,27 @@ function SubjectProgress({
   )
 }
 
-function TopicLinkList({ items, empty }: { items: ResolvedTopic[]; empty: string }) {
+/**
+ * Default number of topics shown in the Completed / Bookmarks panels before
+ * the "View all" CTA appears. Picked to fill ~3 rows of the 2-column grid on
+ * desktop without dominating the page.
+ */
+const TOPIC_LIST_PREVIEW = 6
+
+function TopicLinkList({
+  items,
+  empty,
+  previewLimit = TOPIC_LIST_PREVIEW,
+}: {
+  items: ResolvedTopic[]
+  empty: string
+  previewLimit?: number
+}) {
+  const [showAll, setShowAll] = useState(false)
+  const hasMore = items.length > previewLimit
+  const visible = showAll || !hasMore ? items : items.slice(0, previewLimit)
+  const hidden = items.length - visible.length
+
   if (items.length === 0)
     return (
       <p className="rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400 dark:border-slate-700">
@@ -315,30 +335,55 @@ function TopicLinkList({ items, empty }: { items: ResolvedTopic[]; empty: string
       </p>
     )
   return (
-    <div className="grid gap-2 sm:grid-cols-2">
-      {items.map(({ subject, topic, ancestors, completedAt }) => {
-        const date = formatDate(completedAt)
-        return (
-          <Link
-            key={`${subject.id}-${topic.id}`}
-            to={paths.topic(subject.id, topic.id)}
-            className="card flex items-center justify-between gap-2 p-3"
-          >
-            <span className="min-w-0">
-              <span className="block truncate text-xs text-slate-400">
-                {[subject.title, ...ancestors.map((a) => a.title)].join(' › ')}
-              </span>
-              <span className="block truncate font-medium">{topic.title}</span>
-              {date && (
-                <span className="mt-0.5 block text-xs text-emerald-600 dark:text-emerald-400">
-                  ✓ Completed {date}
+    <div className="space-y-3">
+      <div className="grid gap-2 sm:grid-cols-2">
+        {visible.map(({ subject, topic, ancestors, completedAt }) => {
+          const date = formatDate(completedAt)
+          return (
+            <Link
+              key={`${subject.id}-${topic.id}`}
+              to={paths.topic(subject.id, topic.id)}
+              className="card flex items-center justify-between gap-2 p-3"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-xs text-slate-400">
+                  {[subject.title, ...ancestors.map((a) => a.title)].join(' › ')}
                 </span>
-              )}
-            </span>
-            <span className="chip shrink-0 capitalize">{topic.level}</span>
-          </Link>
-        )
-      })}
+                <span className="block truncate font-medium">{topic.title}</span>
+                {date && (
+                  <span className="mt-0.5 block text-xs text-emerald-600 dark:text-emerald-400">
+                    ✓ Completed {date}
+                  </span>
+                )}
+              </span>
+              <span className="chip shrink-0 capitalize">{topic.level}</span>
+            </Link>
+          )
+        })}
+      </div>
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          aria-expanded={showAll}
+          className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/10 dark:hover:text-brand-300"
+        >
+          {showAll ? (
+            <>
+              <span>Show less</span>
+              <span aria-hidden>▴</span>
+            </>
+          ) : (
+            <>
+              <span>View all {items.length}</span>
+              <span className="text-xs font-normal text-slate-400 dark:text-slate-500">
+                ({hidden} more)
+              </span>
+              <span aria-hidden>▾</span>
+            </>
+          )}
+        </button>
+      )}
     </div>
   )
 }

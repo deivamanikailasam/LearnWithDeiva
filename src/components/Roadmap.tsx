@@ -1,14 +1,18 @@
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import type {
   Roadmap as RoadmapData,
   RoadmapNode,
+  RoadmapStage,
   Subject,
+  Topic,
 } from '../types/content'
 import { paths } from '../lib/paths'
-import { findTopic } from '../content/data'
+import { collectSubtreeIds, findTopic, planCompletionCascade } from '../content/data'
 import { useProgress } from '../lib/progressContext'
 import { formatDuration, subtreeMinutes } from '../lib/duration'
+import { ConfirmDialog } from './ConfirmDialog'
 
 const levelStyles: Record<string, string> = {
   beginner:
@@ -99,6 +103,163 @@ function NodeCard({
   )
 }
 
+function StageItem({
+  subject,
+  stage,
+  index,
+}: {
+  subject: Subject
+  stage: RoadmapStage
+  index: number
+}) {
+  const { isComplete, setCompletedKeys } = useProgress()
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
+  // Stage progress is derived from the topics each node links to. Nodes
+  // without a `topicId` are decorative and do not count toward completion.
+  const linkedTopics = useMemo<Topic[]>(
+    () =>
+      stage.nodes
+        .map((n) => (n.topicId ? findTopic(subject, n.topicId) : undefined))
+        .filter((t): t is Topic => Boolean(t)),
+    [subject, stage],
+  )
+
+  const completedTopicCount = linkedTopics.filter((t) =>
+    isComplete(subject.id, t.id),
+  ).length
+  const totalTopicCount = linkedTopics.length
+  const stageComplete =
+    totalTopicCount > 0 && completedTopicCount === totalTopicCount
+
+  const subtreeTotal = useMemo(
+    () =>
+      linkedTopics.reduce((acc, t) => acc + collectSubtreeIds(t).length, 0),
+    [linkedTopics],
+  )
+  const stageMinutes = useMemo(
+    () => linkedTopics.reduce((acc, t) => acc + subtreeMinutes(t), 0),
+    [linkedTopics],
+  )
+
+  const onConfirm = () => {
+    const willComplete = !stageComplete
+    const addKeys: string[] = []
+    const removeKeys: string[] = []
+    for (const t of linkedTopics) {
+      const plan = planCompletionCascade(
+        subject,
+        t,
+        willComplete,
+        (id) => isComplete(subject.id, id),
+      )
+      addKeys.push(...plan.addKeys)
+      removeKeys.push(...plan.removeKeys)
+    }
+    setCompletedKeys(addKeys, removeKeys)
+    setConfirmOpen(false)
+  }
+
+  return (
+    <li className="relative sm:pl-12">
+      <span
+        className={clsx(
+          'absolute left-0 top-0 hidden h-8 w-8 place-items-center rounded-full text-sm font-bold text-white shadow sm:grid',
+          stageComplete
+            ? 'bg-gradient-to-br from-emerald-500 to-teal-500'
+            : 'bg-gradient-to-br from-brand-500 to-violet-500',
+        )}
+        aria-label={
+          stageComplete
+            ? `Stage ${index + 1} complete`
+            : `Stage ${index + 1}`
+        }
+      >
+        {stageComplete ? '✓' : index + 1}
+      </span>
+
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-bold">{stage.title}</h3>
+            {stageMinutes > 0 && (
+              <span className="chip">⏱️ {formatDuration(stageMinutes)}</span>
+            )}
+            {totalTopicCount > 0 && (
+              <span
+                className={clsx(
+                  'chip',
+                  stageComplete &&
+                    'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300',
+                )}
+              >
+                {completedTopicCount} / {totalTopicCount} topics
+              </span>
+            )}
+          </div>
+          {stage.summary && (
+            <p className="mt-0.5 text-sm text-slate-500">{stage.summary}</p>
+          )}
+        </div>
+
+        {totalTopicCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            className={clsx(
+              'btn shrink-0 border text-sm',
+              stageComplete
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:bg-emerald-500/15'
+                : 'border-slate-200 bg-white text-slate-700 hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/10 dark:hover:text-brand-300',
+            )}
+            aria-pressed={stageComplete}
+            title={
+              stageComplete
+                ? 'Stage complete — click to undo'
+                : 'Mark every topic in this stage (and their subtopics) as complete'
+            }
+          >
+            {stageComplete ? '✓ Stage complete' : 'Mark stage complete'}
+          </button>
+        )}
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {stage.nodes.map((node) => (
+          <NodeCard key={node.id} subject={subject} node={node} />
+        ))}
+      </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        tone={stageComplete ? 'danger' : 'default'}
+        title={stageComplete ? 'Reset this stage?' : 'Mark stage complete?'}
+        message={
+          stageComplete ? (
+            <>
+              This unmarks every topic in{' '}
+              <span className="font-semibold">{stage.title}</span> ({subtreeTotal}{' '}
+              {subtreeTotal === 1 ? 'topic' : 'topics'} including subtopics).
+            </>
+          ) : (
+            <>
+              This marks every topic in{' '}
+              <span className="font-semibold">{stage.title}</span> as completed
+              — {totalTopicCount} top-level{' '}
+              {totalTopicCount === 1 ? 'topic' : 'topics'} and{' '}
+              {Math.max(0, subtreeTotal - totalTopicCount)} subtopic
+              {subtreeTotal - totalTopicCount === 1 ? '' : 's'} below them.
+            </>
+          )
+        }
+        confirmLabel={stageComplete ? 'Reset stage' : 'Mark stage complete'}
+        onConfirm={onConfirm}
+        onCancel={() => setConfirmOpen(false)}
+      />
+    </li>
+  )
+}
+
 export function Roadmap({
   subject,
   roadmap,
@@ -111,35 +272,14 @@ export function Roadmap({
       <ol className="relative space-y-8 sm:space-y-10">
         {/* vertical connector line */}
         <span className="absolute left-[15px] top-2 bottom-2 hidden w-px bg-gradient-to-b from-brand-400 to-violet-400 sm:block" />
-        {roadmap.stages.map((stage, idx) => {
-          const stageMinutes = stage.nodes.reduce((sum, node) => {
-            const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
-            return sum + (linked ? subtreeMinutes(linked) : 0)
-          }, 0)
-          return (
-          <li key={stage.id} className="relative sm:pl-12">
-            <span className="absolute left-0 top-0 hidden h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-brand-500 to-violet-500 text-sm font-bold text-white shadow sm:grid">
-              {idx + 1}
-            </span>
-            <div className="mb-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-lg font-bold">{stage.title}</h3>
-                {stageMinutes > 0 && (
-                  <span className="chip">⏱️ {formatDuration(stageMinutes)}</span>
-                )}
-              </div>
-              {stage.summary && (
-                <p className="text-sm text-slate-500">{stage.summary}</p>
-              )}
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {stage.nodes.map((node) => (
-                <NodeCard key={node.id} subject={subject} node={node} />
-              ))}
-            </div>
-          </li>
-          )
-        })}
+        {roadmap.stages.map((stage, idx) => (
+          <StageItem
+            key={stage.id}
+            subject={subject}
+            stage={stage}
+            index={idx}
+          />
+        ))}
       </ol>
     </div>
   )

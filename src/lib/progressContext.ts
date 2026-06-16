@@ -19,6 +19,15 @@ export interface ProgressContextValue {
   bookmarks: Set<string>
   isComplete: (subjectId: string, topicId: string) => boolean
   toggleComplete: (subjectId: string, topicId: string) => void
+  /**
+   * Bulk update completed state in a single render: every key in `addKeys` is
+   * marked complete (preserving any existing timestamp), every key in
+   * `removeKeys` is removed. Used to apply parent/child cascade plans atomically.
+   */
+  setCompletedKeys: (
+    addKeys: Iterable<string>,
+    removeKeys: Iterable<string>,
+  ) => void
   /** Epoch ms when the topic was marked complete, or undefined if not/unknown. */
   completedAt: (subjectId: string, topicId: string) => number | undefined
   isBookmarked: (subjectId: string, topicId: string) => boolean

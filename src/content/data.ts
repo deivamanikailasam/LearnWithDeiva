@@ -186,6 +186,63 @@ export function getAncestors(subject: Subject, topicId: string): Topic[] {
   return indexSubject(subject).ancestors.get(topicId) ?? []
 }
 
+/* ----------------------- progress cascade helpers ----------------------- */
+
+/** Every topic id at or below `topic`, preorder (self first). */
+export function collectSubtreeIds(topic: Topic): string[] {
+  const out: string[] = [topic.id]
+  for (const sub of topic.subtopics) out.push(...collectSubtreeIds(sub))
+  return out
+}
+
+/**
+ * Compute the set of `subjectId::topicId` keys that should be added to and
+ * removed from the completed map when toggling a topic's completion, so that:
+ *   • All descendants follow the new state (cascade down).
+ *   • Ancestors auto-complete when *all* of their direct subtopics are now
+ *     complete; on uncomplete, every ancestor is uncompleted (since one of
+ *     their descendants is now incomplete).
+ *
+ * Pure / side-effect free — caller decides how to apply the plan.
+ */
+export function planCompletionCascade(
+  subject: Subject,
+  topic: Topic,
+  complete: boolean,
+  isComplete: (topicId: string) => boolean,
+): { addKeys: string[]; removeKeys: string[] } {
+  const subjectId = subject.id
+  const subtreeIds = collectSubtreeIds(topic)
+  const addKeys: string[] = []
+  const removeKeys: string[] = []
+  for (const id of subtreeIds) {
+    ;(complete ? addKeys : removeKeys).push(`${subjectId}::${id}`)
+  }
+
+  const ancestors = getAncestors(subject, topic.id)
+  if (complete) {
+    // Walk closest → furthest. Auto-mark only while every direct child of the
+    // ancestor is complete (already, or as part of this cascade). Stop at the
+    // first ancestor with an incomplete child.
+    const projected = new Set<string>(subtreeIds)
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const anc = ancestors[i]
+      const allDone = anc.subtopics.every(
+        (sub) => projected.has(sub.id) || isComplete(sub.id),
+      )
+      if (!allDone) break
+      addKeys.push(`${subjectId}::${anc.id}`)
+      projected.add(anc.id)
+    }
+  } else {
+    for (const anc of ancestors) {
+      removeKeys.push(`${subjectId}::${anc.id}`)
+    }
+  }
+
+  return { addKeys, removeKeys }
+}
+
 const LEVEL_ORDER: Record<Difficulty, number> = {
   beginner: 0,
   intermediate: 1,
