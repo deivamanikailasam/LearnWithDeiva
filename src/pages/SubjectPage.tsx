@@ -165,6 +165,7 @@ export function SubjectPage() {
             <ProgressBar
               value={completedInSubject(subject.id)}
               total={subject.topicCount}
+              totalMinutes={subject.estimatedMinutes}
             />
           </div>
         </Container>

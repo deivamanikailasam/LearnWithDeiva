@@ -43,7 +43,11 @@ export function SubjectCard({ subject }: { subject: SubjectIndexEntry }) {
         ) : null}
       </div>
 
-      <ProgressBar value={done} total={subject.topicCount} />
+      <ProgressBar
+        value={done}
+        total={subject.topicCount}
+        totalMinutes={subject.estimatedMinutes}
+      />
     </Link>
   )
 }

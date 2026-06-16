@@ -295,7 +295,11 @@ function SubjectProgress({
               <span className="text-xl">{s.icon}</span>
               <span className="font-semibold">{s.title}</span>
             </div>
-            <ProgressBar value={completedInSubject(s.id)} total={s.topicCount} />
+            <ProgressBar
+              value={completedInSubject(s.id)}
+              total={s.topicCount}
+              totalMinutes={s.estimatedMinutes}
+            />
           </Link>
         ))}
       </div>
