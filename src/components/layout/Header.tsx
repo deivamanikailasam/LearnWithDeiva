@@ -37,7 +37,7 @@ export function Header() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/80 backdrop-blur dark:border-slate-800/70 dark:bg-slate-950/80">
-      <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-3 sm:h-16 sm:gap-4 sm:px-6 lg:px-8">
+      <div className="mx-auto flex h-14 w-full max-w-[110rem] items-center gap-2 px-3 sm:h-16 sm:gap-4 sm:px-5 lg:px-6 xl:px-8">
         <button
           type="button"
           onClick={() => setMenuOpen((v) => !v)}
@@ -112,7 +112,7 @@ export function Header() {
             : 'pointer-events-none max-h-0 opacity-0',
         )}
       >
-        <nav className="mx-auto flex max-w-7xl flex-col gap-1 px-3 py-3 sm:px-6">
+        <nav className="mx-auto flex w-full max-w-[110rem] flex-col gap-1 px-3 py-3 sm:px-5 lg:px-6 xl:px-8">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
