@@ -1,0 +1,662 @@
+/**
+ * Part 3: subtopics + sub-subtopics for stages 5-7
+ *   5. Scripting & Automation Languages
+ *   6. Build, Package & Artifact Management
+ *   7. Service Mesh & API Gateway
+ */
+import { addTopics } from './addTopics.mjs'
+
+addTopics([
+  /* ============================================================
+   * STAGE 5 — Scripting & Automation Languages
+   * ============================================================ */
+
+  /* ---- bash-shell-scripting ---- */
+  { id: 'bash-variables-quoting', title: 'Variables & Quoting', parentId: 'bash-shell-scripting' },
+  { id: 'bash-conditionals', title: 'Conditionals (if, case, test)', parentId: 'bash-shell-scripting' },
+  { id: 'bash-loops', title: 'Loops (for, while, until, select)', parentId: 'bash-shell-scripting' },
+  { id: 'bash-functions', title: 'Functions', parentId: 'bash-shell-scripting' },
+  {
+    id: 'bash-arrays',
+    title: 'Arrays',
+    parentId: 'bash-shell-scripting',
+    children: [
+      { id: 'indexed-arrays', title: 'Indexed Arrays' },
+      { id: 'associative-arrays', title: 'Associative Arrays' },
+    ],
+  },
+  { id: 'bash-string-manipulation', title: 'String Manipulation & Parameter Expansion', parentId: 'bash-shell-scripting' },
+  { id: 'bash-arithmetic', title: 'Arithmetic', parentId: 'bash-shell-scripting' },
+  { id: 'io-redirection', title: 'I/O Redirection', parentId: 'bash-shell-scripting' },
+  { id: 'pipes-and-filters', title: 'Pipes & Filters', parentId: 'bash-shell-scripting' },
+  { id: 'process-substitution', title: 'Process Substitution', parentId: 'bash-shell-scripting' },
+  { id: 'command-substitution', title: 'Command Substitution', parentId: 'bash-shell-scripting' },
+  {
+    id: 'bash-error-handling',
+    title: 'Exit Codes & Error Handling',
+    parentId: 'bash-shell-scripting',
+    children: [
+      { id: 'set-e-u-pipefail', title: 'set -e, -u, -o pipefail' },
+      { id: 'trap', title: 'trap' },
+      { id: 'exit-codes', title: 'Exit Codes' },
+      { id: 'bash-strict-mode', title: 'Bash Strict Mode' },
+    ],
+  },
+  { id: 'subshells-background-jobs', title: 'Subshells & Background Jobs', parentId: 'bash-shell-scripting' },
+  { id: 'reading-user-input', title: 'Reading User Input (read)', parentId: 'bash-shell-scripting' },
+  { id: 'bash-getopts', title: 'CLI Argument Parsing (getopts, getopt)', parentId: 'bash-shell-scripting' },
+  { id: 'heredocs-herestrings', title: 'Heredocs & Herestrings', parentId: 'bash-shell-scripting' },
+  { id: 'bash-debugging', title: 'Debugging Bash Scripts (set -x, bash -n)', parentId: 'bash-shell-scripting' },
+  { id: 'shellcheck-integration', title: 'ShellCheck Integration', parentId: 'bash-shell-scripting' },
+  {
+    id: 'bash-common-patterns',
+    title: 'Common Patterns',
+    parentId: 'bash-shell-scripting',
+    children: [
+      { id: 'shell-logging-pattern', title: 'Logging' },
+      { id: 'shell-locking-flock', title: 'Locking (flock)' },
+      { id: 'shell-retry-backoff', title: 'Retry & Backoff' },
+      { id: 'shell-idempotency', title: 'Idempotency' },
+      { id: 'shell-temp-files', title: 'Temp Files & Cleanup' },
+    ],
+  },
+  { id: 'bash-style-guide', title: 'Bash Style Guide & Best Practices', parentId: 'bash-shell-scripting' },
+
+  /* ---- powershell-scripting ---- */
+  {
+    id: 'powershell-editions',
+    title: 'PowerShell Editions',
+    parentId: 'powershell-scripting',
+    children: [
+      { id: 'windows-powershell', title: 'Windows PowerShell 5.1' },
+      { id: 'powershell-7-pwsh', title: 'PowerShell 7+ (pwsh)' },
+    ],
+  },
+  { id: 'cmdlets', title: 'Cmdlets', parentId: 'powershell-scripting' },
+  { id: 'powershell-pipelines-objects', title: 'Pipelines & Objects', parentId: 'powershell-scripting' },
+  { id: 'powershell-variables-types', title: 'Variables & Data Types', parentId: 'powershell-scripting' },
+  { id: 'powershell-operators', title: 'Operators', parentId: 'powershell-scripting' },
+  { id: 'powershell-control-flow', title: 'Control Flow', parentId: 'powershell-scripting' },
+  { id: 'powershell-functions', title: 'Functions & Advanced Functions', parentId: 'powershell-scripting' },
+  { id: 'powershell-modules', title: 'Modules', parentId: 'powershell-scripting' },
+  { id: 'powershell-error-handling', title: 'Error Handling (try/catch, ErrorAction)', parentId: 'powershell-scripting' },
+  {
+    id: 'powershell-remoting',
+    title: 'PowerShell Remoting',
+    parentId: 'powershell-scripting',
+    children: [
+      { id: 'psremoting-winrm', title: 'PSRemoting & WinRM' },
+      { id: 'powershell-ssh-remoting', title: 'SSH Remoting' },
+    ],
+  },
+  { id: 'desired-state-configuration', title: 'Desired State Configuration (DSC)', parentId: 'powershell-scripting' },
+  { id: 'powershell-jobs', title: 'Background Jobs & ThreadJobs', parentId: 'powershell-scripting' },
+  { id: 'powershell-profiles', title: 'Profiles', parentId: 'powershell-scripting' },
+  {
+    id: 'powershell-package-management',
+    title: 'Package Management',
+    parentId: 'powershell-scripting',
+    children: [
+      { id: 'powershellget', title: 'PowerShellGet' },
+      { id: 'psresourceget', title: 'PSResourceGet' },
+      { id: 'powershell-gallery', title: 'PowerShell Gallery' },
+    ],
+  },
+  { id: 'powershell-graph-azure', title: 'Microsoft Graph & Azure PowerShell', parentId: 'powershell-scripting' },
+  { id: 'powershell-classes', title: 'PowerShell Classes', parentId: 'powershell-scripting' },
+  { id: 'pester-testing', title: 'Pester (PowerShell Testing)', parentId: 'powershell-scripting' },
+
+  /* ---- go-for-devops ---- */
+  { id: 'why-go-devops', title: 'Why Go for DevOps', parentId: 'go-for-devops' },
+  { id: 'go-basics', title: 'Go Basics (Variables, Types, Control Flow)', parentId: 'go-for-devops' },
+  { id: 'go-functions-methods', title: 'Functions & Methods', parentId: 'go-for-devops' },
+  { id: 'go-structs-interfaces', title: 'Structs & Interfaces', parentId: 'go-for-devops' },
+  { id: 'go-error-handling', title: 'Error Handling', parentId: 'go-for-devops' },
+  {
+    id: 'go-concurrency',
+    title: 'Concurrency',
+    parentId: 'go-for-devops',
+    children: [
+      { id: 'goroutines', title: 'Goroutines' },
+      { id: 'go-channels', title: 'Channels' },
+      { id: 'go-select', title: 'select Statement' },
+      { id: 'go-context', title: 'context Package' },
+      { id: 'sync-package', title: 'sync Package' },
+    ],
+  },
+  {
+    id: 'go-stdlib-for-devops',
+    title: 'Standard Library Highlights',
+    parentId: 'go-for-devops',
+    children: [
+      { id: 'os-exec', title: 'os & os/exec' },
+      { id: 'net-http', title: 'net/http' },
+      { id: 'encoding-json-yaml', title: 'encoding/json & yaml' },
+      { id: 'go-flag-package', title: 'flag Package' },
+      { id: 'go-log-slog', title: 'log & log/slog' },
+      { id: 'go-io-fs', title: 'io & io/fs' },
+    ],
+  },
+  { id: 'cobra-cli', title: 'Cobra (CLI Framework)', parentId: 'go-for-devops' },
+  { id: 'viper-config', title: 'Viper (Configuration)', parentId: 'go-for-devops' },
+  { id: 'building-cli-tools-go', title: 'Building DevOps CLI Tools', parentId: 'go-for-devops' },
+  {
+    id: 'kubernetes-operators-in-go',
+    title: 'Building Kubernetes Operators in Go',
+    parentId: 'go-for-devops',
+    children: [
+      { id: 'controller-runtime', title: 'controller-runtime' },
+      { id: 'kubebuilder-go', title: 'Kubebuilder' },
+      { id: 'operator-sdk-go', title: 'Operator SDK' },
+    ],
+  },
+  { id: 'go-cross-compilation', title: 'Cross-Compilation', parentId: 'go-for-devops' },
+  { id: 'go-modules-deps', title: 'Modules & Dependency Management', parentId: 'go-for-devops' },
+  { id: 'go-testing', title: 'Testing (testing, testify, ginkgo)', parentId: 'go-for-devops' },
+  { id: 'notable-go-devops-tools', title: 'Notable Go-Based DevOps Tools', parentId: 'go-for-devops' },
+  { id: 'goreleaser', title: 'GoReleaser', parentId: 'go-for-devops' },
+
+  /* ---- configuration-languages ---- */
+  {
+    id: 'yaml',
+    title: 'YAML',
+    parentId: 'configuration-languages',
+    children: [
+      { id: 'yaml-syntax', title: 'YAML Syntax & Data Types' },
+      { id: 'yaml-anchors-aliases', title: 'Anchors & Aliases' },
+      { id: 'yaml-multiline-strings', title: 'Multiline Strings (|, >)' },
+      { id: 'yaml-merge-keys', title: 'Merge Keys' },
+      { id: 'yaml-versions', title: 'YAML 1.1 vs 1.2' },
+      { id: 'yaml-pitfalls', title: 'YAML Pitfalls (Norway Problem)' },
+      { id: 'yaml-schemas', title: 'YAML Schemas' },
+      { id: 'strict-yaml', title: 'StrictYAML' },
+    ],
+  },
+  {
+    id: 'json',
+    title: 'JSON',
+    parentId: 'configuration-languages',
+    children: [
+      { id: 'json-syntax', title: 'JSON Syntax' },
+      { id: 'json5', title: 'JSON5' },
+      { id: 'json-with-comments', title: 'JSONC' },
+      { id: 'json-schema', title: 'JSON Schema' },
+      { id: 'json-pointer-patch', title: 'JSON Pointer & Patch' },
+    ],
+  },
+  {
+    id: 'toml',
+    title: 'TOML',
+    parentId: 'configuration-languages',
+    children: [
+      { id: 'toml-syntax', title: 'TOML Syntax' },
+      { id: 'toml-use-cases', title: 'TOML Use Cases (Cargo, Poetry, pyproject)' },
+    ],
+  },
+  { id: 'hcl', title: 'HCL (HashiCorp Configuration Language)', parentId: 'configuration-languages' },
+  { id: 'ini-files', title: 'INI Files', parentId: 'configuration-languages' },
+  { id: 'xml-overview', title: 'XML (Overview)', parentId: 'configuration-languages' },
+  { id: 'environment-files-dotenv', title: '.env Files (dotenv)', parentId: 'configuration-languages' },
+  { id: 'env-substitution', title: 'envsubst & Variable Expansion', parentId: 'configuration-languages' },
+  {
+    id: 'templating-engines',
+    title: 'Templating Engines',
+    parentId: 'configuration-languages',
+    children: [
+      { id: 'jinja2', title: 'Jinja2' },
+      { id: 'go-templates', title: 'Go Templates' },
+      { id: 'helm-templates', title: 'Helm Templates (Sprig)' },
+      { id: 'mustache-handlebars', title: 'Mustache & Handlebars' },
+      { id: 'liquid-template', title: 'Liquid' },
+    ],
+  },
+  {
+    id: 'data-interchange-formats',
+    title: 'Data Interchange Formats',
+    parentId: 'configuration-languages',
+    children: [
+      { id: 'protocol-buffers', title: 'Protocol Buffers' },
+      { id: 'apache-avro', title: 'Apache Avro' },
+      { id: 'messagepack', title: 'MessagePack' },
+      { id: 'cbor', title: 'CBOR' },
+      { id: 'flatbuffers', title: 'FlatBuffers' },
+    ],
+  },
+  {
+    id: 'next-gen-config-languages',
+    title: 'Next-Gen Configuration Languages',
+    parentId: 'configuration-languages',
+    children: [
+      { id: 'jsonnet', title: 'Jsonnet' },
+      { id: 'cue-lang', title: 'CUE' },
+      { id: 'dhall', title: 'Dhall' },
+      { id: 'nickel', title: 'Nickel' },
+      { id: 'kcl-lang', title: 'KCL' },
+      { id: 'pkl', title: 'Pkl (Apple)' },
+      { id: 'starlark', title: 'Starlark' },
+    ],
+  },
+
+  /* ---- regex-for-devops ---- */
+  { id: 'regex-fundamentals', title: 'Regex Fundamentals', parentId: 'regex-for-devops' },
+  { id: 'regex-character-classes', title: 'Character Classes', parentId: 'regex-for-devops' },
+  { id: 'regex-quantifiers', title: 'Quantifiers', parentId: 'regex-for-devops' },
+  { id: 'regex-anchors', title: 'Anchors & Boundaries', parentId: 'regex-for-devops' },
+  { id: 'regex-groups-backreferences', title: 'Groups & Backreferences', parentId: 'regex-for-devops' },
+  { id: 'regex-lookaround', title: 'Lookahead & Lookbehind', parentId: 'regex-for-devops' },
+  { id: 'regex-greedy-vs-lazy', title: 'Greedy vs Lazy Matching', parentId: 'regex-for-devops' },
+  {
+    id: 'regex-flavors',
+    title: 'Regex Flavors',
+    parentId: 'regex-for-devops',
+    children: [
+      { id: 'posix-bre-ere', title: 'POSIX BRE & ERE' },
+      { id: 'pcre', title: 'PCRE & PCRE2' },
+      { id: 'perl-regex', title: 'Perl Regex' },
+      { id: 're2', title: 'RE2 (Go)' },
+      { id: 'javascript-regex', title: 'JavaScript Regex' },
+    ],
+  },
+  {
+    id: 'regex-in-devops-tools',
+    title: 'Regex in DevOps Tools',
+    parentId: 'regex-for-devops',
+    children: [
+      { id: 'regex-in-grep', title: 'Regex in grep / ripgrep' },
+      { id: 'regex-in-sed-awk', title: 'Regex in sed & awk' },
+      { id: 'regex-in-fluentd-vector', title: 'Regex in Fluentd / Fluent Bit / Vector' },
+      { id: 'regex-in-prometheus-relabel', title: 'Regex in Prometheus relabel_configs' },
+      { id: 'regex-in-logstash', title: 'Regex / Grok in Logstash' },
+    ],
+  },
+  { id: 'regex-testing-tools', title: 'Regex Testing Tools (regex101, regexr)', parentId: 'regex-for-devops' },
+  {
+    id: 'regex-common-devops-patterns',
+    title: 'Common DevOps Regex Patterns',
+    parentId: 'regex-for-devops',
+    children: [
+      { id: 'regex-ip-addresses', title: 'IP Addresses' },
+      { id: 'regex-urls', title: 'URLs' },
+      { id: 'regex-timestamps', title: 'Timestamps' },
+      { id: 'regex-log-parsing', title: 'Log Line Parsing' },
+      { id: 'regex-semver', title: 'Semantic Versions' },
+    ],
+  },
+  { id: 'regex-performance-redos', title: 'Regex Performance & ReDoS', parentId: 'regex-for-devops' },
+
+  /* ============================================================
+   * STAGE 6 — Build, Package & Artifact Management
+   * ============================================================ */
+
+  /* ---- build-tools ---- */
+  { id: 'make', title: 'GNU Make', parentId: 'build-tools' },
+  { id: 'cmake', title: 'CMake', parentId: 'build-tools' },
+  { id: 'bazel', title: 'Bazel', parentId: 'build-tools' },
+  { id: 'buck2', title: 'Buck2', parentId: 'build-tools' },
+  { id: 'pants-build', title: 'Pants (v2)', parentId: 'build-tools' },
+  { id: 'please-build', title: 'Please', parentId: 'build-tools' },
+  { id: 'earthly', title: 'Earthly', parentId: 'build-tools' },
+  { id: 'mill-build', title: 'Mill', parentId: 'build-tools' },
+  { id: 'just-runner', title: 'just (Command Runner)', parentId: 'build-tools' },
+  { id: 'task-taskfile', title: 'Task (Taskfile.dev)', parentId: 'build-tools' },
+  { id: 'ninja-build', title: 'Ninja', parentId: 'build-tools' },
+  { id: 'dagger', title: 'Dagger', parentId: 'build-tools' },
+  { id: 'mage-go-build', title: 'Mage (Go-based builds)', parentId: 'build-tools' },
+  { id: 'gradle-overview', title: 'Gradle (Overview)', parentId: 'build-tools' },
+  { id: 'maven-overview', title: 'Maven (Overview)', parentId: 'build-tools' },
+  { id: 'sbt-overview', title: 'sbt (Scala) Overview', parentId: 'build-tools' },
+  { id: 'build-caching', title: 'Build Caching', parentId: 'build-tools' },
+  { id: 'remote-build-execution', title: 'Remote Build Execution', parentId: 'build-tools' },
+  { id: 'reproducible-builds', title: 'Reproducible Builds', parentId: 'build-tools' },
+  { id: 'hermetic-builds', title: 'Hermetic Builds', parentId: 'build-tools' },
+  { id: 'incremental-builds', title: 'Incremental Builds', parentId: 'build-tools' },
+
+  /* ---- package-managers (OS) ---- */
+  {
+    id: 'linux-os-package-managers',
+    title: 'Linux OS Package Managers',
+    parentId: 'package-managers',
+    children: [
+      { id: 'apt-deb', title: 'APT & dpkg (Debian / Ubuntu)' },
+      { id: 'yum-dnf-rpm', title: 'YUM / DNF & RPM (RHEL / Fedora)' },
+      { id: 'apk-alpine', title: 'APK (Alpine)' },
+      { id: 'pacman-arch', title: 'pacman (Arch)' },
+      { id: 'zypper-opensuse', title: 'Zypper (openSUSE)' },
+      { id: 'portage-gentoo', title: 'Portage (Gentoo)' },
+    ],
+  },
+  {
+    id: 'cross-platform-package-managers',
+    title: 'Cross-Platform Package Managers',
+    parentId: 'package-managers',
+    children: [
+      { id: 'homebrew', title: 'Homebrew (macOS / Linux)' },
+      { id: 'nix-package-manager', title: 'Nix' },
+      { id: 'asdf-version-manager', title: 'asdf' },
+      { id: 'mise-version-manager', title: 'mise (formerly rtx)' },
+    ],
+  },
+  {
+    id: 'windows-package-managers',
+    title: 'Windows Package Managers',
+    parentId: 'package-managers',
+    children: [
+      { id: 'chocolatey', title: 'Chocolatey' },
+      { id: 'winget', title: 'Winget' },
+      { id: 'scoop', title: 'Scoop' },
+    ],
+  },
+  {
+    id: 'universal-package-formats',
+    title: 'Universal Package Formats',
+    parentId: 'package-managers',
+    children: [
+      { id: 'snap-packages', title: 'Snap' },
+      { id: 'flatpak', title: 'Flatpak' },
+      { id: 'appimage', title: 'AppImage' },
+    ],
+  },
+  {
+    id: 'building-os-packages',
+    title: 'Building OS Packages',
+    parentId: 'package-managers',
+    children: [
+      { id: 'building-deb-packages', title: 'Building .deb Packages' },
+      { id: 'building-rpm-packages', title: 'Building .rpm Packages' },
+      { id: 'fpm-tool', title: 'fpm (Effing Package Management)' },
+      { id: 'goreleaser-pkg', title: 'GoReleaser for OS Packages' },
+      { id: 'nfpm', title: 'nFPM' },
+    ],
+  },
+
+  /* ---- artifact-repositories ---- */
+  { id: 'sonatype-nexus', title: 'Sonatype Nexus Repository', parentId: 'artifact-repositories' },
+  { id: 'jfrog-artifactory', title: 'JFrog Artifactory', parentId: 'artifact-repositories' },
+  { id: 'cloudsmith', title: 'Cloudsmith', parentId: 'artifact-repositories' },
+  { id: 'github-packages-repo', title: 'GitHub Packages', parentId: 'artifact-repositories' },
+  { id: 'gitlab-package-registry-repo', title: 'GitLab Package Registry', parentId: 'artifact-repositories' },
+  { id: 'azure-artifacts', title: 'Azure Artifacts', parentId: 'artifact-repositories' },
+  { id: 'aws-codeartifact', title: 'AWS CodeArtifact (Overview)', parentId: 'artifact-repositories' },
+  { id: 'google-artifact-registry-meta', title: 'Google Artifact Registry (Overview)', parentId: 'artifact-repositories' },
+  { id: 'verdaccio', title: 'Verdaccio (npm)', parentId: 'artifact-repositories' },
+  { id: 'pulp-project', title: 'Pulp Project', parentId: 'artifact-repositories' },
+  {
+    id: 'repository-types',
+    title: 'Repository Types',
+    parentId: 'artifact-repositories',
+    children: [
+      { id: 'maven-repos', title: 'Maven Repositories' },
+      { id: 'npm-repos', title: 'npm Repositories' },
+      { id: 'pypi-repos', title: 'PyPI Repositories' },
+      { id: 'nuget-repos', title: 'NuGet Repositories' },
+      { id: 'go-module-proxies', title: 'Go Module Proxies' },
+      { id: 'helm-repos', title: 'Helm Chart Repositories' },
+      { id: 'generic-raw-repos', title: 'Generic / Raw Repositories' },
+    ],
+  },
+  {
+    id: 'repository-topologies',
+    title: 'Repository Topologies',
+    parentId: 'artifact-repositories',
+    children: [
+      { id: 'proxy-repositories', title: 'Proxy Repositories' },
+      { id: 'hosted-repositories', title: 'Hosted Repositories' },
+      { id: 'group-virtual-repositories', title: 'Group / Virtual Repositories' },
+    ],
+  },
+  { id: 'cleanup-retention-policies', title: 'Cleanup & Retention Policies', parentId: 'artifact-repositories' },
+  { id: 'artifact-scanning-signing', title: 'Artifact Scanning & Signing', parentId: 'artifact-repositories' },
+  { id: 'artifact-promotion', title: 'Artifact Promotion (Dev → Stage → Prod)', parentId: 'artifact-repositories' },
+
+  /* ---- container-binary-registries ---- */
+  {
+    id: 'public-container-registries',
+    title: 'Public Container Registries',
+    parentId: 'container-binary-registries',
+    children: [
+      { id: 'docker-hub', title: 'Docker Hub' },
+      { id: 'quay-io', title: 'Quay.io' },
+      { id: 'github-container-registry', title: 'GitHub Container Registry (GHCR)' },
+      { id: 'gitlab-container-registry-binreg', title: 'GitLab Container Registry' },
+    ],
+  },
+  {
+    id: 'cloud-container-registries',
+    title: 'Cloud Container Registries',
+    parentId: 'container-binary-registries',
+    children: [
+      { id: 'amazon-ecr', title: 'Amazon ECR (Overview)' },
+      { id: 'google-artifact-registry-gar', title: 'Google Artifact Registry (Overview)' },
+      { id: 'azure-container-registry-acr', title: 'Azure Container Registry (Overview)' },
+      { id: 'oracle-container-registry', title: 'Oracle Container Registry' },
+    ],
+  },
+  {
+    id: 'self-hosted-container-registries',
+    title: 'Self-Hosted Container Registries',
+    parentId: 'container-binary-registries',
+    children: [
+      { id: 'docker-distribution', title: 'Docker Distribution (CNCF distribution)' },
+      { id: 'harbor', title: 'Harbor (CNCF)' },
+      { id: 'zot-registry', title: 'zot' },
+      { id: 'jfrog-container-registry', title: 'JFrog Container Registry' },
+    ],
+  },
+  { id: 'oci-distribution-spec', title: 'OCI Distribution Specification', parentId: 'container-binary-registries' },
+  {
+    id: 'image-signing-verification',
+    title: 'Image Signing & Verification',
+    parentId: 'container-binary-registries',
+    children: [
+      { id: 'cosign-signing', title: 'Cosign' },
+      { id: 'notary-v2', title: 'Notary v2 / Notation' },
+      { id: 'in-toto-attestations', title: 'in-toto Attestations' },
+    ],
+  },
+  {
+    id: 'registry-image-scanning',
+    title: 'Registry Image Scanning',
+    parentId: 'container-binary-registries',
+    children: [
+      { id: 'trivy-registry', title: 'Trivy' },
+      { id: 'grype-registry', title: 'Grype' },
+      { id: 'clair', title: 'Clair' },
+      { id: 'snyk-container-registry', title: 'Snyk Container' },
+    ],
+  },
+  { id: 'registry-mirrors-pull-through', title: 'Registry Mirrors & Pull-Through Caches', parentId: 'container-binary-registries' },
+  { id: 'registry-garbage-collection', title: 'Registry Garbage Collection', parentId: 'container-binary-registries' },
+  { id: 'multi-arch-images', title: 'Multi-Arch Images', parentId: 'container-binary-registries' },
+  { id: 'manifest-lists', title: 'Manifest Lists & Image Indexes', parentId: 'container-binary-registries' },
+  { id: 'registry-immutable-tags', title: 'Immutable & Mutable Tags', parentId: 'container-binary-registries' },
+  { id: 'registry-replication', title: 'Registry Replication & Geo-Distribution', parentId: 'container-binary-registries' },
+
+  /* ============================================================
+   * STAGE 7 — Service Mesh & API Gateway
+   * ============================================================ */
+
+  /* ---- service-mesh-fundamentals ---- */
+  { id: 'what-is-service-mesh', title: 'What is a Service Mesh?', parentId: 'service-mesh-fundamentals' },
+  { id: 'data-plane-vs-control-plane', title: 'Data Plane vs Control Plane', parentId: 'service-mesh-fundamentals' },
+  { id: 'sidecar-pattern', title: 'Sidecar Pattern', parentId: 'service-mesh-fundamentals' },
+  { id: 'ambient-mesh-pattern', title: 'Ambient / Sidecar-Less Mesh', parentId: 'service-mesh-fundamentals' },
+  { id: 'service-mesh-use-cases', title: 'Service Mesh Use Cases', parentId: 'service-mesh-fundamentals' },
+  {
+    id: 'service-mesh-capabilities',
+    title: 'Core Capabilities',
+    parentId: 'service-mesh-fundamentals',
+    children: [
+      { id: 'mesh-traffic-management', title: 'Traffic Management' },
+      { id: 'mesh-mtls', title: 'Mutual TLS (mTLS)' },
+      { id: 'mesh-observability', title: 'Observability' },
+      { id: 'mesh-policy-enforcement', title: 'Policy Enforcement' },
+      { id: 'mesh-retries-circuit-breaking', title: 'Retries & Circuit Breaking' },
+      { id: 'mesh-fault-injection', title: 'Fault Injection' },
+    ],
+  },
+  { id: 'multi-cluster-service-mesh', title: 'Multi-Cluster Service Mesh', parentId: 'service-mesh-fundamentals' },
+  { id: 'service-mesh-interface-smi', title: 'Service Mesh Interface (SMI)', parentId: 'service-mesh-fundamentals' },
+  { id: 'gateway-api-mesh', title: 'Gateway API for Service Mesh (GAMMA)', parentId: 'service-mesh-fundamentals' },
+  { id: 'wasm-mesh-extensions', title: 'WebAssembly (Wasm) Mesh Extensions', parentId: 'service-mesh-fundamentals' },
+  { id: 'service-mesh-vs-libraries', title: 'Service Mesh vs Smart Libraries', parentId: 'service-mesh-fundamentals' },
+
+  /* ---- istio ---- */
+  { id: 'istio-architecture', title: 'Istio Architecture', parentId: 'istio' },
+  { id: 'istiod-control-plane', title: 'Istiod (Control Plane)', parentId: 'istio' },
+  { id: 'istio-envoy-proxy', title: 'Envoy Proxy (Data Plane)', parentId: 'istio' },
+  {
+    id: 'istio-installation',
+    title: 'Installation',
+    parentId: 'istio',
+    children: [
+      { id: 'istioctl-install', title: 'istioctl' },
+      { id: 'istio-helm-install', title: 'Helm Install' },
+      { id: 'istio-operator', title: 'Istio Operator (Legacy)' },
+    ],
+  },
+  {
+    id: 'istio-ambient-mode',
+    title: 'Ambient Mode',
+    parentId: 'istio',
+    children: [
+      { id: 'istio-ztunnel', title: 'ztunnel' },
+      { id: 'istio-waypoint-proxy', title: 'Waypoint Proxies' },
+      { id: 'istio-l4-l7-modes', title: 'L4 vs L7 Ambient' },
+    ],
+  },
+  {
+    id: 'istio-traffic-management',
+    title: 'Traffic Management',
+    parentId: 'istio',
+    children: [
+      { id: 'virtualservice', title: 'VirtualService' },
+      { id: 'destinationrule', title: 'DestinationRule' },
+      { id: 'istio-gateway', title: 'Gateway (Ingress / Egress)' },
+      { id: 'serviceentry', title: 'ServiceEntry' },
+      { id: 'sidecar-resource', title: 'Sidecar Resource' },
+      { id: 'istio-traffic-mirroring', title: 'Traffic Mirroring' },
+      { id: 'istio-canary-traffic', title: 'Canary & Weighted Routing' },
+    ],
+  },
+  {
+    id: 'istio-security',
+    title: 'Security',
+    parentId: 'istio',
+    children: [
+      { id: 'peerauthentication', title: 'PeerAuthentication' },
+      { id: 'requestauthentication', title: 'RequestAuthentication' },
+      { id: 'authorizationpolicy', title: 'AuthorizationPolicy' },
+      { id: 'istio-certificate-management', title: 'Certificate Management' },
+    ],
+  },
+  { id: 'istio-telemetry', title: 'Telemetry (Metrics, Traces, Logs)', parentId: 'istio' },
+  {
+    id: 'istio-extensions',
+    title: 'Extensions',
+    parentId: 'istio',
+    children: [
+      { id: 'wasmplugin', title: 'WasmPlugin' },
+      { id: 'envoyfilter', title: 'EnvoyFilter' },
+    ],
+  },
+  { id: 'istio-multi-cluster', title: 'Multi-Cluster Istio', parentId: 'istio' },
+  { id: 'istio-cni', title: 'Istio CNI', parentId: 'istio' },
+  { id: 'istio-gateway-api', title: 'Istio with Gateway API', parentId: 'istio' },
+  { id: 'istio-versioning', title: 'Istio Versions & Upgrades', parentId: 'istio' },
+  { id: 'istio-troubleshooting', title: 'Istio Troubleshooting', parentId: 'istio' },
+
+  /* ---- linkerd ---- */
+  { id: 'linkerd-architecture', title: 'Linkerd Architecture', parentId: 'linkerd' },
+  { id: 'linkerd2-proxy-rust', title: 'linkerd2-proxy (Rust)', parentId: 'linkerd' },
+  { id: 'linkerd-control-plane', title: 'Control Plane Components', parentId: 'linkerd' },
+  {
+    id: 'linkerd-installation',
+    title: 'Installation',
+    parentId: 'linkerd',
+    children: [
+      { id: 'linkerd-cli', title: 'linkerd CLI' },
+      { id: 'linkerd-helm', title: 'Helm Install' },
+    ],
+  },
+  { id: 'linkerd-mtls-default', title: 'mTLS by Default', parentId: 'linkerd' },
+  { id: 'linkerd-traffic-split', title: 'Traffic Split & SMI', parentId: 'linkerd' },
+  { id: 'linkerd-policy', title: 'Linkerd Policy (Server, ServerAuthorization)', parentId: 'linkerd' },
+  { id: 'linkerd-multi-cluster', title: 'Multi-Cluster Linkerd', parentId: 'linkerd' },
+  { id: 'linkerd-observability', title: 'Linkerd Observability', parentId: 'linkerd' },
+  { id: 'buoyant-cloud', title: 'Buoyant Cloud / Enterprise', parentId: 'linkerd' },
+  { id: 'linkerd-performance', title: 'Linkerd Performance Characteristics', parentId: 'linkerd' },
+
+  /* ---- other-service-meshes ---- */
+  { id: 'cilium-service-mesh', title: 'Cilium Service Mesh (eBPF, Sidecar-Less)', parentId: 'other-service-meshes' },
+  { id: 'consul-connect', title: 'HashiCorp Consul Connect', parentId: 'other-service-meshes' },
+  { id: 'kuma-mesh', title: 'Kuma', parentId: 'other-service-meshes' },
+  { id: 'nginx-service-mesh', title: 'NGINX Service Mesh', parentId: 'other-service-meshes' },
+  { id: 'tetrate-service-bridge', title: 'Tetrate Service Bridge (TSB)', parentId: 'other-service-meshes' },
+  { id: 'gloo-mesh', title: 'Solo.io Gloo Mesh', parentId: 'other-service-meshes' },
+  { id: 'osm-discontinued', title: 'Open Service Mesh (OSM) — Discontinued', parentId: 'other-service-meshes' },
+  { id: 'aws-app-mesh-discontinued', title: 'AWS App Mesh — Discontinued', parentId: 'other-service-meshes' },
+  { id: 'maesh-traefik-mesh-discontinued', title: 'Maesh / Traefik Mesh — Discontinued', parentId: 'other-service-meshes' },
+
+  /* ---- api-gateways ---- */
+  { id: 'api-gateway-fundamentals', title: 'API Gateway Fundamentals', parentId: 'api-gateways' },
+  { id: 'api-gateway-patterns', title: 'API Gateway Patterns (BFF, Aggregator, Edge)', parentId: 'api-gateways' },
+  {
+    id: 'cloud-managed-api-gateways',
+    title: 'Cloud-Managed API Gateways (Overview)',
+    parentId: 'api-gateways',
+    children: [
+      { id: 'aws-api-gateway-overview', title: 'AWS API Gateway' },
+      { id: 'azure-api-management-overview', title: 'Azure API Management' },
+      { id: 'google-apigee-overview', title: 'Google Apigee' },
+      { id: 'google-cloud-endpoints', title: 'Google Cloud Endpoints' },
+    ],
+  },
+  {
+    id: 'open-source-api-gateways',
+    title: 'Open-Source API Gateways',
+    parentId: 'api-gateways',
+    children: [
+      { id: 'kong-gateway', title: 'Kong Gateway' },
+      { id: 'tyk-gateway', title: 'Tyk' },
+      { id: 'krakend', title: 'KrakenD' },
+      { id: 'apache-apisix', title: 'Apache APISIX' },
+      { id: 'traefik-gateway', title: 'Traefik (Gateway Role)' },
+      { id: 'envoy-gateway', title: 'Envoy Gateway' },
+      { id: 'emissary-ingress', title: 'Emissary Ingress (Ambassador)' },
+      { id: 'gloo-gateway', title: 'Solo.io Gloo Gateway' },
+      { id: 'wso2-api-manager', title: 'WSO2 API Manager' },
+      { id: 'goku-api-gateway', title: 'Goku API Gateway' },
+    ],
+  },
+  {
+    id: 'api-gateway-features',
+    title: 'API Gateway Features',
+    parentId: 'api-gateways',
+    children: [
+      { id: 'rate-limiting-gateway', title: 'Rate Limiting & Throttling' },
+      { id: 'gateway-authentication', title: 'Authentication & Authorization' },
+      { id: 'request-response-transformation', title: 'Request / Response Transformation' },
+      { id: 'gateway-caching', title: 'Response Caching' },
+      { id: 'api-composition', title: 'API Composition & Aggregation' },
+      { id: 'gateway-webhooks', title: 'Webhooks' },
+      { id: 'api-versioning', title: 'API Versioning' },
+      { id: 'developer-portals', title: 'Developer Portals' },
+      { id: 'gateway-analytics', title: 'Analytics & Monetization' },
+      { id: 'gateway-cors', title: 'CORS & Header Management' },
+    ],
+  },
+  {
+    id: 'api-specifications',
+    title: 'API Specifications & Design',
+    parentId: 'api-gateways',
+    children: [
+      { id: 'openapi-swagger', title: 'OpenAPI / Swagger' },
+      { id: 'asyncapi', title: 'AsyncAPI' },
+      { id: 'graphql-gateway', title: 'GraphQL Gateway' },
+      { id: 'grpc-gateway', title: 'gRPC Gateway' },
+      { id: 'json-rpc-spec', title: 'JSON-RPC' },
+    ],
+  },
+  { id: 'api-gateway-vs-service-mesh', title: 'API Gateway vs Service Mesh vs Ingress', parentId: 'api-gateways' },
+  { id: 'gateway-api-spec', title: 'Kubernetes Gateway API (Spec)', parentId: 'api-gateways' },
+])

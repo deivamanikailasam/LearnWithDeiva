@@ -1,0 +1,346 @@
+import { addTopics } from './addTopics.mjs'
+
+// Stage 11 — Observability
+// Refocused on Kubernetes-side aspects only. The general Prometheus / Grafana /
+// OpenTelemetry / ELK / Jaeger / Tempo deep dives live in the `devops` subject.
+addTopics([
+  /* ---------- cluster-logging ---------- */
+  {
+    id: 'container-log-architecture',
+    title: 'Container Log Architecture',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'stdout-stderr-convention', title: 'stdout / stderr Convention' },
+      { id: 'container-log-locations', title: 'Container Log Locations on Node' },
+      { id: 'kubelet-log-rotation-config', title: 'kubelet Log Rotation Config' },
+      { id: 'log-symlinks', title: 'Log Symlinks (/var/log/containers, /var/log/pods)' },
+      { id: 'json-vs-text-logs', title: 'JSON vs Text Logs' },
+      { id: 'log-line-truncation', title: 'Log Line Truncation' },
+    ],
+  },
+  {
+    id: 'kubelet-logging-internals',
+    title: 'kubelet Logging Internals',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'kubelet-and-cri-logs', title: 'kubelet & CRI Logs' },
+      { id: 'log-aggregation-via-kubelet', title: 'kubectl logs via kubelet API' },
+      { id: 'cri-log-format', title: 'CRI Log Format' },
+    ],
+  },
+  {
+    id: 'node-level-log-collection-patterns',
+    title: 'Node-Level Log Collection Patterns',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'daemonset-log-collectors', title: 'DaemonSet Log Collectors' },
+      { id: 'sidecar-log-collectors-pattern', title: 'Sidecar Log Collectors' },
+      { id: 'direct-app-to-backend-pattern', title: 'Direct App-to-Backend Logging' },
+      { id: 'log-collector-rbac', title: 'Log Collector RBAC' },
+    ],
+  },
+  {
+    id: 'log-collection-tools-on-k8s',
+    title: 'Log Collection Tools (K8s Integration)',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'fluent-bit-on-k8s', title: 'Fluent Bit on K8s (Pointer)' },
+      { id: 'fluentd-on-k8s', title: 'Fluentd on K8s (Pointer)' },
+      { id: 'vector-on-k8s', title: 'Vector on K8s (Pointer)' },
+      { id: 'filebeat-on-k8s', title: 'Filebeat on K8s (Pointer)' },
+      { id: 'otel-collector-logs-on-k8s', title: 'OTel Collector Logs on K8s (Pointer)' },
+      { id: 'promtail-on-k8s', title: 'Promtail on K8s (Pointer)' },
+      { id: 'logging-operator-banzaicloud', title: 'Logging Operator (BanzaiCloud)' },
+    ],
+  },
+  {
+    id: 'kubernetes-events-as-logs',
+    title: 'Kubernetes Events',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'events-core-v1', title: 'Events (core/v1)' },
+      { id: 'events-events-k8s-io-v1', title: 'Events (events.k8s.io/v1)' },
+      { id: 'events-vs-logs', title: 'Events vs Logs' },
+      { id: 'event-exporter', title: 'Kubernetes Event Exporter' },
+      { id: 'event-router', title: 'Heptio Event Router' },
+    ],
+  },
+  {
+    id: 'system-component-logs',
+    title: 'System Component Logs',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'apiserver-logs', title: 'kube-apiserver Logs' },
+      { id: 'controller-manager-logs', title: 'kube-controller-manager Logs' },
+      { id: 'scheduler-logs', title: 'kube-scheduler Logs' },
+      { id: 'kubelet-logs-system', title: 'kubelet Logs' },
+      { id: 'cri-runtime-logs', title: 'CRI Runtime Logs (containerd / CRI-O)' },
+      { id: 'kube-proxy-logs', title: 'kube-proxy Logs' },
+      { id: 'klog-vs-logr', title: 'klog vs logr Output' },
+      { id: 'json-structured-logging', title: 'JSON / Structured Logging (KEP-1602)' },
+    ],
+  },
+  {
+    id: 'log-querying-on-k8s',
+    title: 'Log Querying on Kubernetes',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'kubectl-logs-deep', title: 'kubectl logs Deep Dive' },
+      { id: 'stern-multipod-logs', title: 'stern Multi-Pod Logs' },
+      { id: 'kubectl-stern-plugin', title: 'kubectl-stern Plugin' },
+      { id: 'searching-archived-logs', title: 'Searching Archived Logs' },
+      { id: 'previous-logs-flag', title: 'kubectl logs --previous' },
+    ],
+  },
+  {
+    id: 'audit-logs-pointer',
+    title: 'Audit Logs (Pointer)',
+    parentId: 'cluster-logging',
+    children: [
+      { id: 'audit-logs-recap', title: 'Audit Logs Recap (Stage 10)' },
+      { id: 'audit-log-shipping', title: 'Shipping Audit Logs to External Backends' },
+    ],
+  },
+
+  /* ---------- cluster-monitoring ---------- */
+  {
+    id: 'kubernetes-metrics-sources',
+    title: 'Kubernetes Metrics Sources',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'kubelet-metrics-source', title: 'kubelet Metrics' },
+      { id: 'cadvisor-metrics-source', title: 'cAdvisor Metrics' },
+      { id: 'apiserver-metrics-source', title: 'kube-apiserver Metrics' },
+      { id: 'kcm-metrics-source', title: 'kube-controller-manager Metrics' },
+      { id: 'scheduler-metrics-source', title: 'kube-scheduler Metrics' },
+      { id: 'kube-proxy-metrics-source', title: 'kube-proxy Metrics' },
+      { id: 'etcd-metrics-pointer', title: 'etcd Metrics (Pointer)' },
+      { id: 'coredns-metrics-source', title: 'CoreDNS Metrics' },
+      { id: 'cluster-autoscaler-metrics', title: 'Cluster Autoscaler Metrics' },
+    ],
+  },
+  {
+    id: 'kube-state-metrics',
+    title: 'kube-state-metrics',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'ksm-overview', title: 'kube-state-metrics Overview' },
+      { id: 'ksm-resources-exposed', title: 'Resources Exposed' },
+      { id: 'ksm-custom-resource-state', title: 'Custom Resource State (CRD Metrics)' },
+      { id: 'ksm-deployment-on-cluster', title: 'Deploying ksm' },
+      { id: 'ksm-sharding', title: 'Sharded ksm Deployments' },
+      { id: 'ksm-vs-metrics-server', title: 'ksm vs metrics-server' },
+    ],
+  },
+  {
+    id: 'metrics-server-deep',
+    title: 'Metrics Server Deep Dive',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'metrics-server-architecture', title: 'Metrics Server Architecture' },
+      { id: 'resource-api-consumers', title: 'Consumers (HPA, VPA, kubectl top)' },
+      { id: 'metrics-server-tuning', title: 'Tuning (kubelet-insecure-tls, scrape interval)' },
+    ],
+  },
+  {
+    id: 'service-discovery-for-prometheus',
+    title: 'Service Discovery for Prometheus',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'prometheus-kubernetes-sd-config', title: 'kubernetes_sd_config' },
+      { id: 'sd-roles', title: 'SD Roles (node, service, pod, endpoints, ingress)' },
+      { id: 'relabel-configs', title: 'Relabel Configs' },
+      { id: 'metric-relabel-configs', title: 'Metric Relabel Configs' },
+    ],
+  },
+  {
+    id: 'prometheus-operator',
+    title: 'Prometheus Operator',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'prometheus-operator-overview', title: 'Prometheus Operator Overview' },
+      { id: 'prometheus-resource', title: 'Prometheus Resource' },
+      { id: 'prometheusrule-resource', title: 'PrometheusRule Resource' },
+      { id: 'servicemonitor-resource', title: 'ServiceMonitor Resource' },
+      { id: 'podmonitor-resource', title: 'PodMonitor Resource' },
+      { id: 'probe-resource', title: 'Probe Resource' },
+      { id: 'alertmanager-resource', title: 'Alertmanager Resource' },
+      { id: 'alertmanagerconfig-resource', title: 'AlertmanagerConfig Resource' },
+      { id: 'thanosruler-resource', title: 'ThanosRuler Resource' },
+      { id: 'scrapeconfig-resource', title: 'ScrapeConfig Resource' },
+    ],
+  },
+  {
+    id: 'kube-prometheus-stack',
+    title: 'kube-prometheus-stack',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'kube-prometheus-stack-overview', title: 'kube-prometheus-stack Overview' },
+      { id: 'bundled-dashboards', title: 'Bundled Grafana Dashboards' },
+      { id: 'bundled-alerting-rules', title: 'Bundled Alerting Rules' },
+      { id: 'kube-prometheus-vs-prometheus-operator', title: 'kube-prometheus vs Operator-Only' },
+    ],
+  },
+  {
+    id: 'victoriametrics-operator',
+    title: 'VictoriaMetrics Operator',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'vm-operator-overview', title: 'VM Operator Overview' },
+      { id: 'vmsingle-vmcluster-resources', title: 'VMSingle / VMCluster Resources' },
+      { id: 'vmagent-resource', title: 'VMAgent Resource' },
+      { id: 'vmrule-vmalert', title: 'VMRule & VMAlert' },
+    ],
+  },
+  {
+    id: 'long-term-metrics-storage-on-k8s',
+    title: 'Long-Term Metrics Storage on K8s',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'thanos-on-k8s', title: 'Thanos on K8s (Pointer)' },
+      { id: 'cortex-mimir-on-k8s', title: 'Cortex / Mimir on K8s (Pointer)' },
+      { id: 'm3db-on-k8s', title: 'M3DB on K8s (Pointer)' },
+    ],
+  },
+  {
+    id: 'recording-and-alerting-rules-on-k8s',
+    title: 'Recording & Alerting Rules on K8s',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'prometheusrule-recording-rules', title: 'PrometheusRule Recording Rules' },
+      { id: 'prometheusrule-alerting-rules', title: 'PrometheusRule Alerting Rules' },
+      { id: 'kubernetes-mixin', title: 'kubernetes-mixin (Jsonnet)' },
+      { id: 'community-alert-rule-libraries', title: 'Community Alert-Rule Libraries' },
+    ],
+  },
+  {
+    id: 'exposing-metrics-from-apps',
+    title: 'Exposing Metrics from Apps',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'prometheus-client-libraries-overview', title: 'Prometheus Client Libraries (Pointer)' },
+      { id: 'metrics-port-and-path-conventions', title: 'Metrics Port & Path Conventions' },
+      { id: 'k8s-deployment-of-exporters', title: 'Deploying Exporters on K8s' },
+      { id: 'auto-scrape-via-annotations', title: 'Auto-Scrape via Annotations' },
+    ],
+  },
+  {
+    id: 'node-and-hardware-exporters',
+    title: 'Node & Hardware Exporters',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'node-exporter-on-k8s', title: 'node_exporter on K8s' },
+      { id: 'nvidia-dcgm-exporter', title: 'NVIDIA DCGM Exporter' },
+      { id: 'process-exporter-on-k8s', title: 'process_exporter on K8s' },
+      { id: 'systemd-exporter', title: 'systemd_exporter' },
+    ],
+  },
+  {
+    id: 'autoscaler-and-cost-metrics',
+    title: 'Autoscaler & Cost Metrics',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'cluster-autoscaler-metrics-deep', title: 'Cluster Autoscaler Metrics' },
+      { id: 'karpenter-metrics', title: 'Karpenter Metrics' },
+      { id: 'opencost-metrics-pointer', title: 'OpenCost Metrics (Pointer)' },
+      { id: 'kubecost-metrics-pointer', title: 'Kubecost Metrics (Pointer)' },
+    ],
+  },
+  {
+    id: 'kubernetes-dashboards-and-visualization',
+    title: 'Kubernetes Dashboards & Visualization',
+    parentId: 'cluster-monitoring',
+    children: [
+      { id: 'common-grafana-dashboards', title: 'Common Grafana Dashboards' },
+      { id: 'kube-state-grafana-dashboards', title: 'kube-state Dashboards' },
+      { id: 'kubernetes-dashboard-builtin', title: 'Kubernetes Dashboard (Built-In)' },
+      { id: 'k8s-overview-uis', title: 'Other UIs (Headlamp, Lens, k9s) (Pointer)' },
+    ],
+  },
+
+  /* ---------- tracing-and-events ---------- */
+  {
+    id: 'distributed-tracing-on-k8s',
+    title: 'Distributed Tracing on Kubernetes',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'apiserver-tracing', title: 'kube-apiserver Tracing' },
+      { id: 'kubelet-tracing', title: 'kubelet Tracing' },
+      { id: 'etcd-tracing', title: 'etcd Tracing' },
+      { id: 'controller-tracing', title: 'Controller Tracing' },
+      { id: 'sampling-strategies-on-k8s', title: 'Sampling Strategies on K8s' },
+    ],
+  },
+  {
+    id: 'opentelemetry-on-kubernetes',
+    title: 'OpenTelemetry on Kubernetes',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'opentelemetry-operator-overview', title: 'OpenTelemetry Operator Overview' },
+      { id: 'opentelemetry-collector-deployment-modes', title: 'Collector Deployment Modes (Deployment, DaemonSet, Sidecar, StatefulSet)' },
+      { id: 'opentelemetrycollector-resource', title: 'OpenTelemetryCollector Resource' },
+      { id: 'instrumentation-resource', title: 'Instrumentation Resource' },
+      { id: 'auto-instrumentation', title: 'Auto-Instrumentation Injection' },
+      { id: 'opentelemetry-targetallocator', title: 'TargetAllocator' },
+      { id: 'opamp-bridge-resource', title: 'OpAMPBridge Resource' },
+    ],
+  },
+  {
+    id: 'tracing-backends-on-k8s',
+    title: 'Tracing Backends on K8s',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'jaeger-on-k8s', title: 'Jaeger on K8s (Pointer)' },
+      { id: 'tempo-on-k8s', title: 'Grafana Tempo on K8s (Pointer)' },
+      { id: 'zipkin-on-k8s', title: 'Zipkin on K8s (Pointer)' },
+      { id: 'otlp-receivers-on-k8s', title: 'OTLP Receivers on K8s' },
+    ],
+  },
+  {
+    id: 'kubernetes-events-deep',
+    title: 'Kubernetes Events Deep Dive',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'core-events-vs-events-k8s-io', title: 'core/v1 Events vs events.k8s.io/v1' },
+      { id: 'event-source-types', title: 'Event Source Types' },
+      { id: 'event-throttling', title: 'Event Throttling' },
+      { id: 'event-correlation', title: 'Event Correlation' },
+      { id: 'event-types-normal-warning', title: 'Event Types (Normal, Warning)' },
+      { id: 'event-aggregation', title: 'Event Aggregation' },
+      { id: 'event-ttl-and-cleanup', title: 'Event TTL & Cleanup' },
+    ],
+  },
+  {
+    id: 'ebpf-based-observability-on-k8s',
+    title: 'eBPF-Based Observability on K8s',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'cilium-hubble', title: 'Cilium Hubble' },
+      { id: 'pixie-on-k8s', title: 'Pixie on K8s (Pointer)' },
+      { id: 'parca-on-k8s', title: 'Parca on K8s (Pointer)' },
+      { id: 'inspektor-gadget', title: 'Inspektor Gadget' },
+    ],
+  },
+  {
+    id: 'continuous-profiling-on-k8s',
+    title: 'Continuous Profiling on Kubernetes',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'parca-deep', title: 'Parca on K8s (Deep)' },
+      { id: 'pyroscope-grafana', title: 'Pyroscope (Grafana)' },
+      { id: 'opentelemetry-profiling', title: 'OpenTelemetry Profiling Signal' },
+    ],
+  },
+  {
+    id: 'k8s-observability-stacks',
+    title: 'K8s Observability Stacks',
+    parentId: 'tracing-and-events',
+    children: [
+      { id: 'signoz-on-k8s', title: 'SigNoz on K8s (Pointer)' },
+      { id: 'grafana-stack-loki-tempo-mimir', title: 'Grafana Stack (Loki + Tempo + Mimir)' },
+      { id: 'elastic-on-k8s-eck', title: 'Elastic on K8s (ECK) (Pointer)' },
+      { id: 'datadog-operator-on-k8s', title: 'Datadog Operator on K8s (Pointer)' },
+      { id: 'new-relic-operator-on-k8s', title: 'New Relic Operator on K8s (Pointer)' },
+    ],
+  },
+])
