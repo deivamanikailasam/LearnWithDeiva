@@ -14,6 +14,7 @@ const AuthModal = lazy(() =>
 const navItems = [
   { to: paths.home(), label: 'Home', end: true },
   { to: paths.subjects(), label: 'Subjects', end: false },
+  { to: paths.glossary(), label: 'Glossary', end: false },
   { to: paths.calendar(), label: 'Calendar', end: false },
   { to: paths.account(), label: 'Account', end: false },
 ]

@@ -313,6 +313,7 @@ export async function generateContent({ log = false, force = true } = {}) {
 
   const indexEntries = []
   const searchDocs = []
+  const glossaryDocs = []
 
   for (const subjectId of subjectIds) {
     const subjectDir = path.join(SUBJECTS_DIR, subjectId)
@@ -437,6 +438,21 @@ export async function generateContent({ log = false, force = true } = {}) {
       url: `/subjects/${subjectId}`,
     })
     searchDocs.push(...extractSubjectExtraDocs({ id: subjectId, title: meta.title, tags: meta.tags }, extras))
+
+    // Global glossary: subject-level glossary extras (authored once per subject).
+    extras.glossary?.items?.forEach((it) => {
+      if (!it?.term) return
+      glossaryDocs.push({
+        term: String(it.term),
+        definition: clip(it.definition ?? '', 600),
+        subjectId,
+        subjectTitle: meta.title,
+        subjectIcon: meta.icon ?? '',
+        source: 'subject',
+        url: `/subjects/${subjectId}/glossary`,
+      })
+    })
+
     const sectionsById = new Map(loaded.map((t) => [t.meta.id, t.sections]))
     for (const n of nodes) {
       searchDocs.push({
@@ -452,6 +468,22 @@ export async function generateContent({ log = false, force = true } = {}) {
         url: `/subjects/${subjectId}/topics/${n.id}`,
       })
       searchDocs.push(...extractSectionDocs({ id: subjectId, title: meta.title }, n, sectionsById.get(n.id) ?? {}))
+
+      // Global glossary: topic-level "Synonyms & Glossary" term lists.
+      sectionsById.get(n.id)?.synonyms?.terms?.forEach((t) => {
+        if (!t?.term) return
+        glossaryDocs.push({
+          term: String(t.term),
+          definition: clip(t.definition ?? '', 600),
+          subjectId,
+          subjectTitle: meta.title,
+          subjectIcon: meta.icon ?? '',
+          topicId: n.id,
+          topicTitle: n.title,
+          source: 'topic',
+          url: `/subjects/${subjectId}/topics/${n.id}`,
+        })
+      })
     }
   }
 
@@ -463,11 +495,30 @@ export async function generateContent({ log = false, force = true } = {}) {
   )
   await writeFile(path.join(OUT_DIR, 'search.json'), JSON.stringify(searchDocs))
 
+  // Global glossary: drop exact duplicates (same term + definition + source),
+  // sort alphabetically and assign a stable id for the dedicated Glossary page.
+  const seenTerms = new Set()
+  const glossary = []
+  for (const g of glossaryDocs) {
+    const key = `${g.term.toLowerCase()}|${g.definition.toLowerCase()}|${g.url}`
+    if (seenTerms.has(key)) continue
+    seenTerms.add(key)
+    glossary.push({ id: String(glossary.length), ...g })
+  }
+  glossary.sort((a, b) =>
+    a.term.localeCompare(b.term, undefined, { sensitivity: 'base' }),
+  )
+  await writeFile(
+    path.join(OUT_DIR, 'glossary.json'),
+    JSON.stringify({ generatedAt: Date.now(), terms: glossary }),
+  )
+
   if (log) {
     const totalTopics = indexEntries.reduce((s, e) => s + e.topicCount, 0)
     console.log(
       `[content] ${indexEntries.length} subjects, ${totalTopics} topics, ` +
-        `${searchDocs.length} search docs → public/data (${Date.now() - start}ms)`,
+        `${searchDocs.length} search docs, ${glossary.length} glossary terms ` +
+        `→ public/data (${Date.now() - start}ms)`,
     )
   }
 

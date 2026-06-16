@@ -46,5 +46,7 @@ export const SUBJECT_EXTRA_DESCRIPTORS: SubjectExtraDescriptor[] = [
   { key: 'resources', slug: 'resources', label: 'Resources', icon: '📚' },
   { key: 'pitfalls', slug: 'pitfalls', label: 'Pitfalls & Best Practices', icon: '⚠️' },
   { key: 'cheatsheet', slug: 'cheat-sheet', label: 'Cheat Sheet', icon: '📋' },
-  { key: 'glossary', slug: 'glossary', label: 'Glossary', icon: '🔤' },
+  // Glossary is intentionally omitted here: it is surfaced globally on the
+  // dedicated /glossary page instead of as a per-subject tab. The build still
+  // reads each subject's glossary.json to populate that global page.
 ]

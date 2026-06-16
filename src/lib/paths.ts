@@ -10,6 +10,8 @@ export const paths = {
     `/subjects/${subjectId}/topics/${topicId}`,
   search: (query?: string) =>
     query ? `/search?q=${encodeURIComponent(query)}` : '/search',
+  glossary: (query?: string) =>
+    query ? `/glossary?q=${encodeURIComponent(query)}` : '/glossary',
   calendar: () => '/calendar',
   account: () => '/account',
 }

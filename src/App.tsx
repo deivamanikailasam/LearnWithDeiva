@@ -21,6 +21,9 @@ const SearchPage = lazy(() =>
 const CalendarPage = lazy(() =>
   import('./pages/CalendarPage').then((m) => ({ default: m.CalendarPage })),
 )
+const GlossaryPage = lazy(() =>
+  import('./pages/GlossaryPage').then((m) => ({ default: m.GlossaryPage })),
+)
 const AccountPage = lazy(() =>
   import('./pages/AccountPage').then((m) => ({ default: m.AccountPage })),
 )
@@ -53,6 +56,7 @@ const router = createHashRouter([
         element: lazyRoute(<TopicPage />),
       },
       { path: '/search', element: lazyRoute(<SearchPage />) },
+      { path: '/glossary', element: lazyRoute(<GlossaryPage />) },
       { path: '/calendar', element: lazyRoute(<CalendarPage />) },
       { path: '/account', element: lazyRoute(<AccountPage />) },
       { path: '*', element: lazyRoute(<NotFoundPage />) },
