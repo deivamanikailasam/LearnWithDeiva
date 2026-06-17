@@ -70,6 +70,10 @@ export interface TopicMeta {
 /* ------------------------------------------------------------------ */
 
 export interface ExplanationSection {
+  /** Concise canonical definition of the concept (template item 1). */
+  definition?: string
+  /** Plain-language, jargon-free explanation (template item 2). */
+  layman?: string
   /** Markdown body. */
   content: string
   keyPoints?: string[]
@@ -180,6 +184,142 @@ export interface CoursePrepSection {
   modules: CourseModule[]
 }
 
+export interface ExampleItem {
+  title: string
+  /** A concrete, real-world situation where the concept shows up. */
+  scenario: string
+  /** Optional follow-up tying the scenario back to the concept. */
+  explanation?: string
+}
+export interface ExamplesSection {
+  items: ExampleItem[]
+}
+
+export interface DiagramItem {
+  title?: string
+  /** Mermaid diagram source rendered client-side. */
+  mermaid: string
+  caption?: string
+}
+export interface DiagramsSection {
+  items: DiagramItem[]
+}
+
+export type ChartKind = 'bar' | 'line' | 'pie' | 'area'
+export interface ChartSeries {
+  /** Key in each data row holding this series' numeric value. */
+  key: string
+  label?: string
+}
+export interface ChartItem {
+  title?: string
+  kind: ChartKind
+  /** Row objects, e.g. `{ name: "GPT-3", params: 175 }`. */
+  data: Record<string, string | number>[]
+  /** Key in each row used for the category axis / slice label. */
+  xKey: string
+  series: ChartSeries[]
+  caption?: string
+}
+export interface ChartsSection {
+  items: ChartItem[]
+}
+
+export interface ImageItem {
+  src: string
+  alt: string
+  caption?: string
+}
+export interface ImagesSection {
+  items: ImageItem[]
+}
+
+export interface ConnectionItem {
+  title: string
+  /** How this concept relates, e.g. "builds on", "contrasts with". */
+  relation?: string
+  description: string
+  /** Optional topic id to deep-link to within the same subject. */
+  topicId?: string
+}
+export interface ConnectionsSection {
+  items: ConnectionItem[]
+}
+
+export type QuestionPattern =
+  | '5w1h'
+  | 'socratic'
+  | 'mindmap'
+  | 'comparative'
+  | 'what-if'
+  | 'cause-effect'
+  | 'what-breaks-this'
+export interface PatternQA {
+  question: string
+  answer: string
+}
+export interface QuestionPatternGroup {
+  pattern: QuestionPattern
+  items: PatternQA[]
+}
+export interface QuestionPatternsSection {
+  groups: QuestionPatternGroup[]
+}
+
+export interface TradeoffsSection {
+  advantages: string[]
+  disadvantages: string[]
+}
+
+export interface MistakeItem {
+  /** The common mistake. */
+  mistake: string
+  /** The correct approach. */
+  fix: string
+  why?: string
+  /** Short concrete example (Markdown; may include fenced code) illustrating the mistake or the fix. */
+  example?: string
+}
+export interface MistakesSection {
+  items: MistakeItem[]
+}
+
+export interface MisconceptionItem {
+  /** The widely-believed but incorrect statement. */
+  myth: string
+  /** The accurate reality. */
+  reality: string
+  /** Short concrete example (Markdown; may include fenced code) illustrating the reality. */
+  example?: string
+}
+export interface MisconceptionsSection {
+  items: MisconceptionItem[]
+}
+
+/** Topic-level pitfalls & best practices; reuses the `PitfallItem` shape. */
+export interface BestPracticesSection {
+  items: PitfallItem[]
+}
+
+export interface TimelineEntry {
+  label: string
+  description: string
+}
+export interface OriginsSection {
+  /** Markdown narrative of the origin and what came before. */
+  content: string
+  timeline?: TimelineEntry[]
+}
+
+export interface MasteryCriterion {
+  label: string
+  level?: Difficulty
+  example?: string
+}
+export interface MasterySection {
+  criteria: MasteryCriterion[]
+}
+
 /* ----- subject-level-only payloads (no per-topic equivalent) ----- */
 
 /** Subject-wide glossary; reuses the topic-level term/definition shape. */
@@ -206,6 +346,8 @@ export interface PitfallItem {
   prefer: string
   /** Why it matters. */
   why?: string
+  /** Short concrete example (Markdown; may include fenced code) illustrating the pitfall or the preferred approach. */
+  example?: string
 }
 export interface PitfallsSection {
   items: PitfallItem[]
@@ -229,17 +371,29 @@ export interface CheatSheetSection {
 /** Discriminated union of all section kinds, keyed by file name. */
 export interface TopicSections {
   explanation?: ExplanationSection
+  examples?: ExamplesSection
+  diagrams?: DiagramsSection
+  charts?: ChartsSection
+  images?: ImagesSection
   code?: CodeSection
+  synonyms?: SynonymsSection
+  connections?: ConnectionsSection
+  applications?: ApplicationsSection
+  tradeoffs?: TradeoffsSection
+  mistakes?: MistakesSection
+  misconceptions?: MisconceptionsSection
+  'best-practices'?: BestPracticesSection
+  origins?: OriginsSection
+  'question-patterns'?: QuestionPatternsSection
   materials?: MaterialsSection
   references?: ReferencesSection
-  synonyms?: SynonymsSection
-  applications?: ApplicationsSection
   projects?: ProjectsSection
   'interview-questions'?: InterviewQuestionsSection
   'scenario-questions'?: ScenarioQuestionsSection
   'case-studies'?: CaseStudiesSection
   'exam-prep'?: ExamPrepSection
   'course-prep'?: CoursePrepSection
+  mastery?: MasterySection
 }
 
 export type SectionKey = keyof TopicSections
