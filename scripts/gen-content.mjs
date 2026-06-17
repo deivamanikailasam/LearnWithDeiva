@@ -27,9 +27,20 @@ const OUT_DIR = path.join(ROOT, 'public', 'data')
 /** Canonical section order (mirrors src/content/sections.ts). */
 const SECTION_ORDER = [
   'explanation',
+  'examples',
+  'diagrams',
+  'charts',
+  'images',
   'code',
   'synonyms',
+  'connections',
   'applications',
+  'tradeoffs',
+  'mistakes',
+  'misconceptions',
+  'best-practices',
+  'origins',
+  'question-patterns',
   'materials',
   'references',
   'projects',
@@ -38,20 +49,33 @@ const SECTION_ORDER = [
   'case-studies',
   'exam-prep',
   'course-prep',
+  'mastery',
 ]
 const SECTION_LABELS = {
   explanation: 'Explanation',
+  examples: 'Real-World Examples',
+  diagrams: 'Diagrams',
+  charts: 'Charts',
+  images: 'Images',
   code: 'Code',
   synonyms: 'Synonyms & Glossary',
+  connections: 'Conceptual Connections',
   applications: 'Applications',
+  tradeoffs: 'Advantages & Disadvantages',
+  mistakes: 'Common Mistakes',
+  misconceptions: 'Common Misconceptions',
+  'best-practices': 'Pitfalls & Best Practices',
+  origins: 'Origin & History',
+  'question-patterns': 'Question Patterns',
   materials: 'Learning Materials',
   references: 'References',
   projects: 'Projects',
   'interview-questions': 'Interview Questions',
   'scenario-questions': 'Scenario Questions',
   'case-studies': 'Case Studies',
-  'exam-prep': 'Exam Prep',
+  'exam-prep': 'Self-Assessment',
   'course-prep': 'Course Prep',
+  mastery: 'Mastery Criteria',
 }
 const SECTION_RANK = new Map(SECTION_ORDER.map((k, i) => [k, i]))
 
@@ -185,7 +209,9 @@ function extractSectionDocs(subject, topicNode, sections) {
         'explanation',
         '0',
         `${topicNode.title} · Explanation`,
-        `${s.explanation.content ?? ''} ${(s.explanation.keyPoints ?? []).join(' ')}`,
+        `${s.explanation.definition ?? ''} ${s.explanation.layman ?? ''} ${
+          s.explanation.content ?? ''
+        } ${(s.explanation.keyPoints ?? []).join(' ')}`,
       ),
     )
   }
@@ -231,6 +257,67 @@ function extractSectionDocs(subject, topicNode, sections) {
   s['course-prep']?.modules?.forEach((m, i) =>
     docs.push(make('course-prep', String(i), m.title, (m.lessons ?? []).join(' '))),
   )
+  s.examples?.items?.forEach((e, i) =>
+    docs.push(make('examples', String(i), e.title, `${e.scenario ?? ''} ${e.explanation ?? ''}`)),
+  )
+  s.diagrams?.items?.forEach((d, i) =>
+    docs.push(make('diagrams', String(i), d.title ?? `Diagram ${i + 1}`, d.caption ?? '')),
+  )
+  s.charts?.items?.forEach((c, i) =>
+    docs.push(make('charts', String(i), c.title ?? `Chart ${i + 1}`, c.caption ?? '')),
+  )
+  s.images?.items?.forEach((img, i) =>
+    docs.push(make('images', String(i), img.alt, img.caption ?? '')),
+  )
+  s.connections?.items?.forEach((c, i) =>
+    docs.push(make('connections', String(i), c.title, `${c.relation ?? ''} ${c.description ?? ''}`)),
+  )
+  s.tradeoffs &&
+    docs.push(
+      make(
+        'tradeoffs',
+        '0',
+        `${topicNode.title} · Advantages & Disadvantages`,
+        `${(s.tradeoffs.advantages ?? []).join(' ')} ${(s.tradeoffs.disadvantages ?? []).join(' ')}`,
+      ),
+    )
+  s.mistakes?.items?.forEach((m, i) =>
+    docs.push(make('mistakes', String(i), m.mistake, `${m.fix ?? ''} ${m.why ?? ''}`)),
+  )
+  s.misconceptions?.items?.forEach((m, i) =>
+    docs.push(make('misconceptions', String(i), m.myth, m.reality ?? '')),
+  )
+  s['best-practices']?.items?.forEach((p, i) =>
+    docs.push(
+      make('best-practices', String(i), p.title, `${p.avoid ?? ''} ${p.prefer ?? ''} ${p.why ?? ''}`),
+    ),
+  )
+  if (s.origins) {
+    docs.push(
+      make(
+        'origins',
+        '0',
+        `${topicNode.title} · Origin & History`,
+        `${s.origins.content ?? ''} ${(s.origins.timeline ?? [])
+          .map((t) => `${t.label} ${t.description}`)
+          .join(' ')}`,
+      ),
+    )
+  }
+  s['question-patterns']?.groups?.forEach((g, gi) =>
+    (g.items ?? []).forEach((qa, qi) =>
+      docs.push(make('question-patterns', `${gi}-${qi}`, qa.question, qa.answer ?? '')),
+    ),
+  )
+  s.mastery &&
+    docs.push(
+      make(
+        'mastery',
+        '0',
+        `${topicNode.title} · Mastery Criteria`,
+        (s.mastery.criteria ?? []).map((c) => c.label).join(' '),
+      ),
+    )
 
   return docs
 }

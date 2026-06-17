@@ -46,4 +46,18 @@ export default defineConfig(({ command }) => ({
     process.env.VITE_BASE ??
     (command === 'build' ? '/LearnWithDeiva/' : '/'),
   plugins: [contentData(command === 'build'), react()],
+  optimizeDeps: {
+    // Force Vite to pre-bundle mermaid at server startup. Mermaid pulls in CJS
+    // transitives (notably `dayjs`, whose `dist/dayjs.min.js` is UMD with no
+    // ESM `default` export); without pre-bundling, dynamic imports of those
+    // transitives blow up with
+    //   "does not provide an export named 'default'"
+    // Pre-bundling also stabilises the lazy diagram chunk hashes
+    // (`mindmap-definition-XXX.js`, `sequenceDiagram-XXX.js`, ...) at startup,
+    // so a first-time use of a new diagram type does not trigger a mid-session
+    // rescan + stale-URL 404. If you ever do see one of those 404s after
+    // editing content that introduces a brand-new diagram type, just run
+    // `rm -rf node_modules/.vite` and restart the dev server.
+    include: ['mermaid'],
+  },
 }))

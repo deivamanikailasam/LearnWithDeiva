@@ -225,7 +225,11 @@ export function TopicPage() {
                     <span>{d.icon}</span>
                     {d.label}
                   </h2>
-                  <SectionView sectionKey={d.key} sections={sections ?? {}} />
+                  <SectionView
+                    sectionKey={d.key}
+                    sections={sections ?? {}}
+                    subjectId={subject.id}
+                  />
                 </section>
               ))}
             </div>

@@ -1,14 +1,25 @@
+import { Suspense, lazy } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { CodeBlock } from './CodeBlock'
 
+const Mermaid = lazy(() => import('./Mermaid'))
+
 const components: Components = {
   // Fenced code blocks render via our CodeBlock; inline code stays inline.
+  // A ```mermaid fence is rendered as a diagram instead.
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className ?? '')
     const text = String(children).replace(/\n$/, '')
     if (match) {
+      if (match[1] === 'mermaid') {
+        return (
+          <Suspense fallback={null}>
+            <Mermaid chart={text} />
+          </Suspense>
+        )
+      }
       return <CodeBlock code={text} language={match[1]} />
     }
     return (
