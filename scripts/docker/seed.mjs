@@ -72,21 +72,21 @@ export function seedStages(stages) {
       }
       if (writeTopic(rootMeta)) written += 1
 
-      const walk = (node, parentId, parentLevel) => {
+      const walk = (node, parentId, parentLevel, depth = 0) => {
         ;(node.children ?? []).forEach((child, idx) => {
           const childId = `${node.id}--${child.id}`
           const childLevel = child.level ?? parentLevel
           const childMeta = {
             id: childId,
             title: child.title,
-            summary: child.summary ?? child.title,
+            ...(depth < 1 ? { summary: child.summary ?? child.title } : {}),
             order: idx + 1,
             level: childLevel,
             tags: [tag],
             parentId: node.id,
           }
           if (writeTopic(childMeta)) written += 1
-          walk({ id: childId, children: child.children }, childId, childLevel)
+          walk({ id: childId, children: child.children }, childId, childLevel, depth + 1)
         })
       }
       walk(root, null, rootLevel)

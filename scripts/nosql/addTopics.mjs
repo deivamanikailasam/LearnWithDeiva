@@ -76,7 +76,6 @@ export function addTopics(additions) {
       write({
         id: childId,
         title: child.title,
-        summary: child.summary ?? child.title,
         order: k + 1,
         level: child.level ?? level,
         tags,

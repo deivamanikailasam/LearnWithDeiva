@@ -143,7 +143,6 @@ function buildRoadmapTree({ roadmap, topics, children, stageFilter }) {
             subsubtopics: subsubs.map((leaf) => ({
               id: leaf.id,
               title: leaf.title,
-              summary: leaf.summary,
               level: leaf.level,
             })),
           }

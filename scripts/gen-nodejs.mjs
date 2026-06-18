@@ -230,7 +230,7 @@ async function writeNode(node, depth, parentId, order, stageId, parentLevel) {
   const topic = {
     id,
     title: node.t,
-    summary: node.t,
+    ...(depth !== 3 ? { summary: node.t } : {}),
     order,
     level,
     tags: [stageId],

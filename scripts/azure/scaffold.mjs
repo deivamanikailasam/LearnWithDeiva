@@ -4703,7 +4703,6 @@ function main() {
           write({
             id: `${sub.id}--${leaf.id}`,
             title: leaf.title,
-            summary: leaf.summary ?? leaf.title,
             order: li + 1,
             level: leaf.level ?? subLevel,
             tags,

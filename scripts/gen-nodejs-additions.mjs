@@ -365,8 +365,15 @@ const ATTACH = [
 
 let written = 0
 
-async function writeTopic(id, title, order, level, stageId, parentId) {
-  const topic = { id, title, summary: title, order, level, tags: [stageId] }
+async function writeTopic(id, title, order, level, stageId, parentId, includeSummary = true) {
+  const topic = {
+    id,
+    title,
+    ...(includeSummary ? { summary: title } : {}),
+    order,
+    level,
+    tags: [stageId],
+  }
   if (parentId) topic.parentId = parentId
   const dir = path.join(TOPICS_DIR, id)
   await mkdir(dir, { recursive: true })
@@ -377,7 +384,7 @@ async function writeTopic(id, title, order, level, stageId, parentId) {
 async function writeNode(node, depth, parentId, order, stageId, parentLevel) {
   const id = depth === 3 ? `${parentId}--${node.s}` : node.s
   const level = node.l ?? parentLevel
-  await writeTopic(id, node.t, order, level, stageId, parentId)
+  await writeTopic(id, node.t, order, level, stageId, parentId, depth !== 3)
   const kids = node.k ?? []
   for (let i = 0; i < kids.length; i++) {
     await writeNode(kids[i], depth + 1, id, i + 1, stageId, level)
@@ -392,7 +399,7 @@ async function main() {
     for (let i = 0; i < entry.nodes.length; i++) {
       const node = entry.nodes[i]
       const id = `${entry.parentId}--${node.s}`
-      await writeTopic(id, node.t, entry.startOrder + i, entry.level, entry.stageId, entry.parentId)
+      await writeTopic(id, node.t, entry.startOrder + i, entry.level, entry.stageId, entry.parentId, false)
     }
   }
   console.log(`[gen-nodejs-additions] wrote ${written} topic.json files`)

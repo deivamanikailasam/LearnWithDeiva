@@ -419,7 +419,6 @@ for (const r of rootAdds) {
       writeTopic({
         id: `${sub.id}--${leaf.id}`,
         title: leaf.title,
-        summary: leaf.summary ?? leaf.title,
         order: k + 1,
         level: leaf.level ?? sub.level ?? r.level,
         tags: [r.tag],

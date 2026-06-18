@@ -265,7 +265,14 @@ let written = 0
 async function writeNode(node, depth, parentId, order, stageId, parentLevel) {
   const id = depth === 3 ? `${parentId}--${node.s}` : node.s
   const level = node.l ?? parentLevel
-  const topic = { id, title: node.t, summary: node.t, order, level, tags: [stageId] }
+  const topic = {
+    id,
+    title: node.t,
+    ...(depth !== 3 ? { summary: node.t } : {}),
+    order,
+    level,
+    tags: [stageId],
+  }
   if (parentId) topic.parentId = parentId
   const dir = path.join(TOPICS_DIR, id)
   await mkdir(dir, { recursive: true })

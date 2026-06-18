@@ -303,43 +303,44 @@ export function TopicDocumentEditor({
     </div>
   )
 
+  const toolbar = canEdit ? (
+    <div
+      className={clsx(
+        'sticky z-20 flex flex-wrap items-center justify-between gap-2',
+        'rounded-xl border border-slate-200 bg-slate-50/95 px-3 py-2 backdrop-blur',
+        'dark:border-slate-700 dark:bg-slate-900/95',
+        'top-14 sm:top-16',
+        editing ? 'mb-2' : 'mb-4',
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-1">{toolbarControls}</div>
+      {toolbarActions}
+    </div>
+  ) : null
+
   return (
     <div>
-      {canEdit && !editing && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-900/50">
-          <div className="flex flex-wrap items-center gap-1">{toolbarControls}</div>
-          {toolbarActions}
-        </div>
-      )}
-
       {editing ? (
         <div ref={editorShellRef} className="scroll-mt-20">
-          <div
-            className={clsx(
-              'sticky z-20 mb-2 flex flex-wrap items-center justify-between gap-2',
-              'rounded-xl border border-slate-200 bg-slate-50/95 px-3 py-2 backdrop-blur',
-              'dark:border-slate-700 dark:bg-slate-900/95',
-              'top-14 sm:top-16',
-            )}
-          >
-            <div className="flex flex-wrap items-center gap-1">{toolbarControls}</div>
-            {toolbarActions}
-          </div>
+          {toolbar}
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
             <EditorContent editor={editor} />
           </div>
         </div>
       ) : (
-        <div className="space-y-10 sm:space-y-12">
-          {sections.map((s) => (
-            <section key={s.id} id={`section-${s.id}`} className="scroll-mt-24">
-              {s.title && (
-                <h2 className="mb-3 text-xl font-bold sm:mb-4 sm:text-2xl">{s.title}</h2>
-              )}
-              <TiptapViewer doc={s.doc} />
-            </section>
-          ))}
-        </div>
+        <>
+          {toolbar}
+          <div className="space-y-10 sm:space-y-12">
+            {sections.map((s) => (
+              <section key={s.id} id={`section-${s.id}`} className="scroll-mt-24">
+                {s.title && (
+                  <h2 className="mb-3 text-xl font-bold sm:mb-4 sm:text-2xl">{s.title}</h2>
+                )}
+                <TiptapViewer doc={s.doc} />
+              </section>
+            ))}
+          </div>
+        </>
       )}
     </div>
   )

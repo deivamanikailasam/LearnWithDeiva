@@ -71,7 +71,6 @@ export function addEnterpriseStages({ subjectId, stages, startOrder = 1000 }) {
         writeTopic({
           id: childId,
           title: child.title,
-          summary: child.summary ?? child.title,
           order: idx + 1,
           level: child.level ?? rootLevel,
           tags: [tag],

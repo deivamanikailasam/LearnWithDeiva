@@ -56,7 +56,6 @@ export function generateStage({ stageTag, rootStartOrder, tree }) {
         writeTopic({
           id: leafId,
           title: leaf.title,
-          summary: leaf.summary ?? leaf.title,
           order: k + 1,
           level: leaf.level ?? subLevel,
           tags: [stageTag],

@@ -166,7 +166,6 @@ for (const a of subtopicAdditions) {
     writeTopic({
       id: `${a.subId}--${leaf.id}`,
       title: leaf.title,
-      summary: leaf.title,
       order: k + 1,
       level: a.level,
       tags: [a.stageTag],
