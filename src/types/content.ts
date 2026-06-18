@@ -443,7 +443,7 @@ export interface LevelRange {
 
 export interface Topic extends TopicMeta {
   subjectId: string
-  /** True when the topic folder contains `explanation.json`. */
+  /** True when the topic folder contains `document.json` or `explanation.json`. */
   hasContent: boolean
   /** Number of navigable sections (heading splits + optional intro). */
   contentSectionCount: number

@@ -14,6 +14,10 @@
  * lifetime of the page.
  */
 import type { DocumentData } from '../types/rich-document'
+import {
+  isTopicDocument,
+  type TopicDocument,
+} from '../types/tiptap-document'
 import type {
   Difficulty,
   LevelRange,
@@ -75,22 +79,60 @@ export function loadSubject(id: string): Promise<Subject | undefined> {
 
 /* --------------------------- per-topic sections -------------------------- */
 
-const sectionsCache = new Map<string, Promise<DocumentData | undefined>>()
+const sectionsCache = new Map<
+  string,
+  Promise<DocumentData | TopicDocument | undefined>
+>()
 
-/** The `explanation.json` document for a single topic. Cached per topic. */
+export type TopicBody =
+  | { format: 'tiptap/v1'; document: TopicDocument }
+  | { format: 'blocks'; document: DocumentData }
+
+/** Raw section body JSON for a single topic (TipTap or legacy blocks). Cached. */
 export function loadTopicSections(
   subjectId: string,
   topicId: string,
-): Promise<DocumentData | undefined> {
+): Promise<DocumentData | TopicDocument | undefined> {
   const key = `${subjectId}::${topicId}`
   let p = sectionsCache.get(key)
   if (!p) {
-    p = fetchJson<DocumentData>(
+    p = fetchJson<DocumentData | TopicDocument>(
       dataUrl(`subjects/${subjectId}/sections/${topicId}.json`),
     ).catch(() => undefined)
     sectionsCache.set(key, p)
   }
   return p
+}
+
+/** Drop cached section body after a dev save so the next read is fresh. */
+export function invalidateTopicDocumentCache(
+  subjectId: string,
+  topicId: string,
+): void {
+  sectionsCache.delete(`${subjectId}::${topicId}`)
+}
+
+/** Seed cache with a freshly saved document (avoids reload after dev save). */
+export function primeTopicDocumentCache(
+  subjectId: string,
+  topicId: string,
+  document: TopicDocument,
+): void {
+  const key = `${subjectId}::${topicId}`
+  sectionsCache.set(key, Promise.resolve(document))
+}
+
+/** Normalized topic body with a format discriminator. */
+export async function loadTopicBody(
+  subjectId: string,
+  topicId: string,
+): Promise<TopicBody | undefined> {
+  const raw = await loadTopicSections(subjectId, topicId)
+  if (!raw) return undefined
+  if (isTopicDocument(raw)) {
+    return { format: 'tiptap/v1', document: raw }
+  }
+  return { format: 'blocks', document: raw }
 }
 
 /* --------------------------- per-subject extras -------------------------- */

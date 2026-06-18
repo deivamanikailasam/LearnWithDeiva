@@ -5,6 +5,7 @@ import { Container } from '../components/Container'
 import { Breadcrumb } from '../components/Breadcrumb'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionView } from '../components/sections/SectionView'
+import { TopicDocumentEditor } from '../components/editor/TopicDocumentEditor'
 import { TopicTree } from '../components/TopicTree'
 import {
   collectSubtreeIds,
@@ -12,10 +13,12 @@ import {
   flattenTopics,
   getAncestors,
   loadSubject,
-  loadTopicSections,
+  loadTopicBody,
   planCompletionCascade,
 } from '../content/data'
 import { splitDocumentByHeading } from '../lib/split-document'
+import { getTiptapSectionNav } from '../lib/split-tiptap-document'
+import { emptyTopicDocument, type TopicDocument } from '../types/tiptap-document'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
@@ -53,20 +56,36 @@ export function TopicPage() {
     completedAt,
   } = useProgress()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [savedDocument, setSavedDocument] = useState<TopicDocument | null>(null)
 
   const hasContent = topic?.hasContent ?? false
-  const { data: topicDocument, loading: contentLoading } = useAsync(
+  const canCreateInDev = import.meta.env.DEV && !hasContent && !savedDocument
+
+  const { data: topicBody, loading: contentLoading } = useAsync(
     () =>
-      hasContent
-        ? loadTopicSections(subjectId, topicId)
+      hasContent || savedDocument
+        ? loadTopicBody(subjectId, topicId)
         : Promise.resolve(undefined),
-    [subjectId, topicId, hasContent],
+    [subjectId, topicId, hasContent, savedDocument],
   )
 
-  const contentSections = useMemo(
-    () => (topicDocument ? splitDocumentByHeading(topicDocument) : []),
-    [topicDocument],
-  )
+  const tiptapDocument =
+    savedDocument ??
+    (topicBody?.format === 'tiptap/v1' ? topicBody.document : undefined)
+
+  const contentSections = useMemo(() => {
+    if (tiptapDocument) {
+      return getTiptapSectionNav(tiptapDocument.doc)
+    }
+    if (topicBody?.format === 'blocks') {
+      return splitDocumentByHeading(topicBody.document).map((s) => ({
+        id: s.id,
+        title: sectionNavLabel(s.title),
+      }))
+    }
+    return []
+  }, [tiptapDocument, topicBody])
+
   const showNav = contentSections.length > 1
   const sectionIds = useMemo(
     () => contentSections.map((s) => `section-${s.id}`),
@@ -104,6 +123,58 @@ export function TopicPage() {
 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  const renderBody = () => {
+    if ((hasContent || savedDocument) && contentLoading && !topicBody && !savedDocument) {
+      return (
+        <div className="flex min-h-[30vh] items-center justify-center">
+          <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
+        </div>
+      )
+    }
+
+    if (tiptapDocument) {
+      return (
+        <TopicDocumentEditor
+          subjectId={subject.id}
+          topicId={topic.id}
+          topicDocument={tiptapDocument}
+          onDocumentSaved={setSavedDocument}
+        />
+      )
+    }
+
+    if (topicBody?.format === 'blocks') {
+      const sections = splitDocumentByHeading(topicBody.document)
+      return (
+        <div className="space-y-10 sm:space-y-12">
+          {sections.map((s) => (
+            <section key={s.id} id={`section-${s.id}`} className="scroll-mt-24">
+              {s.title && (
+                <h2 className="mb-3 text-xl font-bold sm:mb-4 sm:text-2xl">
+                  {s.title}
+                </h2>
+              )}
+              <SectionView blocks={s.blocks} />
+            </section>
+          ))}
+        </div>
+      )
+    }
+
+    if (canCreateInDev) {
+      return (
+        <TopicDocumentEditor
+          subjectId={subject.id}
+          topicId={topic.id}
+          topicDocument={emptyTopicDocument()}
+          onDocumentSaved={setSavedDocument}
+        />
+      )
+    }
+
+    return null
   }
 
   return (
@@ -185,7 +256,7 @@ export function TopicPage() {
                             : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800',
                         )}
                       >
-                        <span className="truncate">{sectionNavLabel(s.title)}</span>
+                        <span className="truncate">{s.title}</span>
                       </button>
                     </li>
                   )
@@ -214,24 +285,7 @@ export function TopicPage() {
             </section>
           )}
 
-          {hasContent && contentLoading && !topicDocument ? (
-            <div className="flex min-h-[30vh] items-center justify-center">
-              <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
-            </div>
-          ) : (
-            <div className="space-y-10 sm:space-y-12">
-              {contentSections.map((s) => (
-                <section key={s.id} id={`section-${s.id}`} className="scroll-mt-24">
-                  {s.title && (
-                    <h2 className="mb-3 text-xl font-bold sm:mb-4 sm:text-2xl">
-                      {s.title}
-                    </h2>
-                  )}
-                  <SectionView blocks={s.blocks} />
-                </section>
-              ))}
-            </div>
-          )}
+          {renderBody()}
 
           <div className="mt-10 grid gap-3 border-t border-slate-200 pt-5 dark:border-slate-800 sm:mt-14 sm:grid-cols-2 sm:pt-6">
             {prev ? (

@@ -14,7 +14,7 @@
  * inlined all ~13.5k topic files into the JS bundle. Pages now fetch only what
  * they need, so the initial load no longer depends on the size of the content.
  */
-import { readFile, readdir, mkdir, writeFile, rm } from 'node:fs/promises'
+import { readFile, readdir, mkdir, writeFile, rm, rename } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,6 +23,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
 const SUBJECTS_DIR = path.join(ROOT, 'src', 'content', 'subjects')
 const OUT_DIR = path.join(ROOT, 'public', 'data')
+const OUT_TMP = path.join(ROOT, 'public', 'data.__tmp')
+const OUT_STALE = path.join(ROOT, 'public', 'data.__stale')
+const RM_OPTS = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
 
 /** Canonical section order (mirrors src/content/sections.ts). */
 const SECTION_ORDER = [
@@ -156,17 +159,25 @@ async function listDirs(dir) {
   return entries.filter((e) => e.isDirectory()).map((e) => e.name)
 }
 
-/** Load one topic folder: its `topic.json` meta and optional `explanation.json`. */
+/** Load one topic folder: meta plus optional `document.json` or `explanation.json`. */
 async function loadTopic(subjectDir, topicId) {
   const topicDir = path.join(subjectDir, 'topics', topicId)
   const meta = await readJson(path.join(topicDir, 'topic.json'))
   if (!meta) return undefined
 
-  const explanation = await readJson(path.join(topicDir, 'explanation.json'))
-  const hasContent = Boolean(explanation)
-  const contentSectionCount = hasContent ? splitDocumentByHeading(explanation).length : 0
+  const document = await readJson(path.join(topicDir, 'document.json'))
+  const explanation = document
+    ? undefined
+    : await readJson(path.join(topicDir, 'explanation.json'))
+  const body = document ?? explanation
+  const hasContent = Boolean(body)
+  const contentSectionCount = hasContent
+    ? document
+      ? splitTiptapByH1(document.doc).length
+      : splitDocumentByHeading(explanation).length
+    : 0
 
-  return { meta, explanation, hasContent, contentSectionCount }
+  return { meta, document, explanation, body, hasContent, contentSectionCount }
 }
 
 /** Split explanation.json blocks into navigable sections at each level-1 heading. */
@@ -203,6 +214,57 @@ function splitDocumentByHeading(doc) {
   }
   flush()
   return sections
+}
+
+/** Split a TipTap document into navigable sections at each level-1 heading. */
+function splitTiptapByH1(fullDoc) {
+  const nodes = fullDoc?.content ?? []
+  const sections = []
+  let currentNodes = []
+  let currentTitle = null
+  let currentId = 'intro'
+  const usedIds = new Set()
+
+  const flush = () => {
+    if (currentNodes.length === 0 && currentTitle === null) return
+    let id = currentId
+    let n = 1
+    while (usedIds.has(id)) id = `${currentId}-${n++}`
+    usedIds.add(id)
+    sections.push({
+      id,
+      title: currentTitle,
+      doc: { type: 'doc', content: currentNodes },
+    })
+    currentNodes = []
+  }
+
+  for (const node of nodes) {
+    if (node.type === 'heading' && node.attrs?.level === 1) {
+      flush()
+      currentTitle = tiptapNodeToPlain(node)
+      currentId =
+        currentTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '') || 'section'
+      continue
+    }
+    currentNodes.push(node)
+  }
+  flush()
+  return sections
+}
+
+/** Recursively flatten TipTap JSON into plain text. */
+function tiptapNodeToPlain(node) {
+  if (!node) return ''
+  if (typeof node.text === 'string') return node.text
+  return (node.content ?? []).map(tiptapNodeToPlain).join(' ')
+}
+
+function tiptapDocToPlain(doc) {
+  return tiptapNodeToPlain(doc)
 }
 
 /** Flatten rich-document inline nodes into plain text for search indexing. */
@@ -271,6 +333,43 @@ function explanationToPlain(doc) {
     }
   }
   return parts.join(' ')
+}
+
+/** Pull searchable units out of one topic's TipTap document. */
+function extractTiptapSectionDocs(subject, topicNode, document) {
+  if (!document?.doc) return []
+  const base = {
+    type: 'section',
+    subjectId: subject.id,
+    subjectTitle: subject.title,
+    topicId: topicNode.id,
+    topicTitle: topicNode.title,
+    url: `/subjects/${subject.id}/topics/${topicNode.id}`,
+    tags: topicNode.tags,
+  }
+
+  const sections = splitTiptapByH1(document.doc)
+  if (sections.length === 0) {
+    return [
+      {
+        ...base,
+        id: `${subject.id}/${topicNode.id}/explanation/0`,
+        sectionKey: 'explanation',
+        sectionLabel: 'Explanation',
+        title: `${topicNode.title} · Explanation`,
+        text: clip(tiptapDocToPlain(document.doc)),
+      },
+    ]
+  }
+
+  return sections.map((s, i) => ({
+    ...base,
+    id: `${subject.id}/${topicNode.id}/explanation/${i}`,
+    sectionKey: 'explanation',
+    sectionLabel: s.title ?? 'Overview',
+    title: s.title ? `${topicNode.title} · ${s.title}` : `${topicNode.title} · Overview`,
+    text: clip(tiptapDocToPlain(s.doc)),
+  }))
 }
 
 /** Pull searchable units out of one topic's explanation document. */
@@ -386,6 +485,15 @@ function extractSubjectExtraDocs(subjectMeta, extras) {
 }
 
 export async function generateContent({ log = false, force = true } = {}) {
+  contentGenerationQueue = contentGenerationQueue
+    .catch(() => undefined)
+    .then(() => runGenerateContent({ log, force }))
+  return contentGenerationQueue
+}
+
+let contentGenerationQueue = Promise.resolve({})
+
+async function runGenerateContent({ log = false, force = true } = {}) {
   const start = Date.now()
 
   // Dev fast path: if the artifacts already exist and we're not forcing a
@@ -399,9 +507,11 @@ export async function generateContent({ log = false, force = true } = {}) {
 
   const subjectIds = (await listDirs(SUBJECTS_DIR)).sort()
 
-  // Clean + recreate the output dir so deletions in source are reflected.
-  await rm(OUT_DIR, { recursive: true, force: true })
-  await mkdir(path.join(OUT_DIR, 'subjects'), { recursive: true })
+  // Build into a temp dir, then swap atomically. Deleting `public/data/` in
+  // place races with the dev server serving those files (ENOTEMPTY on macOS).
+  await rm(OUT_TMP, RM_OPTS).catch(() => undefined)
+  await mkdir(path.join(OUT_TMP, 'subjects'), { recursive: true })
+  const outDir = OUT_TMP
 
   const indexEntries = []
   const searchDocs = []
@@ -478,24 +588,24 @@ export async function generateContent({ log = false, force = true } = {}) {
 
     // Per-subject file (full tree + roadmap, no heavy section bodies).
     await writeFile(
-      path.join(OUT_DIR, 'subjects', `${subjectId}.json`),
+      path.join(outDir, 'subjects', `${subjectId}.json`),
       JSON.stringify({ ...subjectMetaOut, roadmap: roadmap ?? undefined, topics: roots }),
     )
 
     // Per-topic section bodies (only for topics that actually have sections).
     const withContent = loaded.filter((t) => t.hasContent)
     if (withContent.length) {
-      const secDir = path.join(OUT_DIR, 'subjects', subjectId, 'sections')
+      const secDir = path.join(outDir, 'subjects', subjectId, 'sections')
       await mkdir(secDir, { recursive: true })
       await mapLimit(withContent, 64, (t) =>
-        writeFile(path.join(secDir, `${t.meta.id}.json`), JSON.stringify(t.explanation)),
+        writeFile(path.join(secDir, `${t.meta.id}.json`), JSON.stringify(t.body)),
       )
     }
 
     // Subject-level extras. Split so the subject page only pays for what it
     // shows: a tiny counts manifest (always emitted, for the tab badges) plus
     // one file per non-empty category, fetched lazily when its tab is opened.
-    const subjectOutDir = path.join(OUT_DIR, 'subjects', subjectId)
+    const subjectOutDir = path.join(outDir, 'subjects', subjectId)
     await mkdir(subjectOutDir, { recursive: true })
     const extraCounts = {}
     const presentExtras = SUBJECT_EXTRA_FILES.filter(
@@ -546,7 +656,7 @@ export async function generateContent({ log = false, force = true } = {}) {
       })
     })
 
-    const explanationById = new Map(loaded.map((t) => [t.meta.id, t.explanation]))
+    const bodyById = new Map(loaded.map((t) => [t.meta.id, t]))
     for (const n of nodes) {
       searchDocs.push({
         id: `topic/${subjectId}/${n.id}`,
@@ -560,23 +670,34 @@ export async function generateContent({ log = false, force = true } = {}) {
         tags: n.tags,
         url: `/subjects/${subjectId}/topics/${n.id}`,
       })
-      searchDocs.push(
-        ...extractSectionDocs(
-          { id: subjectId, title: meta.title },
-          n,
-          explanationById.get(n.id),
-        ),
-      )
+      const loadedTopic = bodyById.get(n.id)
+      if (loadedTopic?.document) {
+        searchDocs.push(
+          ...extractTiptapSectionDocs(
+            { id: subjectId, title: meta.title },
+            n,
+            loadedTopic.document,
+          ),
+        )
+      } else if (loadedTopic?.explanation) {
+        searchDocs.push(
+          ...extractSectionDocs(
+            { id: subjectId, title: meta.title },
+            n,
+            loadedTopic.explanation,
+          ),
+        )
+      }
     }
   }
 
   indexEntries.sort((a, b) => a.title.localeCompare(b.title))
 
   await writeFile(
-    path.join(OUT_DIR, 'index.json'),
+    path.join(outDir, 'index.json'),
     JSON.stringify({ generatedAt: Date.now(), subjects: indexEntries }),
   )
-  await writeFile(path.join(OUT_DIR, 'search.json'), JSON.stringify(searchDocs))
+  await writeFile(path.join(outDir, 'search.json'), JSON.stringify(searchDocs))
 
   // Global glossary: drop exact duplicates (same term + definition + source),
   // sort alphabetically and assign a stable id for the dedicated Glossary page.
@@ -592,9 +713,16 @@ export async function generateContent({ log = false, force = true } = {}) {
     a.term.localeCompare(b.term, undefined, { sensitivity: 'base' }),
   )
   await writeFile(
-    path.join(OUT_DIR, 'glossary.json'),
+    path.join(outDir, 'glossary.json'),
     JSON.stringify({ generatedAt: Date.now(), terms: glossary }),
   )
+
+  await rm(OUT_STALE, RM_OPTS).catch(() => undefined)
+  if (existsSync(OUT_DIR)) {
+    await rename(OUT_DIR, OUT_STALE)
+  }
+  await rename(outDir, OUT_DIR)
+  await rm(OUT_STALE, RM_OPTS).catch(() => undefined)
 
   if (log) {
     const totalTopics = indexEntries.reduce((s, e) => s + e.topicCount, 0)
