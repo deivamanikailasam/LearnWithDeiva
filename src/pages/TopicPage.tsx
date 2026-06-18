@@ -6,12 +6,14 @@ import { Breadcrumb } from '../components/Breadcrumb'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionView } from '../components/sections/SectionView'
 import { TopicDocumentEditor } from '../components/editor/TopicDocumentEditor'
+import { EditableTopicHeader } from '../components/editor/EditableTopicHeader'
 import { TopicTree } from '../components/TopicTree'
 import {
   collectSubtreeIds,
   findTopic,
   flattenTopics,
   getAncestors,
+  invalidateSubjectCache,
   loadSubject,
   loadTopicBody,
   planCompletionCascade,
@@ -23,7 +25,7 @@ import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
 import { useProgress } from '../lib/progressContext'
-import { formatDuration, subtreeMinutes } from '../lib/duration'
+import { useEditMode } from '../lib/editModeContext'
 
 /** Count every descendant of a topic (used for the "N total" subtopics label). */
 function countDescendants(topic: { subtopics: { subtopics: unknown[] }[] }): number {
@@ -40,9 +42,10 @@ function sectionNavLabel(title: string | null): string {
 
 export function TopicPage() {
   const { subjectId = '', topicId = '' } = useParams()
+  const [subjectRefresh, setSubjectRefresh] = useState(0)
   const { data: subject, loading: subjectLoading } = useAsync(
     () => loadSubject(subjectId),
-    [subjectId],
+    [subjectId, subjectRefresh],
   )
   const topic = useMemo(
     () => (subject ? findTopic(subject, topicId) : undefined),
@@ -57,9 +60,17 @@ export function TopicPage() {
   } = useProgress()
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [savedDocument, setSavedDocument] = useState<TopicDocument | null>(null)
+  const { editMode, canUseEditMode } = useEditMode()
+  const metadataEditable = canUseEditMode && editMode
+
+  const refreshSubject = () => {
+    invalidateSubjectCache(subjectId)
+    setSubjectRefresh((n) => n + 1)
+  }
 
   const hasContent = topic?.hasContent ?? false
-  const canCreateInDev = import.meta.env.DEV && !hasContent && !savedDocument
+  const canCreateInDev =
+    canUseEditMode && editMode && !hasContent && !savedDocument
 
   const { data: topicBody, loading: contentLoading } = useAsync(
     () =>
@@ -193,48 +204,42 @@ export function TopicPage() {
       />
 
       <header className="mt-4 sm:mt-5">
-        <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">
-          {topic.title}
-        </h1>
-        {!isSubSubtopic && topic.summary && (
-          <p className="mt-2 max-w-3xl text-base text-slate-600 sm:text-lg dark:text-slate-400">
-            {topic.summary}
-          </p>
-        )}
-        <div className="mt-3 flex flex-wrap items-center gap-1.5 sm:mt-4 sm:gap-2">
-          <span className="chip capitalize">⚡ {topic.level}</span>
-          <span className="chip">⏱️ {formatDuration(subtreeMinutes(topic))}</span>
-          {topic.tags.map((t) => (
-            <span key={t} className="chip">
-              #{t}
-            </span>
-          ))}
-        </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => setConfirmOpen(true)}
-            className={
-              isComplete(subject.id, topic.id)
-                ? 'btn flex-1 bg-emerald-600 text-white hover:bg-emerald-700 xs:flex-initial'
-                : 'btn-ghost flex-1 border border-slate-200 xs:flex-initial dark:border-slate-700'
-            }
-          >
-            {isComplete(subject.id, topic.id) ? '✓ Completed' : 'Mark as complete'}
-          </button>
-          <button
-            type="button"
-            onClick={() => toggleBookmark(subject.id, topic.id)}
-            className="btn-ghost flex-1 border border-slate-200 xs:flex-initial dark:border-slate-700"
-          >
-            {isBookmarked(subject.id, topic.id) ? '★ Bookmarked' : '☆ Bookmark'}
-          </button>
-        </div>
-        {completedTs && (
-          <p className="mt-2 text-sm text-emerald-600 dark:text-emerald-400">
-            ✓ Completed on {new Date(completedTs).toLocaleString()}
-          </p>
-        )}
+        <EditableTopicHeader
+          subjectId={subject.id}
+          topic={topic}
+          isSubSubtopic={isSubSubtopic}
+          editable={metadataEditable}
+          onSaved={refreshSubject}
+          actions={
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmOpen(true)}
+                className={
+                  isComplete(subject.id, topic.id)
+                    ? 'btn flex-1 bg-emerald-600 text-white hover:bg-emerald-700 xs:flex-initial'
+                    : 'btn-ghost flex-1 border border-slate-200 xs:flex-initial dark:border-slate-700'
+                }
+              >
+                {isComplete(subject.id, topic.id) ? '✓ Completed' : 'Mark as complete'}
+              </button>
+              <button
+                type="button"
+                onClick={() => toggleBookmark(subject.id, topic.id)}
+                className="btn-ghost flex-1 border border-slate-200 xs:flex-initial dark:border-slate-700"
+              >
+                {isBookmarked(subject.id, topic.id) ? '★ Bookmarked' : '☆ Bookmark'}
+              </button>
+            </div>
+          }
+          completedLine={
+            completedTs ? (
+              <p className="mt-2 text-sm text-emerald-600 dark:text-emerald-400">
+                ✓ Completed on {new Date(completedTs).toLocaleString()}
+              </p>
+            ) : undefined
+          }
+        />
       </header>
 
       <div className="mt-6 gap-8 sm:mt-8 lg:flex lg:gap-10">
@@ -283,7 +288,10 @@ export function TopicPage() {
               <TopicTree
                 subjectId={subject.id}
                 topics={topic.subtopics}
+                currentTopicId={topic.id}
                 defaultExpanded={!hasContent && topic.subtopics.length <= 12}
+                editable={metadataEditable}
+                onTreeChange={refreshSubject}
               />
             </section>
           )}

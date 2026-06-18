@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
 import { Breadcrumb } from '../components/Breadcrumb'
 import { Roadmap } from '../components/Roadmap'
+import { EditableRoadmap } from '../components/editor/EditableRoadmap'
+import { EditableSubjectHeader } from '../components/editor/EditableSubjectHeader'
 import { TopicTree } from '../components/TopicTree'
 import { ProgressBar } from '../components/ProgressBar'
 import { SubjectExtraList } from '../components/sections/SubjectExtraList'
 import {
+  invalidateSubjectCache,
   loadSubject,
   loadSubjectExtra,
   loadSubjectExtrasManifest,
@@ -17,6 +20,7 @@ import { SUBJECT_EXTRA_DESCRIPTORS } from '../content/sections'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
+import { useEditMode } from '../lib/editModeContext'
 import { formatDuration } from '../lib/duration'
 
 /** The currently active subject view. Extras are keyed by their descriptor. */
@@ -25,10 +29,20 @@ type View = 'roadmap' | 'topics' | (typeof SUBJECT_EXTRA_DESCRIPTORS)[number]['k
 export function SubjectPage() {
   const { subjectId = '', view } = useParams()
   const navigate = useNavigate()
+  const [subjectRefresh, setSubjectRefresh] = useState(0)
   const { data: subject, loading } = useAsync(
     () => loadSubject(subjectId),
-    [subjectId],
+    [subjectId, subjectRefresh],
   )
+  const { editMode, canUseEditMode } = useEditMode()
+  const treeEditable = canUseEditMode && editMode
+  const roadmapEditable = canUseEditMode && editMode
+  const metadataEditable = canUseEditMode && editMode
+
+  const refreshSubject = () => {
+    invalidateSubjectCache(subjectId)
+    setSubjectRefresh((n) => n + 1)
+  }
   // Tiny counts manifest — drives the tab badges without pulling any bodies.
   const { data: manifest } = useAsync(
     () => loadSubjectExtrasManifest(subjectId),
@@ -128,38 +142,49 @@ export function SubjectPage() {
               { label: subject.title },
             ]}
           />
-          <div className="mt-4 flex flex-col gap-4 sm:mt-5 sm:flex-row sm:items-center sm:gap-5">
-            <span
-              className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl text-3xl shadow-md sm:h-20 sm:w-20 sm:text-4xl"
-              style={{
-                backgroundImage: `linear-gradient(135deg, ${subject.gradient[0]}, ${subject.gradient[1]})`,
-              }}
-            >
-              {subject.icon}
-            </span>
-            <div className="min-w-0">
-              <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">
-                {subject.title}
-              </h1>
-              <p className="text-base text-slate-600 sm:text-lg dark:text-slate-300">
-                {subject.tagline}
+          {metadataEditable ? (
+            <EditableSubjectHeader
+              subject={subject}
+              editable
+              onSaved={refreshSubject}
+            />
+          ) : (
+            <>
+              <div className="mt-4 flex flex-col gap-4 sm:mt-5 sm:flex-row sm:items-center sm:gap-5">
+                <span
+                  className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl text-3xl shadow-md sm:h-20 sm:w-20 sm:text-4xl"
+                  style={{
+                    backgroundImage: `linear-gradient(135deg, ${subject.gradient[0]}, ${subject.gradient[1]})`,
+                  }}
+                >
+                  {subject.icon}
+                </span>
+                <div className="min-w-0">
+                  <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">
+                    {subject.title}
+                  </h1>
+                  <p className="text-base text-slate-600 sm:text-lg dark:text-slate-300">
+                    {subject.tagline}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-4 max-w-3xl text-sm text-slate-600 sm:mt-5 sm:text-base dark:text-slate-400">
+                {subject.description}
               </p>
-            </div>
-          </div>
-          <p className="mt-4 max-w-3xl text-sm text-slate-600 sm:mt-5 sm:text-base dark:text-slate-400">
-            {subject.description}
-          </p>
+            </>
+          )}
           <div className="mt-4 flex flex-wrap items-center gap-1.5 sm:mt-5 sm:gap-2">
             <span className="chip capitalize">⚡ {levelLabel}</span>
             <span className="chip">📚 {subject.topicCount} topics</span>
             {subject.estimatedMinutes ? (
               <span className="chip">⏱️ ~{formatDuration(subject.estimatedMinutes)}</span>
             ) : null}
-            {subject.tags.map((t) => (
-              <span key={t} className="chip">
-                #{t}
-              </span>
-            ))}
+            {!metadataEditable &&
+              subject.tags.map((t) => (
+                <span key={t} className="chip">
+                  #{t}
+                </span>
+              ))}
           </div>
           <div className="mt-4 max-w-md sm:mt-5">
             <ProgressBar
@@ -243,9 +268,22 @@ export function SubjectPage() {
         </div>
 
         {activeView === 'roadmap' && subject.roadmap ? (
-          <Roadmap subject={subject} roadmap={subject.roadmap} />
+          roadmapEditable ? (
+            <EditableRoadmap
+              subject={subject}
+              roadmap={subject.roadmap}
+              onSaved={refreshSubject}
+            />
+          ) : (
+            <Roadmap subject={subject} roadmap={subject.roadmap} />
+          )
         ) : activeView === 'topics' ? (
-          <TopicTree subjectId={subject.id} topics={subject.topics} />
+          <TopicTree
+            subjectId={subject.id}
+            topics={subject.topics}
+            editable={treeEditable}
+            onTreeChange={refreshSubject}
+          />
         ) : activeExtra ? (
           <div>
             <h2 className="mb-4 flex items-center gap-2 text-2xl font-bold">

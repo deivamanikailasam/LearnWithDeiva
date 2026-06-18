@@ -104,6 +104,11 @@ export function loadTopicSections(
   return p
 }
 
+/** Drop cached subject tree after a dev metadata save. */
+export function invalidateSubjectCache(id: string): void {
+  subjectCache.delete(id)
+}
+
 /** Drop cached section body after a dev save so the next read is fresh. */
 export function invalidateTopicDocumentCache(
   subjectId: string,

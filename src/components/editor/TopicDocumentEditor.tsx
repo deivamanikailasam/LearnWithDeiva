@@ -7,6 +7,9 @@ import { saveTopicDocument, type SaveStatus } from '../../lib/save-topic-documen
 import { invalidateTopicDocumentCache, primeTopicDocumentCache } from '../../content/data'
 import { sanitizeTiptapDocument } from '../../lib/sanitize-tiptap-document'
 import { TiptapViewer } from './TiptapViewer'
+import { useEditMode } from '../../lib/editModeContext'
+import { useToast } from '../../lib/toastContext'
+import { useDirtyEditor } from '../../lib/useDirtyEditor'
 import { tiptapEditEditorProps, tiptapExtensions } from './tiptap-extensions'
 
 interface TopicDocumentEditorProps {
@@ -54,7 +57,9 @@ export function TopicDocumentEditor({
   topicDocument,
   onDocumentSaved,
 }: TopicDocumentEditorProps) {
-  const canEdit = import.meta.env.DEV
+  const { editMode, canUseEditMode, registerOnLeaveEditMode } = useEditMode()
+  const { showToast } = useToast()
+  const canEdit = canUseEditMode && editMode
   const [editing, setEditing] = useState(false)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -88,15 +93,18 @@ export function TopicDocumentEditor({
         invalidateTopicDocumentCache(subjectId, topicId)
         primeTopicDocumentCache(subjectId, topicId, saved)
         setSaveStatus('idle')
+        showToast('Document saved', 'success')
         onDocumentSaved?.(saved)
         return true
       } catch (err) {
         setSaveStatus('error')
-        setSaveError(err instanceof Error ? err.message : 'Save failed')
+        const message = err instanceof Error ? err.message : 'Save failed'
+        setSaveError(message)
+        showToast(message, 'error')
         return false
       }
     },
-    [subjectId, topicId, onDocumentSaved],
+    [subjectId, topicId, onDocumentSaved, showToast],
   )
 
   const editor = useEditor({
@@ -134,8 +142,23 @@ export function TopicDocumentEditor({
 
   useEffect(() => {
     if (!editor) return
-    editor.setEditable(editing)
-  }, [editor, editing])
+    editor.setEditable(editing && canEdit)
+  }, [editor, editing, canEdit])
+
+  const cancelEdit = useCallback(() => {
+    if (editor) {
+      editor.commands.setContent(topicDocument.doc, { emitUpdate: false })
+    }
+    latestDoc.current = topicDocument
+    setDirty(false)
+    setSaveStatus('idle')
+    setSaveError(null)
+    setEditing(false)
+  }, [editor, topicDocument])
+
+  useEffect(() => {
+    return registerOnLeaveEditMode(cancelEdit)
+  }, [registerOnLeaveEditMode, cancelEdit])
 
   const run = (fn: () => boolean) => {
     fn()
@@ -143,6 +166,7 @@ export function TopicDocumentEditor({
   }
 
   const startEdit = () => {
+    if (!canEdit) return
     if (editor) {
       baselineRef.current = JSON.stringify(editor.getJSON())
     }
@@ -156,18 +180,7 @@ export function TopicDocumentEditor({
     })
   }
 
-  const cancelEdit = () => {
-    if (editor) {
-      editor.commands.setContent(topicDocument.doc, { emitUpdate: false })
-    }
-    latestDoc.current = topicDocument
-    setDirty(false)
-    setSaveStatus('idle')
-    setSaveError(null)
-    setEditing(false)
-  }
-
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     const cleaned = sanitizeTiptapDocument(latestDoc.current)
     if (editor) {
       editor.commands.setContent(cleaned.doc, { emitUpdate: false })
@@ -175,7 +188,15 @@ export function TopicDocumentEditor({
     latestDoc.current = cleaned
     const ok = await persist(cleaned)
     if (ok) setEditing(false)
-  }
+  }, [editor, persist])
+
+  useDirtyEditor({
+    id: `topic-doc:${subjectId}:${topicId}`,
+    label: 'Document',
+    dirty: canEdit && editing && dirty,
+    enabled: canEdit && editing && dirty,
+    save: handleSave,
+  })
 
   const toolbarControls = editing ? (
     <>

@@ -3,6 +3,8 @@ import { Link, NavLink } from 'react-router-dom'
 import clsx from 'clsx'
 import { paths } from '../../lib/paths'
 import { ThemeToggle } from './ThemeToggle'
+import { EditModeToggle } from './EditModeToggle'
+import { useEditMode } from '../../lib/editModeContext'
 import { useSearchPalette } from '../search/searchPaletteContext'
 import { UserMenu } from '../auth/UserMenu'
 import { useAuth } from '../../lib/authContext'
@@ -21,6 +23,7 @@ const navItems = [
 
 export function Header() {
   const { open } = useSearchPalette()
+  const { editMode } = useEditMode()
   const { enabled, user, signOut } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
@@ -37,7 +40,14 @@ export function Header() {
   }, [menuOpen])
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/80 backdrop-blur dark:border-slate-800/70 dark:bg-slate-950/80">
+    <header
+      className={clsx(
+        'sticky top-0 z-40 border-b bg-white/80 backdrop-blur dark:bg-slate-950/80',
+        editMode
+          ? 'border-amber-300/80 dark:border-amber-500/30'
+          : 'border-slate-200/70 dark:border-slate-800/70',
+      )}
+    >
       <div className="mx-auto flex h-14 w-full max-w-[110rem] items-center gap-2 px-3 sm:h-16 sm:gap-4 sm:px-5 lg:px-6 xl:px-8">
         <button
           type="button"
@@ -99,6 +109,7 @@ export function Header() {
           </kbd>
         </button>
 
+        <EditModeToggle />
         <ThemeToggle />
         <UserMenu />
       </div>

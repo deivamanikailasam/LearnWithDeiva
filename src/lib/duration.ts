@@ -17,7 +17,52 @@ export const MINUTES_BY_LEVEL: Record<Difficulty, number> = {
 
 const MINUTES_PER_HOUR = 60
 const HOURS_PER_DAY = 24
-const MINUTES_PER_DAY = MINUTES_PER_HOUR * HOURS_PER_DAY
+export const MINUTES_PER_DAY = MINUTES_PER_HOUR * HOURS_PER_DAY
+
+export interface DurationParts {
+  days: number
+  hours: number
+  minutes: number
+}
+
+/** Split total minutes into day / hour / minute parts (24-hour days). */
+export function minutesToDurationParts(totalMinutes: number): DurationParts {
+  const minutes = Math.max(0, Math.round(totalMinutes))
+  return {
+    days: Math.floor(minutes / MINUTES_PER_DAY),
+    hours: Math.floor((minutes % MINUTES_PER_DAY) / MINUTES_PER_HOUR),
+    minutes: minutes % MINUTES_PER_HOUR,
+  }
+}
+
+/** Convert day / hour / minute parts to total minutes. */
+export function durationPartsToMinutes(
+  days: number,
+  hours: number,
+  minutes: number,
+): number {
+  const d = Math.max(0, Math.min(365, Math.floor(days)))
+  const h = Math.max(0, Math.min(23, Math.floor(hours)))
+  const m = Math.max(0, Math.min(59, Math.floor(minutes)))
+  return d * MINUTES_PER_DAY + h * MINUTES_PER_HOUR + m
+}
+
+/** Convert day / hour / minute parts to decimal hours for `topic.json`. */
+export function durationPartsToHours(
+  days: number,
+  hours: number,
+  minutes: number,
+): number {
+  return Math.round((durationPartsToMinutes(days, hours, minutes) / MINUTES_PER_HOUR) * 100) / 100
+}
+
+/** Convert decimal hours from `topic.json` to day / hour / minute parts. */
+export function hoursToDurationParts(hours: number | undefined): DurationParts {
+  if (typeof hours !== 'number' || !Number.isFinite(hours) || hours < 0) {
+    return { days: 0, hours: 0, minutes: 0 }
+  }
+  return minutesToDurationParts(Math.round(hours * MINUTES_PER_HOUR))
+}
 
 interface TimedNode {
   level: Difficulty

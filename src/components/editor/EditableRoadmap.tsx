@@ -1,0 +1,618 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import clsx from 'clsx'
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import type { Roadmap, RoadmapNode, RoadmapStage, Subject, Topic } from '../../types/content'
+import { flattenTopics, getAncestors } from '../../content/data'
+import { saveRoadmap, type SaveStatus } from '../../lib/content-api'
+import {
+  cloneRoadmap,
+  proposeNodeId,
+  proposeStageId,
+  roadmapFingerprint,
+  validateRoadmap,
+} from '../../lib/content-validation'
+import { useEditMode } from '../../lib/editModeContext'
+import { useToast } from '../../lib/toastContext'
+import { useDirtyEditor } from '../../lib/useDirtyEditor'
+import { compactInputClass, fieldErrorClass, ghostInputClass, inputClass, labelClass } from '../../lib/form-styles'
+import { ConfirmDialog } from '../ConfirmDialog'
+
+function topicLabel(subject: Subject, topic: Topic): string {
+  const ancestors = getAncestors(subject, topic.id)
+  if (ancestors.length === 0) return topic.title
+  return `${ancestors.map((a) => a.title).join(' › ')} › ${topic.title}`
+}
+
+function TopicIdCombobox({
+  subject,
+  value,
+  onChange,
+}: {
+  subject: Subject
+  value: string | undefined
+  onChange: (topicId: string | undefined) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const flat = useMemo(() => flattenTopics(subject), [subject])
+  const linked = value ? flat.find((t) => t.id === value) : undefined
+
+  const options = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const filtered = q
+      ? flat.filter(
+          (t) =>
+            t.id.toLowerCase().includes(q) ||
+            t.title.toLowerCase().includes(q) ||
+            topicLabel(subject, t).toLowerCase().includes(q),
+        )
+      : flat
+    return filtered.slice(0, 60)
+  }, [flat, query, subject])
+
+  return (
+    <div className="relative">
+      <label className={labelClass}>Linked topic</label>
+      <input
+        type="text"
+        value={open ? query : linked ? topicLabel(subject, linked) : value ?? ''}
+        placeholder="Search topics or leave empty"
+        className={compactInputClass}
+        onFocus={() => {
+          setOpen(true)
+          setQuery(value ?? '')
+        }}
+        onChange={(e) => {
+          setOpen(true)
+          setQuery(e.target.value)
+        }}
+        onBlur={() => {
+          window.setTimeout(() => setOpen(false), 150)
+        }}
+      />
+      {open && options.length > 0 && (
+        <ul className="absolute z-20 mt-1 max-h-48 w-full overflow-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-900">
+          <li>
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-sm text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(undefined)
+                setQuery('')
+                setOpen(false)
+              }}
+            >
+              No linked topic
+            </button>
+          </li>
+          {options.map((topic) => (
+            <li key={topic.id}>
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-sm hover:bg-brand-50 dark:hover:bg-brand-500/10"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onChange(topic.id)
+                  setQuery('')
+                  setOpen(false)
+                }}
+              >
+                <span className="font-medium">{topic.title}</span>
+                <span className="mt-0.5 block text-xs text-slate-400">{topic.id}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function SortableNodeCard({
+  node,
+  subject,
+  onChange,
+  onDelete,
+}: {
+  node: RoadmapNode
+  subject: Subject
+  onChange: (patch: Partial<RoadmapNode>) => void
+  onDelete: () => void
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({ id: node.id })
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+      className={clsx(
+        'rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900',
+        isDragging && 'z-10 shadow-lg',
+      )}
+    >
+      <div className="mb-2 flex items-start gap-2">
+        <button
+          type="button"
+          ref={setActivatorNodeRef}
+          {...attributes}
+          {...listeners}
+          aria-label="Drag to reorder node"
+          className="grid h-7 w-7 shrink-0 cursor-grab place-items-center rounded-md border border-slate-200 text-slate-400 active:cursor-grabbing dark:border-slate-700"
+        >
+          ⠿
+        </button>
+        <div className="min-w-0 flex-1 space-y-2">
+          <input
+            value={node.title}
+            onChange={(e) => onChange({ title: e.target.value })}
+            placeholder="Node title"
+            className={compactInputClass}
+          />
+          <textarea
+            value={node.description ?? ''}
+            onChange={(e) => onChange({ description: e.target.value })}
+            placeholder="Description (optional)"
+            rows={2}
+            className={clsx(compactInputClass, 'resize-y')}
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <TopicIdCombobox
+              subject={subject}
+              value={node.topicId}
+              onChange={(topicId) => onChange({ topicId })}
+            />
+            <div>
+              <label className={labelClass}>Status</label>
+              <select
+                value={node.status ?? 'core'}
+                onChange={(e) =>
+                  onChange({ status: e.target.value as RoadmapNode['status'] })
+                }
+                className={compactInputClass}
+              >
+                <option value="core">Core</option>
+                <option value="optional">Optional</option>
+              </select>
+            </div>
+          </div>
+          <p className="text-[10px] text-slate-400">Node id: {node.id}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onDelete}
+          className="btn shrink-0 border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-500/30 dark:text-rose-400 dark:hover:bg-rose-500/10"
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SortableStageSection({
+  stage,
+  index,
+  subject,
+  onChange,
+  onDelete,
+  onAddNode,
+  onNodeChange,
+  onNodeDelete,
+  onNodeReorder,
+}: {
+  stage: RoadmapStage
+  index: number
+  subject: Subject
+  onChange: (patch: Partial<RoadmapStage>) => void
+  onDelete: () => void
+  onAddNode: () => void
+  onNodeChange: (nodeId: string, patch: Partial<RoadmapNode>) => void
+  onNodeDelete: (nodeId: string) => void
+  onNodeReorder: (orderedIds: string[]) => void
+}) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({ id: stage.id })
+
+  const handleNodeDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const oldIndex = stage.nodes.findIndex((n) => n.id === active.id)
+    const newIndex = stage.nodes.findIndex((n) => n.id === over.id)
+    if (oldIndex < 0 || newIndex < 0) return
+    onNodeReorder(arrayMove(stage.nodes, oldIndex, newIndex).map((n) => n.id))
+  }
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+      className={clsx('relative sm:pl-12', isDragging && 'z-10')}
+    >
+      <span className="absolute left-0 top-0 hidden h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-brand-500 to-violet-500 text-sm font-bold text-white shadow sm:grid">
+        {index + 1}
+      </span>
+
+      <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+        <div className="flex items-start gap-2">
+          <button
+            type="button"
+            ref={setActivatorNodeRef}
+            {...attributes}
+            {...listeners}
+            aria-label="Drag to reorder stage"
+            className="grid h-8 w-8 shrink-0 cursor-grab place-items-center rounded-lg border border-slate-200 bg-white text-slate-400 active:cursor-grabbing dark:border-slate-700 dark:bg-slate-900"
+          >
+            ⠿
+          </button>
+          <div className="min-w-0 flex-1 space-y-2">
+            <input
+              value={stage.title}
+              onChange={(e) => onChange({ title: e.target.value })}
+              placeholder="Stage title"
+              className={clsx(ghostInputClass, 'text-lg font-bold')}
+            />
+            <textarea
+              value={stage.summary ?? ''}
+              onChange={(e) => onChange({ summary: e.target.value })}
+              placeholder="Stage summary (optional)"
+              rows={2}
+              className={clsx(inputClass, 'resize-y text-sm')}
+            />
+            <p className="text-[10px] text-slate-400">Stage id: {stage.id}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="btn shrink-0 border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-500/30 dark:text-rose-400 dark:hover:bg-rose-500/10"
+          >
+            Delete stage
+          </button>
+        </div>
+      </div>
+
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleNodeDragEnd}>
+        <SortableContext
+          items={stage.nodes.map((n) => n.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {stage.nodes.map((node) => (
+              <SortableNodeCard
+                key={node.id}
+                node={node}
+                subject={subject}
+                onChange={(patch) => onNodeChange(node.id, patch)}
+                onDelete={() => onNodeDelete(node.id)}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+
+      <button
+        type="button"
+        onClick={onAddNode}
+        className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-semibold text-slate-500 transition hover:border-brand-300 hover:bg-brand-50/50 hover:text-brand-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/5 dark:hover:text-brand-300"
+      >
+        <span aria-hidden>+</span>
+        Add node
+      </button>
+    </li>
+  )
+}
+
+export function EditableRoadmap({
+  subject,
+  roadmap,
+  onSaved,
+}: {
+  subject: Subject
+  roadmap: Roadmap
+  onSaved?: () => void
+}) {
+  const { registerOnLeaveEditMode } = useEditMode()
+  const { showToast } = useToast()
+  const [committed, setCommitted] = useState(roadmap)
+  const [draft, setDraft] = useState(() => cloneRoadmap(roadmap))
+  const [status, setStatus] = useState<SaveStatus>('idle')
+  const [errors, setErrors] = useState<string[]>([])
+  const [deleteStageTarget, setDeleteStageTarget] = useState<RoadmapStage | null>(null)
+  const pendingServerFingerprintRef = useRef<string | null>(null)
+
+  const dirty = roadmapFingerprint(draft) !== roadmapFingerprint(committed)
+
+  useEffect(() => {
+    const fp = roadmapFingerprint(roadmap)
+    if (fp === pendingServerFingerprintRef.current) {
+      pendingServerFingerprintRef.current = null
+      setCommitted(roadmap)
+      setDraft(cloneRoadmap(roadmap))
+      return
+    }
+    if (dirty) return
+    setCommitted(roadmap)
+    setDraft(cloneRoadmap(roadmap))
+  }, [roadmap, dirty])
+
+  useEffect(() => {
+    return registerOnLeaveEditMode(() => {
+      setDraft(cloneRoadmap(committed))
+      setErrors([])
+      setStatus('idle')
+    })
+  }, [committed, registerOnLeaveEditMode])
+
+  const handleSave = useCallback(async () => {
+    const validated = validateRoadmap(draft)
+    if (!validated.ok) {
+      setErrors(validated.errors)
+      setStatus('error')
+      showToast('Fix validation errors before saving.', 'error')
+      return
+    }
+
+    setStatus('saving')
+    setErrors([])
+    try {
+      const saved = await saveRoadmap(subject.id, validated.payload)
+      pendingServerFingerprintRef.current = roadmapFingerprint(saved)
+      setCommitted(saved)
+      setDraft(cloneRoadmap(saved))
+      setStatus('saved')
+      showToast('Roadmap saved', 'success')
+      onSaved?.()
+      window.setTimeout(() => setStatus('idle'), 2000)
+    } catch (err) {
+      setStatus('error')
+      const message = err instanceof Error ? err.message : 'Save failed'
+      setErrors([message])
+      showToast(message, 'error')
+    }
+  }, [draft, onSaved, showToast, subject.id])
+
+  useDirtyEditor({
+    id: `roadmap:${subject.id}`,
+    label: 'Roadmap',
+    dirty,
+    enabled: true,
+    save: handleSave,
+  })
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+
+  const updateDraft = useCallback((updater: (prev: Roadmap) => Roadmap) => {
+    setDraft(updater)
+    setErrors([])
+    setStatus('idle')
+  }, [])
+
+  const handleStageDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    updateDraft((prev) => {
+      const oldIndex = prev.stages.findIndex((s) => s.id === active.id)
+      const newIndex = prev.stages.findIndex((s) => s.id === over.id)
+      if (oldIndex < 0 || newIndex < 0) return prev
+      return { ...prev, stages: arrayMove(prev.stages, oldIndex, newIndex) }
+    })
+  }
+
+  const handleSaveClick = () => void handleSave()
+
+  const handleCancel = () => {
+    setDraft(cloneRoadmap(committed))
+    setErrors([])
+    setStatus('idle')
+  }
+
+  const confirmDeleteStage = () => {
+    if (!deleteStageTarget) return
+    updateDraft((prev) => ({
+      ...prev,
+      stages: prev.stages.filter((s) => s.id !== deleteStageTarget.id),
+    }))
+    setDeleteStageTarget(null)
+  }
+
+  return (
+    <div>
+      <div className="mb-6 space-y-3 rounded-xl border border-brand-200 bg-brand-50/40 p-4 dark:border-brand-500/30 dark:bg-brand-500/5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <label className={labelClass}>Roadmap title</label>
+            <input
+              value={draft.title}
+              onChange={(e) => updateDraft((prev) => ({ ...prev, title: e.target.value }))}
+              className={clsx(ghostInputClass, 'text-xl font-bold')}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {dirty ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleSaveClick}
+                  disabled={status === 'saving'}
+                  className="btn-primary text-sm"
+                >
+                  {status === 'saving' ? 'Saving…' : 'Save roadmap'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  disabled={status === 'saving'}
+                  className="btn border border-slate-200 text-sm dark:border-slate-700"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : status === 'saved' ? (
+              <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                Saved
+              </span>
+            ) : null}
+          </div>
+        </div>
+        {errors.length > 0 && (
+          <ul className={fieldErrorClass}>
+            {errors.map((err) => (
+              <li key={err}>{err}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleStageDragEnd}>
+        <SortableContext
+          items={draft.stages.map((s) => s.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          <ol className="relative space-y-8 sm:space-y-10">
+            <span className="absolute left-[15px] top-2 bottom-2 hidden w-px bg-gradient-to-b from-brand-400 to-violet-400 sm:block" />
+            {draft.stages.map((stage, idx) => (
+              <SortableStageSection
+                key={stage.id}
+                stage={stage}
+                index={idx}
+                subject={subject}
+                onChange={(patch) =>
+                  updateDraft((prev) => ({
+                    ...prev,
+                    stages: prev.stages.map((s) =>
+                      s.id === stage.id ? { ...s, ...patch } : s,
+                    ),
+                  }))
+                }
+                onDelete={() => setDeleteStageTarget(stage)}
+                onAddNode={() =>
+                  updateDraft((prev) => {
+                    const title = 'New node'
+                    const id = proposeNodeId(title, prev.stages)
+                    const node: RoadmapNode = { id, title, status: 'core' }
+                    return {
+                      ...prev,
+                      stages: prev.stages.map((s) =>
+                        s.id === stage.id ? { ...s, nodes: [...s.nodes, node] } : s,
+                      ),
+                    }
+                  })
+                }
+                onNodeChange={(nodeId, patch) =>
+                  updateDraft((prev) => ({
+                    ...prev,
+                    stages: prev.stages.map((s) =>
+                      s.id === stage.id
+                        ? {
+                            ...s,
+                            nodes: s.nodes.map((n) =>
+                              n.id === nodeId ? { ...n, ...patch } : n,
+                            ),
+                          }
+                        : s,
+                    ),
+                  }))
+                }
+                onNodeDelete={(nodeId) =>
+                  updateDraft((prev) => ({
+                    ...prev,
+                    stages: prev.stages.map((s) =>
+                      s.id === stage.id
+                        ? { ...s, nodes: s.nodes.filter((n) => n.id !== nodeId) }
+                        : s,
+                    ),
+                  }))
+                }
+                onNodeReorder={(orderedIds) =>
+                  updateDraft((prev) => ({
+                    ...prev,
+                    stages: prev.stages.map((s) => {
+                      if (s.id !== stage.id) return s
+                      const byId = new Map(s.nodes.map((n) => [n.id, n]))
+                      return {
+                        ...s,
+                        nodes: orderedIds
+                          .map((id) => byId.get(id))
+                          .filter((n): n is RoadmapNode => Boolean(n)),
+                      }
+                    }),
+                  }))
+                }
+              />
+            ))}
+          </ol>
+        </SortableContext>
+      </DndContext>
+
+      <button
+        type="button"
+        onClick={() =>
+          updateDraft((prev) => {
+            const title = 'New stage'
+            const stage: RoadmapStage = {
+              id: proposeStageId(title, prev.stages),
+              title,
+              nodes: [],
+            }
+            return { ...prev, stages: [...prev.stages, stage] }
+          })
+        }
+        className="mt-6 flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 py-3 text-sm font-semibold text-slate-500 transition hover:border-brand-300 hover:bg-brand-50/50 hover:text-brand-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/5 dark:hover:text-brand-300"
+      >
+        <span aria-hidden>+</span>
+        Add stage
+      </button>
+
+      <ConfirmDialog
+        open={deleteStageTarget != null}
+        tone="danger"
+        title="Delete stage?"
+        message={
+          deleteStageTarget ? (
+            <>
+              Delete stage <span className="font-semibold">{deleteStageTarget.title}</span> and{' '}
+              {deleteStageTarget.nodes.length} node
+              {deleteStageTarget.nodes.length === 1 ? '' : 's'}?
+            </>
+          ) : (
+            ''
+          )
+        }
+        confirmLabel="Delete stage"
+        onConfirm={confirmDeleteStage}
+        onCancel={() => setDeleteStageTarget(null)}
+      />
+    </div>
+  )
+}

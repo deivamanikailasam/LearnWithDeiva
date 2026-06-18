@@ -6,6 +6,7 @@ import type { Topic } from '../types/content'
 import { paths } from '../lib/paths'
 import { useProgress } from '../lib/progressContext'
 import { formatDuration, subtreeMinutes } from '../lib/duration'
+import { EditableTopicTree } from './editor/EditableTopicTree'
 
 function sectionCount(topic: Topic): number {
   return topic.contentSectionCount
@@ -144,13 +145,29 @@ export function TopicTree({
   topics,
   currentTopicId,
   defaultExpanded = false,
+  editable = false,
+  onTreeChange,
 }: {
   subjectId: string
   topics: Topic[]
   currentTopicId?: string
   /** Expand the first level by default (used on a topic's own page). */
   defaultExpanded?: boolean
+  editable?: boolean
+  onTreeChange?: () => void
 }) {
+  if (editable) {
+    return (
+      <EditableTopicTree
+        subjectId={subjectId}
+        topics={topics}
+        currentTopicId={currentTopicId}
+        defaultExpanded={defaultExpanded}
+        onTreeChange={onTreeChange}
+      />
+    )
+  }
+
   const renderNode = (topic: Topic) => (
     <TopicNode
       key={topic.id}
