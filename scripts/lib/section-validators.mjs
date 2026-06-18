@@ -68,7 +68,14 @@ const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === 'st
  * grows; the validator will reject any field not listed below.
  */
 const ALLOWED_FIELDS = {
-  explanation: { self: ['definition', 'layman', 'content', 'keyPoints'] },
+  explanation: {
+    self: ['id', 'title', 'blocks'],
+    item: {
+      key: 'blocks',
+      fields: ['type', 'content', 'level', 'ordered', 'items', 'language', 'code'],
+    },
+    nested: [{ parent: 'blocks', child: 'items', fields: ['content'] }],
+  },
   examples: { self: ['items'], item: { key: 'items', fields: ['title', 'scenario', 'explanation'] } },
   diagrams: { self: ['items'], item: { key: 'items', fields: ['title', 'mermaid', 'caption'] } },
   charts: {
@@ -177,23 +184,252 @@ function requireArray(value, fieldName, errors) {
   return true
 }
 
+const RICH_TEXT_TYPES = new Set(['text', 'bold', 'code', 'link'])
+const PROSE_BLOCK_TYPES = new Set(['title', 'heading', 'paragraph', 'list', 'code_block', 'divider'])
+const EMBED_BLOCK_TYPES = new Set([
+  'interview_qa',
+  'scenario',
+  'case_study',
+  'project',
+  'quiz',
+  'resource',
+  'pitfall',
+  'cheatsheet',
+  'glossary_term',
+  'mermaid',
+])
+const BLOCK_TYPES = new Set([...PROSE_BLOCK_TYPES, ...EMBED_BLOCK_TYPES])
+const RESOURCE_TYPES = new Set([
+  'article',
+  'video',
+  'book',
+  'course',
+  'docs',
+  'tool',
+  'reference',
+])
+
+function validateRichText(node, path, errors) {
+  if (!isObject(node)) {
+    errors.push(`${path}: must be an object.`)
+    return
+  }
+  if (!RICH_TEXT_TYPES.has(node.type)) {
+    errors.push(`${path}.type: must be one of ${[...RICH_TEXT_TYPES].join(', ')}.`)
+    return
+  }
+  if (!isNonEmptyString(node.text)) {
+    errors.push(`${path}.text: required non-empty string.`)
+  }
+  if (node.type === 'link' && !isNonEmptyString(node.href)) {
+    errors.push(`${path}.href: required non-empty string for link nodes.`)
+  }
+}
+
+function validateRichTextArray(value, path, errors) {
+  if (!requireArray(value, path, errors)) return
+  value.forEach((node, i) => validateRichText(node, `${path}[${i}]`, errors))
+}
+
+function validateInterviewQAItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.question)) errors.push(`${path}.question: required non-empty string.`)
+  if (!isNonEmptyString(it.answer)) errors.push(`${path}.answer: required non-empty string.`)
+  if (it.difficulty !== undefined && !DIFFICULTY.has(it.difficulty))
+    errors.push(`${path}.difficulty: must be one of ${[...DIFFICULTY].join('/')} when present.`)
+  if (it.tags !== undefined && !isStringArray(it.tags))
+    errors.push(`${path}.tags: must be an array of strings when present.`)
+}
+
+function validateScenarioItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.scenario)) errors.push(`${path}.scenario: required non-empty string.`)
+  if (!isNonEmptyString(it.question)) errors.push(`${path}.question: required non-empty string.`)
+  if (!isNonEmptyString(it.answer)) errors.push(`${path}.answer: required non-empty string.`)
+}
+
+function validateCaseStudyItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  for (const k of ['title', 'context', 'problem', 'solution', 'outcome']) {
+    if (!isNonEmptyString(it[k])) errors.push(`${path}.${k}: required non-empty string.`)
+  }
+}
+
+function validateProjectItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.title)) errors.push(`${path}.title: required non-empty string.`)
+  if (!isNonEmptyString(it.description)) errors.push(`${path}.description: required non-empty string.`)
+  if (!DIFFICULTY.has(it.difficulty))
+    errors.push(`${path}.difficulty: must be one of ${[...DIFFICULTY].join('/')} (got ${JSON.stringify(it.difficulty)}).`)
+  if (it.requirements !== undefined && !isStringArray(it.requirements))
+    errors.push(`${path}.requirements: must be an array of strings when present.`)
+}
+
+function validateExamQuestionItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.question)) errors.push(`${path}.question: required non-empty string.`)
+  if (!isNonEmptyString(it.answer)) errors.push(`${path}.answer: required non-empty string.`)
+  if (it.options !== undefined) {
+    if (!isStringArray(it.options) || it.options.length < 2) {
+      errors.push(`${path}.options: must be an array of ≥2 strings when present.`)
+    } else if (!it.options.includes(it.answer)) {
+      errors.push(`${path}.answer: must be one of options when options is present (answer=${JSON.stringify(it.answer)}).`)
+    }
+  }
+  if (it.explanation !== undefined && !isNonEmptyString(it.explanation))
+    errors.push(`${path}.explanation: must be a non-empty string when present.`)
+}
+
+function validateResourceItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.title)) errors.push(`${path}.title: required non-empty string.`)
+  if (!isNonEmptyString(it.url)) errors.push(`${path}.url: required non-empty string.`)
+  if (!RESOURCE_TYPES.has(it.type))
+    errors.push(`${path}.type: must be one of ${[...RESOURCE_TYPES].join('/')} (got ${JSON.stringify(it.type)}).`)
+  if (it.description !== undefined && !isNonEmptyString(it.description))
+    errors.push(`${path}.description: must be a non-empty string when present.`)
+  if (it.author !== undefined && !isNonEmptyString(it.author))
+    errors.push(`${path}.author: must be a non-empty string when present.`)
+}
+
+function validatePitfallItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.title)) errors.push(`${path}.title: required non-empty string.`)
+  if (!isNonEmptyString(it.avoid)) errors.push(`${path}.avoid: required non-empty string.`)
+  if (!isNonEmptyString(it.prefer)) errors.push(`${path}.prefer: required non-empty string.`)
+  if (it.why !== undefined && !isNonEmptyString(it.why))
+    errors.push(`${path}.why: must be a non-empty string when present.`)
+  if (it.example !== undefined && !isNonEmptyString(it.example))
+    errors.push(`${path}.example: must be a non-empty string when present.`)
+}
+
+function validateCheatSheetGroup(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.title)) errors.push(`${path}.title: required non-empty string.`)
+  if (!requireArray(it.entries, `${path}.entries`, errors)) return
+  it.entries.forEach((entry, i) => {
+    const ep = `${path}.entries[${i}]`
+    if (!isObject(entry)) return errors.push(`${ep}: must be an object.`)
+    if (!isNonEmptyString(entry.label)) errors.push(`${ep}.label: required non-empty string.`)
+    if (entry.code !== undefined && !isNonEmptyString(entry.code))
+      errors.push(`${ep}.code: must be a non-empty string when present.`)
+    if (entry.language !== undefined && !isNonEmptyString(entry.language))
+      errors.push(`${ep}.language: must be a non-empty string when present.`)
+    if (entry.note !== undefined && !isNonEmptyString(entry.note))
+      errors.push(`${ep}.note: must be a non-empty string when present.`)
+  })
+}
+
+function validateSynonymItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  if (!isNonEmptyString(it.term)) errors.push(`${path}.term: required non-empty string.`)
+  if (!isNonEmptyString(it.definition)) errors.push(`${path}.definition: required non-empty string.`)
+}
+
+function validateDiagramItem(it, path, errors) {
+  if (!isObject(it)) return errors.push(`${path}: must be an object.`)
+  lintMermaid(it.mermaid, path, errors)
+  if (it.title !== undefined && !isNonEmptyString(it.title))
+    errors.push(`${path}.title: must be a non-empty string when present.`)
+  if (it.caption !== undefined && !isNonEmptyString(it.caption))
+    errors.push(`${path}.caption: must be a non-empty string when present.`)
+}
+
+function validateBlock(block, path, errors) {
+  if (!isObject(block)) {
+    errors.push(`${path}: must be an object.`)
+    return
+  }
+  if (!BLOCK_TYPES.has(block.type)) {
+    errors.push(`${path}.type: must be one of ${[...BLOCK_TYPES].join(', ')}.`)
+    return
+  }
+
+  switch (block.type) {
+    case 'title':
+    case 'paragraph':
+      validateRichTextArray(block.content, `${path}.content`, errors)
+      break
+    case 'heading': {
+      if (![1, 2, 3, 4].includes(block.level)) {
+        errors.push(`${path}.level: must be 1, 2, 3, or 4.`)
+      }
+      validateRichTextArray(block.content, `${path}.content`, errors)
+      break
+    }
+    case 'list': {
+      if (block.ordered !== undefined && typeof block.ordered !== 'boolean') {
+        errors.push(`${path}.ordered: must be a boolean when present.`)
+      }
+      if (!requireArray(block.items, `${path}.items`, errors)) break
+      block.items.forEach((item, i) => {
+        const itemPath = `${path}.items[${i}]`
+        if (!isObject(item)) {
+          errors.push(`${itemPath}: must be an object.`)
+          return
+        }
+        validateRichTextArray(item.content, `${itemPath}.content`, errors)
+      })
+      break
+    }
+    case 'code_block':
+      if (block.language !== undefined && !isNonEmptyString(block.language)) {
+        errors.push(`${path}.language: must be a non-empty string when present.`)
+      }
+      if (!isNonEmptyString(block.code)) {
+        errors.push(`${path}.code: required non-empty string.`)
+      }
+      break
+    case 'divider':
+      break
+    case 'interview_qa':
+      validateInterviewQAItem(block.item, `${path}.item`, errors)
+      break
+    case 'scenario':
+      validateScenarioItem(block.item, `${path}.item`, errors)
+      break
+    case 'case_study':
+      validateCaseStudyItem(block.item, `${path}.item`, errors)
+      break
+    case 'project':
+      validateProjectItem(block.item, `${path}.item`, errors)
+      break
+    case 'quiz':
+      validateExamQuestionItem(block.item, `${path}.item`, errors)
+      break
+    case 'resource':
+      validateResourceItem(block.item, `${path}.item`, errors)
+      break
+    case 'pitfall':
+      validatePitfallItem(block.item, `${path}.item`, errors)
+      break
+    case 'cheatsheet':
+      validateCheatSheetGroup(block.item, `${path}.item`, errors)
+      break
+    case 'glossary_term':
+      validateSynonymItem(block.item, `${path}.item`, errors)
+      break
+    case 'mermaid':
+      validateDiagramItem(block.item, `${path}.item`, errors)
+      break
+    default:
+      break
+  }
+}
+
 function validateExplanation(content, errors) {
   if (!isObject(content)) {
     errors.push('explanation: content must be an object.')
     return
   }
-  if (!isNonEmptyString(content.content)) {
-    errors.push('explanation.content: required non-empty string (the main Markdown body).')
+  if (!isNonEmptyString(content.id)) {
+    errors.push('explanation.id: required non-empty string.')
   }
-  if (content.definition !== undefined && !isNonEmptyString(content.definition)) {
-    errors.push('explanation.definition: must be a non-empty string when present.')
+  if (!isNonEmptyString(content.title)) {
+    errors.push('explanation.title: required non-empty string.')
   }
-  if (content.layman !== undefined && !isNonEmptyString(content.layman)) {
-    errors.push('explanation.layman: must be a non-empty string when present.')
-  }
-  if (content.keyPoints !== undefined && !isStringArray(content.keyPoints)) {
-    errors.push('explanation.keyPoints: must be an array of strings when present.')
-  }
+  if (!requireArray(content.blocks, 'explanation.blocks', errors)) return
+  content.blocks.forEach((block, i) => validateBlock(block, `explanation.blocks[${i}]`, errors))
 }
 
 function validateExamples(content, errors) {

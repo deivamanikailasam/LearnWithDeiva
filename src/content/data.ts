@@ -13,6 +13,7 @@
  * All fetch helpers de-dupe in-flight requests and cache results for the
  * lifetime of the page.
  */
+import type { DocumentData } from '../types/rich-document'
 import type {
   Difficulty,
   LevelRange,
@@ -22,7 +23,6 @@ import type {
   SubjectExtrasManifest,
   SubjectIndexEntry,
   Topic,
-  TopicSections,
 } from '../types/content'
 
 const BASE = import.meta.env.BASE_URL
@@ -75,19 +75,19 @@ export function loadSubject(id: string): Promise<Subject | undefined> {
 
 /* --------------------------- per-topic sections -------------------------- */
 
-const sectionsCache = new Map<string, Promise<TopicSections>>()
+const sectionsCache = new Map<string, Promise<DocumentData | undefined>>()
 
-/** The heavy section bodies for a single topic. Cached per topic. */
+/** The `explanation.json` document for a single topic. Cached per topic. */
 export function loadTopicSections(
   subjectId: string,
   topicId: string,
-): Promise<TopicSections> {
+): Promise<DocumentData | undefined> {
   const key = `${subjectId}::${topicId}`
   let p = sectionsCache.get(key)
   if (!p) {
-    p = fetchJson<TopicSections>(
+    p = fetchJson<DocumentData>(
       dataUrl(`subjects/${subjectId}/sections/${topicId}.json`),
-    ).catch(() => ({}) as TopicSections)
+    ).catch(() => undefined)
     sectionsCache.set(key, p)
   }
   return p

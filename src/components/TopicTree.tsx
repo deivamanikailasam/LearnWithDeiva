@@ -8,7 +8,7 @@ import { useProgress } from '../lib/progressContext'
 import { formatDuration, subtreeMinutes } from '../lib/duration'
 
 function sectionCount(topic: Topic): number {
-  return topic.sectionKeys.length
+  return topic.contentSectionCount
 }
 
 // Above this many top-level topics the root list is windowed so only the rows

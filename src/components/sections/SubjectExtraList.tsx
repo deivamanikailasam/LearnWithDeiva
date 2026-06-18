@@ -22,7 +22,7 @@ import {
   ProjectCard,
   ResourceCard,
   ScenarioCard,
-} from './SectionView'
+} from './SectionCards'
 import { QuizItem } from './QuizItem'
 
 /**

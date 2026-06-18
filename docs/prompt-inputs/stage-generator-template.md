@@ -99,26 +99,12 @@ Image sourcing autonomy:
 ## Section files and JSON shapes
 
 Each applicable section is one JSON file at
-`src/content/subjects/<subject>/topics/<topic-id>/sections/<key>.json`.
-The build (`scripts/gen-content.mjs`) and `SectionView` render these keys:
+`src/content/subjects/<subject>/topics/<topic-id>/explanation.json`.
+The build (`scripts/gen-content.mjs`) and `SectionView` render this file only:
 
-| Template item | Section key (file) | JSON shape (top-level) |
+| Template item | File | JSON shape (top-level) |
 | --- | --- | --- |
-| 1 Core definition + 2 Layman | `explanation.json` | `{ definition?, layman?, content, keyPoints? }` |
-| 3 Real-time examples | `examples.json` | `{ items: [{ title, scenario, explanation? }] }` |
-| 4 Code examples | `code.json` | `{ snippets: [{ title, language, code, explanation? }] }` |
-| 5 Diagrams | `diagrams.json` | `{ items: [{ title?, mermaid, caption? }] }` |
-| 6 Charts | `charts.json` | `{ items: [{ title?, kind, xKey, series:[{key,label?}], data:[…], caption? }] }` (`kind`: `bar`/`line`/`pie`/`area`) |
-| 7 Images | `images.json` | `{ items: [{ src, alt, caption? }] }` |
-| 8 Conceptual connections | `connections.json` | `{ items: [{ title, relation?, description, topicId? }] }` |
-| 9 Question patterns | `question-patterns.json` | `{ groups: [{ pattern, items:[{question, answer}] }] }` (`pattern`: `5w1h`/`socratic`/`mindmap`/`comparative`/`what-if`/`cause-effect`/`what-breaks-this`). For `5w1h`, `items` MUST contain exactly one question for each of: Who, What, When, Where, Why, How. See "Question patterns completeness rule" above. |
-| 10 Advantages & disadvantages | `tradeoffs.json` | `{ advantages: [string], disadvantages: [string] }` |
-| 11 Common mistakes | `mistakes.json` | `{ items: [{ mistake, fix, why?, example? }] }` (`example` is a short concrete snippet/scenario; include when it aids understanding) |
-| 12 Common misconceptions | `misconceptions.json` | `{ items: [{ myth, reality, example? }] }` (`example` illustrates the reality concretely; include when it aids understanding) |
-| 13 Pitfalls & best practices | `best-practices.json` | `{ items: [{ title, avoid, prefer, why?, example? }] }` (`example` is a short concrete snippet/scenario; include when it aids understanding) |
-| 14 Origin / what came before | `origins.json` | `{ content, timeline?: [{ label, description }] }` |
-| 15 Self-assessment test | `exam-prep.json` | `{ items: [{ question, options?, answer, explanation? }] }` |
-| 16 Mastery criteria | `mastery.json` | `{ criteria: [{ label, level?, example }] }` (`example` is required on every criterion — see RULES.md §5.2) |
+| 1 Core definition + 2 Layman + body | `explanation.json` | `DocumentData` in `src/types/rich-document.ts`: `{ id, title, blocks }`. Prose: `title`, `heading` (1–4), `paragraph`, `list`, `code_block`, `divider`. Embeds (each with `item`): `interview_qa`, `scenario`, `case_study`, `project`, `quiz`, `resource`, `pitfall`, `cheatsheet`, `glossary_term`, `mermaid`. See `scripts/__fixtures__/rich-document-example.json`. |
 
 Notes:
 - Omit any file a sub-subtopic does not need; missing files are simply skipped.

@@ -15,8 +15,7 @@ import {
   loadTopicSections,
   planCompletionCascade,
 } from '../content/data'
-import type { TopicSections } from '../types/content'
-import { SECTION_DESCRIPTORS } from '../content/sections'
+import { splitDocumentByHeading } from '../lib/split-document'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
@@ -30,6 +29,10 @@ function countDescendants(topic: { subtopics: { subtopics: unknown[] }[] }): num
     n += 1 + countDescendants(sub as never)
   }
   return n
+}
+
+function sectionNavLabel(title: string | null): string {
+  return title ?? 'Overview'
 }
 
 export function TopicPage() {
@@ -51,24 +54,25 @@ export function TopicPage() {
   } = useProgress()
   const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const available = useMemo(
+  const hasContent = topic?.hasContent ?? false
+  const { data: topicDocument, loading: contentLoading } = useAsync(
     () =>
-      topic
-        ? SECTION_DESCRIPTORS.filter((d) => topic.sectionKeys.includes(d.key))
-        : [],
-    [topic],
-  )
-  const sectionIds = useMemo(() => available.map((d) => `section-${d.key}`), [available])
-  const activeId = useScrollSpy(sectionIds)
-
-  const hasSections = available.length > 0
-  const { data: sections, loading: sectionsLoading } = useAsync(
-    () =>
-      hasSections
+      hasContent
         ? loadTopicSections(subjectId, topicId)
-        : Promise.resolve({} as TopicSections),
-    [subjectId, topicId, hasSections],
+        : Promise.resolve(undefined),
+    [subjectId, topicId, hasContent],
   )
+
+  const contentSections = useMemo(
+    () => (topicDocument ? splitDocumentByHeading(topicDocument) : []),
+    [topicDocument],
+  )
+  const showNav = contentSections.length > 1
+  const sectionIds = useMemo(
+    () => contentSections.map((s) => `section-${s.id}`),
+    [contentSections],
+  )
+  const activeId = useScrollSpy(sectionIds)
 
   if (subjectLoading && !subject) {
     return (
@@ -160,40 +164,37 @@ export function TopicPage() {
       </header>
 
       <div className="mt-6 gap-8 sm:mt-8 lg:flex lg:gap-10">
-        {/* Sticky section navigator */}
-        {hasSections && (
-        <aside className="mb-8 lg:order-2 lg:mb-0 lg:w-60 lg:shrink-0">
-          <nav className="lg:sticky lg:top-24">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-              On this page
-            </p>
-            <ul className="space-y-1">
-              {available.map((d) => {
-                const id = `section-${d.key}`
-                return (
-                  <li key={d.key}>
-                    <button
-                      type="button"
-                      onClick={() => scrollTo(id)}
-                      className={clsx(
-                        'flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm transition',
-                        activeId === id
-                          ? 'bg-brand-50 font-semibold text-brand-700 dark:bg-brand-500/10 dark:text-brand-300'
-                          : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800',
-                      )}
-                    >
-                      <span>{d.icon}</span>
-                      <span className="truncate">{d.label}</span>
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          </nav>
-        </aside>
+        {showNav && (
+          <aside className="mb-8 lg:order-2 lg:mb-0 lg:w-60 lg:shrink-0">
+            <nav className="lg:sticky lg:top-24">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                On this page
+              </p>
+              <ul className="space-y-1">
+                {contentSections.map((s) => {
+                  const id = `section-${s.id}`
+                  return (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        onClick={() => scrollTo(id)}
+                        className={clsx(
+                          'flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm transition',
+                          activeId === id
+                            ? 'bg-brand-50 font-semibold text-brand-700 dark:bg-brand-500/10 dark:text-brand-300'
+                            : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800',
+                        )}
+                      >
+                        <span className="truncate">{sectionNavLabel(s.title)}</span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </nav>
+          </aside>
         )}
 
-        {/* Sections */}
         <div className="min-w-0 flex-1 lg:order-1">
           {topic.subtopics.length > 0 && (
             <section className="mb-10">
@@ -208,34 +209,30 @@ export function TopicPage() {
               <TopicTree
                 subjectId={subject.id}
                 topics={topic.subtopics}
-                defaultExpanded={!hasSections && topic.subtopics.length <= 12}
+                defaultExpanded={!hasContent && topic.subtopics.length <= 12}
               />
             </section>
           )}
 
-          {hasSections && sectionsLoading && !sections ? (
+          {hasContent && contentLoading && !topicDocument ? (
             <div className="flex min-h-[30vh] items-center justify-center">
               <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
             </div>
           ) : (
             <div className="space-y-10 sm:space-y-12">
-              {available.map((d) => (
-                <section key={d.key} id={`section-${d.key}`} className="scroll-mt-24">
-                  <h2 className="mb-3 flex items-center gap-2 text-xl font-bold sm:mb-4 sm:text-2xl">
-                    <span>{d.icon}</span>
-                    {d.label}
-                  </h2>
-                  <SectionView
-                    sectionKey={d.key}
-                    sections={sections ?? {}}
-                    subjectId={subject.id}
-                  />
+              {contentSections.map((s) => (
+                <section key={s.id} id={`section-${s.id}`} className="scroll-mt-24">
+                  {s.title && (
+                    <h2 className="mb-3 text-xl font-bold sm:mb-4 sm:text-2xl">
+                      {s.title}
+                    </h2>
+                  )}
+                  <SectionView blocks={s.blocks} />
                 </section>
               ))}
             </div>
           )}
 
-          {/* Prev / next */}
           <div className="mt-10 grid gap-3 border-t border-slate-200 pt-5 dark:border-slate-800 sm:mt-14 sm:grid-cols-2 sm:pt-6">
             {prev ? (
               <Link to={paths.topic(subject.id, prev.id)} className="card p-4">

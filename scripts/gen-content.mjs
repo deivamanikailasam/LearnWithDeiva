@@ -156,34 +156,126 @@ async function listDirs(dir) {
   return entries.filter((e) => e.isDirectory()).map((e) => e.name)
 }
 
-/** Load one topic folder: its `topic.json` meta and assembled `sections`. */
+/** Load one topic folder: its `topic.json` meta and optional `explanation.json`. */
 async function loadTopic(subjectDir, topicId) {
   const topicDir = path.join(subjectDir, 'topics', topicId)
   const meta = await readJson(path.join(topicDir, 'topic.json'))
   if (!meta) return undefined
 
-  const sections = {}
-  const sectionsDir = path.join(topicDir, 'sections')
-  if (existsSync(sectionsDir)) {
-    const files = (await readdir(sectionsDir)).filter((f) => f.endsWith('.json'))
-    await Promise.all(
-      files.map(async (f) => {
-        const key = f.replace(/\.json$/, '')
-        const data = await readJson(path.join(sectionsDir, f))
-        if (data) sections[key] = data
-      }),
-    )
-  }
+  const explanation = await readJson(path.join(topicDir, 'explanation.json'))
+  const hasContent = Boolean(explanation)
+  const contentSectionCount = hasContent ? splitDocumentByHeading(explanation).length : 0
 
-  const sectionKeys = Object.keys(sections).sort(
-    (a, b) => (SECTION_RANK.get(a) ?? 99) - (SECTION_RANK.get(b) ?? 99),
-  )
-  return { meta, sections, sectionKeys }
+  return { meta, explanation, hasContent, contentSectionCount }
 }
 
-/** Pull searchable units out of one topic's sections. */
-function extractSectionDocs(subject, topicNode, sections) {
-  const docs = []
+/** Split explanation.json blocks into navigable sections at each level-1 heading. */
+function splitDocumentByHeading(doc) {
+  const sections = []
+  let currentBlocks = []
+  let currentTitle = null
+  let currentId = 'intro'
+  const usedIds = new Set()
+
+  const flush = () => {
+    if (currentBlocks.length === 0 && currentTitle === null) return
+    let id = currentId
+    let n = 1
+    while (usedIds.has(id)) id = `${currentId}-${n++}`
+    usedIds.add(id)
+    sections.push({ id, title: currentTitle, blocks: currentBlocks })
+    currentBlocks = []
+  }
+
+  for (const block of doc.blocks ?? []) {
+    if (block.type === 'title') continue
+    if (block.type === 'heading' && block.level === 1) {
+      flush()
+      currentTitle = richTextToPlain(block.content)
+      currentId =
+        currentTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '') || 'section'
+      continue
+    }
+    currentBlocks.push(block)
+  }
+  flush()
+  return sections
+}
+
+/** Flatten rich-document inline nodes into plain text for search indexing. */
+function richTextToPlain(nodes) {
+  if (!Array.isArray(nodes)) return ''
+  return nodes.map((n) => (n && typeof n.text === 'string' ? n.text : '')).join(' ')
+}
+
+/** Flatten a DocumentData explanation into plain text for search indexing. */
+function explanationToPlain(doc) {
+  const parts = [doc.title ?? '']
+  for (const block of doc.blocks ?? []) {
+    switch (block.type) {
+      case 'title':
+      case 'heading':
+      case 'paragraph':
+        parts.push(richTextToPlain(block.content))
+        break
+      case 'list':
+        for (const item of block.items ?? []) parts.push(richTextToPlain(item.content))
+        break
+      case 'code_block':
+        parts.push(block.code ?? '')
+        break
+      case 'interview_qa':
+        parts.push(block.item?.question ?? '', block.item?.answer ?? '')
+        break
+      case 'scenario':
+        parts.push(block.item?.scenario ?? '', block.item?.question ?? '', block.item?.answer ?? '')
+        break
+      case 'case_study':
+        parts.push(
+          block.item?.title ?? '',
+          block.item?.context ?? '',
+          block.item?.problem ?? '',
+          block.item?.solution ?? '',
+          block.item?.outcome ?? '',
+        )
+        break
+      case 'project':
+        parts.push(block.item?.title ?? '', block.item?.description ?? '')
+        break
+      case 'quiz':
+        parts.push(block.item?.question ?? '', block.item?.answer ?? '', block.item?.explanation ?? '')
+        break
+      case 'resource':
+        parts.push(block.item?.title ?? '', block.item?.description ?? '', block.item?.author ?? '')
+        break
+      case 'pitfall':
+        parts.push(block.item?.title ?? '', block.item?.avoid ?? '', block.item?.prefer ?? '')
+        break
+      case 'cheatsheet':
+        parts.push(block.item?.title ?? '')
+        for (const entry of block.item?.entries ?? []) {
+          parts.push(entry?.label ?? '', entry?.note ?? '', entry?.code ?? '')
+        }
+        break
+      case 'glossary_term':
+        parts.push(block.item?.term ?? '', block.item?.definition ?? '')
+        break
+      case 'mermaid':
+        parts.push(block.item?.title ?? '', block.item?.mermaid ?? '', block.item?.caption ?? '')
+        break
+      default:
+        break
+    }
+  }
+  return parts.join(' ')
+}
+
+/** Pull searchable units out of one topic's explanation document. */
+function extractSectionDocs(subject, topicNode, explanation) {
+  if (!explanation) return []
   const base = {
     type: 'section',
     subjectId: subject.id,
@@ -193,133 +285,46 @@ function extractSectionDocs(subject, topicNode, sections) {
     url: `/subjects/${subject.id}/topics/${topicNode.id}`,
     tags: topicNode.tags,
   }
-  const make = (key, suffix, title, text) => ({
+
+  const sections = splitDocumentByHeading(explanation)
+  if (sections.length === 0) {
+    return [
+      {
+        ...base,
+        id: `${subject.id}/${topicNode.id}/explanation/0`,
+        sectionKey: 'explanation',
+        sectionLabel: 'Explanation',
+        title: `${topicNode.title} · Explanation`,
+        text: clip(explanationToPlain(explanation)),
+      },
+    ]
+  }
+
+  return sections.map((s, i) => ({
     ...base,
-    id: `${subject.id}/${topicNode.id}/${key}/${suffix}`,
-    sectionKey: key,
-    sectionLabel: SECTION_LABELS[key],
-    title,
-    text: clip(text),
-  })
-
-  const s = sections
-  if (s.explanation) {
-    docs.push(
-      make(
-        'explanation',
-        '0',
-        `${topicNode.title} · Explanation`,
-        `${s.explanation.definition ?? ''} ${s.explanation.layman ?? ''} ${
-          s.explanation.content ?? ''
-        } ${(s.explanation.keyPoints ?? []).join(' ')}`,
-      ),
-    )
-  }
-  s.code?.snippets?.forEach((c, i) =>
-    docs.push(make('code', String(i), c.title, `${c.code ?? ''} ${c.explanation ?? ''}`)),
-  )
-  s.synonyms?.terms?.forEach((t, i) =>
-    docs.push(make('synonyms', String(i), t.term, t.definition)),
-  )
-  s.applications?.items?.forEach((a, i) =>
-    docs.push(make('applications', String(i), a.title, a.description)),
-  )
-  s.materials?.items?.forEach((m, i) =>
-    docs.push(make('materials', String(i), m.title, m.description ?? m.type)),
-  )
-  s.references?.items?.forEach((r, i) =>
-    docs.push(make('references', String(i), r.title, `${r.author ?? ''} ${r.note ?? ''}`)),
-  )
-  s.projects?.items?.forEach((p, i) =>
-    docs.push(make('projects', String(i), p.title, p.description)),
-  )
-  s['interview-questions']?.items?.forEach((q, i) =>
-    docs.push(make('interview-questions', String(i), q.question, q.answer)),
-  )
-  s['scenario-questions']?.items?.forEach((q, i) =>
-    docs.push(
-      make('scenario-questions', String(i), q.question, `${q.scenario ?? ''} ${q.answer ?? ''}`),
+    id: `${subject.id}/${topicNode.id}/explanation/${i}`,
+    sectionKey: 'explanation',
+    sectionLabel: s.title ?? 'Overview',
+    title: s.title ? `${topicNode.title} · ${s.title}` : `${topicNode.title} · Overview`,
+    text: clip(
+      s.blocks
+        .map((block) => {
+          switch (block.type) {
+            case 'paragraph':
+              return richTextToPlain(block.content)
+            case 'list':
+              return (block.items ?? [])
+                .map((item) => richTextToPlain(item.content))
+                .join(' ')
+            case 'code_block':
+              return block.code ?? ''
+            default:
+              return ''
+          }
+        })
+        .join(' '),
     ),
-  )
-  s['case-studies']?.items?.forEach((c, i) =>
-    docs.push(
-      make(
-        'case-studies',
-        String(i),
-        c.title,
-        `${c.context ?? ''} ${c.problem ?? ''} ${c.solution ?? ''} ${c.outcome ?? ''}`,
-      ),
-    ),
-  )
-  s['exam-prep']?.items?.forEach((q, i) =>
-    docs.push(make('exam-prep', String(i), q.question, `${q.answer ?? ''} ${q.explanation ?? ''}`)),
-  )
-  s['course-prep']?.modules?.forEach((m, i) =>
-    docs.push(make('course-prep', String(i), m.title, (m.lessons ?? []).join(' '))),
-  )
-  s.examples?.items?.forEach((e, i) =>
-    docs.push(make('examples', String(i), e.title, `${e.scenario ?? ''} ${e.explanation ?? ''}`)),
-  )
-  s.diagrams?.items?.forEach((d, i) =>
-    docs.push(make('diagrams', String(i), d.title ?? `Diagram ${i + 1}`, d.caption ?? '')),
-  )
-  s.charts?.items?.forEach((c, i) =>
-    docs.push(make('charts', String(i), c.title ?? `Chart ${i + 1}`, c.caption ?? '')),
-  )
-  s.images?.items?.forEach((img, i) =>
-    docs.push(make('images', String(i), img.alt, img.caption ?? '')),
-  )
-  s.connections?.items?.forEach((c, i) =>
-    docs.push(make('connections', String(i), c.title, `${c.relation ?? ''} ${c.description ?? ''}`)),
-  )
-  s.tradeoffs &&
-    docs.push(
-      make(
-        'tradeoffs',
-        '0',
-        `${topicNode.title} · Advantages & Disadvantages`,
-        `${(s.tradeoffs.advantages ?? []).join(' ')} ${(s.tradeoffs.disadvantages ?? []).join(' ')}`,
-      ),
-    )
-  s.mistakes?.items?.forEach((m, i) =>
-    docs.push(make('mistakes', String(i), m.mistake, `${m.fix ?? ''} ${m.why ?? ''}`)),
-  )
-  s.misconceptions?.items?.forEach((m, i) =>
-    docs.push(make('misconceptions', String(i), m.myth, m.reality ?? '')),
-  )
-  s['best-practices']?.items?.forEach((p, i) =>
-    docs.push(
-      make('best-practices', String(i), p.title, `${p.avoid ?? ''} ${p.prefer ?? ''} ${p.why ?? ''}`),
-    ),
-  )
-  if (s.origins) {
-    docs.push(
-      make(
-        'origins',
-        '0',
-        `${topicNode.title} · Origin & History`,
-        `${s.origins.content ?? ''} ${(s.origins.timeline ?? [])
-          .map((t) => `${t.label} ${t.description}`)
-          .join(' ')}`,
-      ),
-    )
-  }
-  s['question-patterns']?.groups?.forEach((g, gi) =>
-    (g.items ?? []).forEach((qa, qi) =>
-      docs.push(make('question-patterns', `${gi}-${qi}`, qa.question, qa.answer ?? '')),
-    ),
-  )
-  s.mastery &&
-    docs.push(
-      make(
-        'mastery',
-        '0',
-        `${topicNode.title} · Mastery Criteria`,
-        (s.mastery.criteria ?? []).map((c) => c.label).join(' '),
-      ),
-    )
-
-  return docs
+  }))
 }
 
 /** Load a subject's optional extra files into a single `extras` object. */
@@ -415,7 +420,7 @@ export async function generateContent({ log = false, force = true } = {}) {
     ).filter(Boolean)
 
     // Build parent/child tree from parentId references.
-    const nodes = loaded.map(({ meta: m, sectionKeys }) => ({
+    const nodes = loaded.map(({ meta: m, hasContent, contentSectionCount }) => ({
       id: m.id,
       title: m.title,
       summary: m.summary,
@@ -425,7 +430,8 @@ export async function generateContent({ log = false, force = true } = {}) {
       parentId: m.parentId,
       hours: m.hours,
       subjectId,
-      sectionKeys,
+      hasContent,
+      contentSectionCount,
       subtopics: [],
     }))
     const byId = new Map(nodes.map((n) => [n.id, n]))
@@ -477,12 +483,12 @@ export async function generateContent({ log = false, force = true } = {}) {
     )
 
     // Per-topic section bodies (only for topics that actually have sections).
-    const withSections = loaded.filter((t) => t.sectionKeys.length > 0)
-    if (withSections.length) {
+    const withContent = loaded.filter((t) => t.hasContent)
+    if (withContent.length) {
       const secDir = path.join(OUT_DIR, 'subjects', subjectId, 'sections')
       await mkdir(secDir, { recursive: true })
-      await mapLimit(withSections, 64, (t) =>
-        writeFile(path.join(secDir, `${t.meta.id}.json`), JSON.stringify(t.sections)),
+      await mapLimit(withContent, 64, (t) =>
+        writeFile(path.join(secDir, `${t.meta.id}.json`), JSON.stringify(t.explanation)),
       )
     }
 
@@ -540,7 +546,7 @@ export async function generateContent({ log = false, force = true } = {}) {
       })
     })
 
-    const sectionsById = new Map(loaded.map((t) => [t.meta.id, t.sections]))
+    const explanationById = new Map(loaded.map((t) => [t.meta.id, t.explanation]))
     for (const n of nodes) {
       searchDocs.push({
         id: `topic/${subjectId}/${n.id}`,
@@ -554,23 +560,13 @@ export async function generateContent({ log = false, force = true } = {}) {
         tags: n.tags,
         url: `/subjects/${subjectId}/topics/${n.id}`,
       })
-      searchDocs.push(...extractSectionDocs({ id: subjectId, title: meta.title }, n, sectionsById.get(n.id) ?? {}))
-
-      // Global glossary: topic-level "Synonyms & Glossary" term lists.
-      sectionsById.get(n.id)?.synonyms?.terms?.forEach((t) => {
-        if (!t?.term) return
-        glossaryDocs.push({
-          term: String(t.term),
-          definition: clip(t.definition ?? '', 600),
-          subjectId,
-          subjectTitle: meta.title,
-          subjectIcon: meta.icon ?? '',
-          topicId: n.id,
-          topicTitle: n.title,
-          source: 'topic',
-          url: `/subjects/${subjectId}/topics/${n.id}`,
-        })
-      })
+      searchDocs.push(
+        ...extractSectionDocs(
+          { id: subjectId, title: meta.title },
+          n,
+          explanationById.get(n.id),
+        ),
+      )
     }
   }
 

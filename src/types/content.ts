@@ -69,15 +69,9 @@ export interface TopicMeta {
 /* Section payloads — one JSON file per section inside `sections/`.    */
 /* ------------------------------------------------------------------ */
 
-export interface ExplanationSection {
-  /** Concise canonical definition of the concept (template item 1). */
-  definition?: string
-  /** Plain-language, jargon-free explanation (template item 2). */
-  layman?: string
-  /** Markdown body. */
-  content: string
-  keyPoints?: string[]
-}
+import type { DocumentData } from './rich-document'
+
+export type ExplanationSection = DocumentData
 
 export interface CodeSnippet {
   title: string
@@ -449,11 +443,10 @@ export interface LevelRange {
 
 export interface Topic extends TopicMeta {
   subjectId: string
-  /**
-   * Which sections this topic provides, in canonical order. The heavy section
-   * bodies are fetched separately (per topic) and are not part of the tree.
-   */
-  sectionKeys: SectionKey[]
+  /** True when the topic folder contains `explanation.json`. */
+  hasContent: boolean
+  /** Number of navigable sections (heading splits + optional intro). */
+  contentSectionCount: number
   /** Direct subtopics (topics whose parentId === this.id). */
   subtopics: Topic[]
 }
