@@ -55,7 +55,8 @@ export interface Roadmap {
 export interface TopicMeta {
   id: string
   title: string
-  summary: string
+  /** Omitted on sub-subtopics — the page title lives in breadcrumbs and content. */
+  summary?: string
   order: number
   level: Difficulty
   tags: string[]

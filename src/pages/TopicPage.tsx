@@ -113,6 +113,7 @@ export function TopicPage() {
   }
 
   const ancestors = getAncestors(subject, topic.id)
+  const isSubSubtopic = ancestors.length >= 2
   const completedTs = isComplete(subject.id, topic.id)
     ? completedAt(subject.id, topic.id)
     : undefined
@@ -192,13 +193,24 @@ export function TopicPage() {
       />
 
       <header className="mt-4 sm:mt-5">
-        <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">
-          {topic.title}
-        </h1>
-        <p className="mt-2 max-w-3xl text-base text-slate-600 sm:text-lg dark:text-slate-400">
-          {topic.summary}
-        </p>
-        <div className="mt-3 flex flex-wrap items-center gap-1.5 sm:mt-4 sm:gap-2">
+        {!isSubSubtopic && (
+          <>
+            <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">
+              {topic.title}
+            </h1>
+            {topic.summary && (
+              <p className="mt-2 max-w-3xl text-base text-slate-600 sm:text-lg dark:text-slate-400">
+                {topic.summary}
+              </p>
+            )}
+          </>
+        )}
+        <div
+          className={clsx(
+            'flex flex-wrap items-center gap-1.5 sm:gap-2',
+            isSubSubtopic ? 'mt-0' : 'mt-3 sm:mt-4',
+          )}
+        >
           <span className="chip capitalize">⚡ {topic.level}</span>
           <span className="chip">⏱️ {formatDuration(subtreeMinutes(topic))}</span>
           {topic.tags.map((t) => (
