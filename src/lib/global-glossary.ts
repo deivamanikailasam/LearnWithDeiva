@@ -19,6 +19,15 @@ export type GlossarySyncResult =
   | { ok: false; conflict: true; existing: GlobalGlossaryItem }
   | { ok: false; error: string }
 
+type GlossarySyncApiResponse = {
+  ok?: boolean
+  action?: 'added' | 'reused'
+  item?: GlobalGlossaryItem
+  conflict?: boolean
+  existing?: GlobalGlossaryItem
+  error?: string
+}
+
 export type GlossaryRemoveResult = {
   ok: true
   removed: boolean
@@ -63,11 +72,7 @@ export async function syncGlobalGlossaryEntry(
     body: JSON.stringify({ action: 'upsert', term, definition }),
   })
 
-  const body = (await res.json()) as GlossarySyncResult & {
-    item?: GlobalGlossaryItem
-    existing?: GlobalGlossaryItem
-    error?: string
-  }
+  const body = (await res.json()) as GlossarySyncApiResponse
 
   if (res.status === 409 && body.conflict && body.existing) {
     return { ok: false, conflict: true, existing: body.existing }
