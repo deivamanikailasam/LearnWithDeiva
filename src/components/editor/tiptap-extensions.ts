@@ -4,6 +4,8 @@ import Image from '@tiptap/extension-image'
 import Placeholder from '@tiptap/extension-placeholder'
 import { AppCodeBlock } from './app-code-block'
 import { PasteEnhancement } from './paste-enhancement'
+import { GlossaryTerm } from './glossary-term'
+import { tiptapTableExtensions } from './tiptap-table-extensions'
 
 export const tiptapExtensions = [
   StarterKit.configure({
@@ -19,6 +21,8 @@ export const tiptapExtensions = [
     HTMLAttributes: { class: 'text-brand-600 underline dark:text-brand-400' },
   }),
   Image.configure({ HTMLAttributes: { class: 'rounded-lg max-w-full' } }),
+  GlossaryTerm,
+  ...tiptapTableExtensions,
   Placeholder.configure({ placeholder: 'Paste or start writing…' }),
   PasteEnhancement,
 ]

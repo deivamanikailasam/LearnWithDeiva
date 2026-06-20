@@ -9,9 +9,10 @@ import type {
   Topic,
 } from '../types/content'
 import { paths } from '../lib/paths'
-import { collectSubtreeIds, findTopic, planCompletionCascade } from '../content/data'
+import { findTopic, planCompletionCascade } from '../content/data'
 import { useProgress } from '../lib/progressContext'
-import { formatDuration, subtreeMinutes } from '../lib/duration'
+import { formatDuration, requiredSubtreeMinutes } from '../lib/duration'
+import { countRequiredTopics } from '../lib/topic-status'
 import { ConfirmDialog } from './ConfirmDialog'
 
 const levelStyles: Record<string, string> = {
@@ -37,7 +38,7 @@ function NodeCard({
   const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
   const level = linked?.level
   const subCount = linked?.subtopics.length ?? 0
-  const minutes = linked ? subtreeMinutes(linked) : 0
+  const minutes = linked ? requiredSubtreeMinutes(linked) : 0
   const inner = (
     <div
       className={clsx(
@@ -121,7 +122,7 @@ function StageItem({
     () =>
       stage.nodes
         .map((n) => (n.topicId ? findTopic(subject, n.topicId) : undefined))
-        .filter((t): t is Topic => Boolean(t)),
+        .filter((t): t is Topic => Boolean(t && t.status !== 'optional')),
     [subject, stage],
   )
 
@@ -133,12 +134,11 @@ function StageItem({
     totalTopicCount > 0 && completedTopicCount === totalTopicCount
 
   const subtreeTotal = useMemo(
-    () =>
-      linkedTopics.reduce((acc, t) => acc + collectSubtreeIds(t).length, 0),
+    () => linkedTopics.reduce((acc, t) => acc + countRequiredTopics([t]), 0),
     [linkedTopics],
   )
   const stageMinutes = useMemo(
-    () => linkedTopics.reduce((acc, t) => acc + subtreeMinutes(t), 0),
+    () => linkedTopics.reduce((acc, t) => acc + requiredSubtreeMinutes(t), 0),
     [linkedTopics],
   )
 

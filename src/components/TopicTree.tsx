@@ -6,6 +6,7 @@ import type { Topic } from '../types/content'
 import { paths } from '../lib/paths'
 import { useProgress } from '../lib/progressContext'
 import { formatDuration, subtreeMinutes } from '../lib/duration'
+import { isEffectivelyOptional } from '../lib/topic-status'
 import { EditableTopicTree } from './editor/EditableTopicTree'
 
 function sectionCount(topic: Topic): number {
@@ -30,16 +31,19 @@ function TopicNode({
   topic,
   currentTopicId,
   depth,
+  parentOptional = false,
   defaultExpanded,
 }: {
   subjectId: string
   topic: Topic
   currentTopicId?: string
   depth: number
+  parentOptional?: boolean
   defaultExpanded: boolean
 }) {
   const { isComplete, isBookmarked } = useProgress()
   const hasChildren = topic.subtopics.length > 0
+  const effectivelyOptional = isEffectivelyOptional(topic, parentOptional)
   const [expanded, setExpanded] = useState(defaultExpanded)
   const isActive = topic.id === currentTopicId
   const done = isComplete(subjectId, topic.id)
@@ -111,6 +115,11 @@ function TopicNode({
             <span className={clsx('chip capitalize', levelStyles[topic.level] ?? '')}>
               {topic.level}
             </span>
+            {effectivelyOptional && (
+              <span className="chip hidden border-slate-200 bg-slate-50 text-slate-600 sm:inline-flex dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                Optional
+              </span>
+            )}
             {hasChildren ? (
               <span className="chip hidden sm:inline-flex">
                 {topic.subtopics.length} sub
@@ -131,6 +140,7 @@ function TopicNode({
               topic={sub}
               currentTopicId={currentTopicId}
               depth={depth + 1}
+              parentOptional={effectivelyOptional}
               defaultExpanded={false}
             />
           ))}
@@ -147,6 +157,8 @@ export function TopicTree({
   defaultExpanded = false,
   editable = false,
   onTreeChange,
+  parentTopicId,
+  parentDepth,
 }: {
   subjectId: string
   topics: Topic[]
@@ -155,6 +167,9 @@ export function TopicTree({
   defaultExpanded?: boolean
   editable?: boolean
   onTreeChange?: () => void
+  /** When listing a topic's children, pass the host topic id and its depth. */
+  parentTopicId?: string
+  parentDepth?: number
 }) {
   if (editable) {
     return (
@@ -164,6 +179,8 @@ export function TopicTree({
         currentTopicId={currentTopicId}
         defaultExpanded={defaultExpanded}
         onTreeChange={onTreeChange}
+        parentTopicId={parentTopicId}
+        parentDepth={parentDepth}
       />
     )
   }

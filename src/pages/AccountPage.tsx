@@ -11,6 +11,7 @@ import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useAuth } from '../lib/authContext'
 import { useProgress } from '../lib/progressContext'
+import { countRequiredCompleted } from '../lib/topic-status'
 
 const AuthModal = lazy(() =>
   import('../components/auth/AuthModal').then((m) => ({ default: m.AuthModal })),
@@ -35,8 +36,17 @@ function formatDate(ms?: number): string | undefined {
 
 export function AccountPage() {
   const { enabled, loading, user, signOut } = useAuth()
-  const { completed, bookmarks, completedInSubject, clearCompleted, clearBookmarks } =
-    useProgress()
+  const { completed, bookmarks, clearCompleted, clearBookmarks } = useProgress()
+  const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
+
+  const requiredCompletedCount = useMemo(
+    () =>
+      subjects?.reduce(
+        (sum, s) => sum + countRequiredCompleted(s.id, s.optionalTopicIds, completed),
+        0,
+      ) ?? 0,
+    [subjects, completed],
+  )
   const [authOpen, setAuthOpen] = useState(false)
 
   const { data: resolvedCompleted } = useAsync(
@@ -79,7 +89,7 @@ export function AccountPage() {
           subtitle="Login isn’t enabled on this deployment, so your progress and bookmarks live only in this browser."
         />
         <div className="mt-6 space-y-5 sm:mt-8 sm:space-y-6">
-          <Stats completedCount={completed.size} bookmarkCount={bookmarks.size} />
+          <Stats completedCount={requiredCompletedCount} bookmarkCount={bookmarks.size} />
           <Activity completedTopics={completedTopics} bookmarkedTopics={bookmarkedTopics} />
           <DangerZone
             completedCount={completedTopics.length}
@@ -129,9 +139,9 @@ export function AccountPage() {
       <ProfileHeader email={email} onSignOut={() => signOut()} />
 
       <div className="mt-6 space-y-5 sm:space-y-6">
-        <Stats completedCount={completed.size} bookmarkCount={bookmarks.size} />
+        <Stats completedCount={requiredCompletedCount} bookmarkCount={bookmarks.size} />
 
-        <SubjectProgress completedInSubject={completedInSubject} />
+        <SubjectProgress subjects={subjects} completed={completed} />
 
         <Activity completedTopics={completedTopics} bookmarkedTopics={bookmarkedTopics} />
 
@@ -281,11 +291,12 @@ function Stats({
 }
 
 function SubjectProgress({
-  completedInSubject,
+  subjects,
+  completed,
 }: {
-  completedInSubject: (subjectId: string) => number
+  subjects: Awaited<ReturnType<typeof loadSubjectIndex>> | undefined
+  completed: ReadonlyMap<string, number>
 }) {
-  const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
   return (
     <Panel title="Progress by subject" icon="🗺️">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -296,7 +307,7 @@ function SubjectProgress({
               <span className="font-semibold">{s.title}</span>
             </div>
             <ProgressBar
-              value={completedInSubject(s.id)}
+              value={countRequiredCompleted(s.id, s.optionalTopicIds, completed)}
               total={s.topicCount}
               totalMinutes={s.estimatedMinutes}
             />

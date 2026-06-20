@@ -6,7 +6,8 @@
  * difficulty level. Subject totals are the sum across all topics (computed at
  * build time in `scripts/gen-content.mjs`, which mirrors `MINUTES_BY_LEVEL`).
  */
-import type { Difficulty } from '../types/content'
+import type { Difficulty, TopicStatus } from '../types/content'
+import { isEffectivelyOptional } from './topic-status'
 
 /** Base study time per topic, by difficulty, in minutes. */
 export const MINUTES_BY_LEVEL: Record<Difficulty, number> = {
@@ -67,6 +68,7 @@ export function hoursToDurationParts(hours: number | undefined): DurationParts {
 interface TimedNode {
   level: Difficulty
   hours?: number
+  status?: TopicStatus
   subtopics?: TimedNode[]
 }
 
@@ -91,6 +93,34 @@ export function subtreeMinutes(topic: TimedNode): number {
   let total = 0
   for (const sub of subs) {
     total += subtreeMinutes(sub)
+  }
+  return total
+}
+
+/**
+ * Rolled-up study time excluding optional branches (own status or inherited
+ * from an optional ancestor).
+ */
+export function requiredSubtreeMinutes(
+  topic: TimedNode,
+  parentOptional = false,
+): number {
+  const optional = isEffectivelyOptional(topic, parentOptional)
+  if (optional) return 0
+  const subs = topic.subtopics ?? []
+  if (subs.length === 0) return topicMinutes(topic)
+  let total = 0
+  for (const sub of subs) {
+    total += requiredSubtreeMinutes(sub, false)
+  }
+  return total
+}
+
+/** Sum required minutes across top-level topics. */
+export function requiredSubjectMinutes(topics: readonly TimedNode[]): number {
+  let total = 0
+  for (const topic of topics) {
+    total += requiredSubtreeMinutes(topic)
   }
   return total
 }

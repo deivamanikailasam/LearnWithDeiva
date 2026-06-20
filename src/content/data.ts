@@ -28,12 +28,16 @@ import type {
   SubjectIndexEntry,
   Topic,
 } from '../types/content'
+import { isTopicEffectivelyOptionalInTree } from '../lib/topic-status'
 
 const BASE = import.meta.env.BASE_URL
 const dataUrl = (p: string) => `${BASE}data/${p}`
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url)
+  const res = await fetch(
+    url,
+    import.meta.env.DEV ? { cache: 'no-store' } : undefined,
+  )
   if (!res.ok) throw new Error(`Failed to load ${url} (${res.status})`)
   return (await res.json()) as T
 }
@@ -273,8 +277,13 @@ export function planCompletionCascade(
     // first ancestor with an incomplete child.
     const projected = new Set<string>(subtreeIds)
     for (let i = ancestors.length - 1; i >= 0; i--) {
-      const anc = ancestors[i]
-      const allDone = anc.subtopics.every(
+      const anc = ancestors[i]!
+      const ancChain = ancestors.slice(0, i + 1)
+      const requiredSubs = anc.subtopics.filter(
+        (sub) => !isTopicEffectivelyOptionalInTree(sub, ancChain),
+      )
+      if (requiredSubs.length === 0) break
+      const allDone = requiredSubs.every(
         (sub) => projected.has(sub.id) || isComplete(sub.id),
       )
       if (!allDone) break

@@ -20,6 +20,7 @@ import { SUBJECT_EXTRA_DESCRIPTORS } from '../content/sections'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
+import { countRequiredCompleted } from '../lib/topic-status'
 import { useEditMode } from '../lib/editModeContext'
 import { formatDuration } from '../lib/duration'
 
@@ -48,7 +49,7 @@ export function SubjectPage() {
     () => loadSubjectExtrasManifest(subjectId),
     [subjectId],
   )
-  const { completedInSubject } = useProgress()
+  const { completed } = useProgress()
 
   const activeExtra = useMemo(
     () => SUBJECT_EXTRA_DESCRIPTORS.find((d) => d.slug === view),
@@ -96,6 +97,12 @@ export function SubjectPage() {
       </Container>
     )
   }
+
+  const requiredCompleted = countRequiredCompleted(
+    subject.id,
+    subject.optionalTopicIds,
+    completed,
+  )
 
   // Resolve which view is active. The base route (no `view`) shows the roadmap
   // when present, otherwise the topic tree.
@@ -188,7 +195,7 @@ export function SubjectPage() {
           </div>
           <div className="mt-4 max-w-md sm:mt-5">
             <ProgressBar
-              value={completedInSubject(subject.id)}
+              value={requiredCompleted}
               total={subject.topicCount}
               totalMinutes={subject.estimatedMinutes}
             />

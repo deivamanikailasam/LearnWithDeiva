@@ -26,13 +26,16 @@ function isCodeLikeText(text: string): boolean {
   const t = text.trim()
   if (!t || isLanguageLabel(t)) return false
   if (t.length > 500) return false
+  if (/\b(the|and|for|with|used|heavily|common|operations|immutable|sequence)\b/i.test(t)) {
+    return false
+  }
   return (
-    /[=(){}\[\];#]|=>|\+\+|--/.test(t) ||
     /^\s*(import|from|def|class|return|if|for|while|const|let|var|fn|func|public|private)\b/.test(
       t,
     ) ||
-    /^\s*[\w.]+\s*=\s*.+/.test(t) ||
-    /^\s*#\s*\w/.test(t)
+    /^\s*[\w.]+\s*=\s*[^=]/.test(t) ||
+    /^\s*#\s*\w/.test(t) ||
+    (/^[\s\t]*[\w$]+\([^)]*\)\s*[;{]?$/.test(t) && !/\s{2,}/.test(t))
   )
 }
 
@@ -43,8 +46,10 @@ function looksLikeCodeLine(el: Element): boolean {
   const text = el.textContent?.trim() ?? ''
   if (!text || isLanguageLabel(text)) return false
 
-  if (el.tagName === 'CODE') return true
-  if (el.querySelector('code') && !el.querySelector('pre, table')) return true
+  if (el.tagName === 'CODE') {
+    return Boolean(el.closest('pre'))
+  }
+  if (el.querySelector('code') && !el.querySelector('pre, table')) return false
 
   const cls = el.getAttribute('class') ?? ''
   if (/\b(code|mono|hljs|language-|font-mono)\b/i.test(cls)) return true
@@ -186,7 +191,10 @@ function mergeSiblingCodeRuns(container: Element): void {
       break
     }
 
-    if (lines.length >= 2 || (lines.length === 1 && language)) {
+    if (
+      lines.length >= 2 ||
+      (lines.length === 1 && language && isCodeLikeText(lines[0]))
+    ) {
       const pre = writePre(container.ownerDocument, language, lines.join('\n'))
       toRemove[0].replaceWith(pre)
       for (let k = 1; k < toRemove.length; k++) toRemove[k].remove()

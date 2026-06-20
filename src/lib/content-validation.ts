@@ -5,6 +5,7 @@ import type {
   RoadmapStage,
   SubjectMeta,
   TopicMeta,
+  TopicStatus,
 } from '../types/content'
 import {
   durationPartsToHours,
@@ -65,13 +66,14 @@ export interface TopicMetaDraft {
   summary: string
   level: Difficulty
   tags: string[]
+  status: TopicStatus
   useLevelDefault: boolean
   durationDays: number
   durationHours: number
   durationMinutes: number
 }
 
-export type TopicMetaUpdatePayload = Pick<TopicMeta, 'title' | 'level' | 'tags'> & {
+export type TopicMetaUpdatePayload = Pick<TopicMeta, 'title' | 'level' | 'tags' | 'status'> & {
   summary?: string
   hours?: number | null
 }
@@ -138,7 +140,12 @@ export interface CreateTopicPayload {
   level: Difficulty
   summary?: string
   parentId?: string
+  status?: TopicStatus
   createEmptyDocument?: boolean
+}
+
+function normalizeTopicStatus(value: unknown): TopicStatus {
+  return value === 'optional' ? 'optional' : 'core'
 }
 
 export function validateCreateTopic(
@@ -147,9 +154,10 @@ export function validateCreateTopic(
     title: string
     level: Difficulty
     summary: string
+    status: TopicStatus
     createEmptyDocument: boolean
   },
-  options: { includeSummary: boolean; allowEmptyDocument: boolean },
+  options: { includeSummary: boolean; allowEmptyDocument: boolean; allowStatus: boolean },
 ): { ok: true; payload: CreateTopicPayload } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {}
   const title = draft.title.trim()
@@ -187,13 +195,14 @@ export function validateCreateTopic(
       title,
       level: draft.level,
       summary,
+      status: options.allowStatus ? normalizeTopicStatus(draft.status) : undefined,
       createEmptyDocument: options.allowEmptyDocument && draft.createEmptyDocument,
     },
   }
 }
 
 export function topicToMetaDraft(
-  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags'>,
+  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'>,
 ): TopicMetaDraft {
   const hasExplicitHours = typeof topic.hours === 'number' && topic.hours >= 0
   const parts = hoursToDurationParts(hasExplicitHours ? topic.hours : undefined)
@@ -202,6 +211,7 @@ export function topicToMetaDraft(
     summary: topic.summary ?? '',
     level: topic.level,
     tags: [...(topic.tags ?? [])],
+    status: topic.status ?? 'core',
     useLevelDefault: !hasExplicitHours,
     durationDays: parts.days,
     durationHours: parts.hours,
@@ -210,19 +220,20 @@ export function topicToMetaDraft(
 }
 
 export function metaFromTopicMeta(
-  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags'>,
-): Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags'> {
+  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'>,
+): Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'> {
   return {
     title: topic.title,
     summary: topic.summary,
     level: topic.level,
     hours: topic.hours,
     tags: topic.tags ?? [],
+    status: topic.status ?? 'core',
   }
 }
 
 export function topicMetaFingerprint(
-  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags'>,
+  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'>,
 ): string {
   return JSON.stringify(metaFromTopicMeta(topic))
 }
@@ -233,7 +244,7 @@ export function topicToMetaDraftFromSaved(saved: TopicMeta): TopicMetaDraft {
 
 export function validateTopicMetaDraft(
   draft: TopicMetaDraft,
-  options: { includeSummary: boolean; durationEditable: boolean },
+  options: { includeSummary: boolean; durationEditable: boolean; allowStatus?: boolean },
 ): { ok: true; payload: TopicMetaUpdatePayload } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {}
   const title = draft.title.trim()
@@ -283,6 +294,7 @@ export function validateTopicMetaDraft(
     level: draft.level,
     tags,
   }
+  if (options.allowStatus) payload.status = normalizeTopicStatus(draft.status)
   if (options.includeSummary) payload.summary = summary
   if (options.durationEditable) payload.hours = hours
 
@@ -294,6 +306,7 @@ export function metaDraftsEqual(a: TopicMetaDraft, b: TopicMetaDraft): boolean {
     a.title === b.title &&
     a.summary === b.summary &&
     a.level === b.level &&
+    a.status === b.status &&
     a.tags.join('\0') === b.tags.join('\0') &&
     a.useLevelDefault === b.useLevelDefault &&
     a.durationDays === b.durationDays &&

@@ -15,6 +15,7 @@ interface CreateTopicFormProps {
   subjectId: string
   parentId?: string
   parentDepth?: number
+  parentOptional?: boolean
   heading: string
   onClose: () => void
   onCreated: (topicId: string) => void
@@ -24,6 +25,7 @@ function CreateTopicForm({
   subjectId,
   parentId,
   parentDepth,
+  parentOptional = false,
   heading,
   onClose,
   onCreated,
@@ -31,12 +33,14 @@ function CreateTopicForm({
   const isSubSubtopic = parentDepth === 1
   const includeSummary = !isSubSubtopic
   const allowEmptyDocument = isSubSubtopic
+  const allowStatus = !parentOptional
 
   const [title, setTitle] = useState('')
   const [id, setId] = useState('')
   const [idTouched, setIdTouched] = useState(false)
   const [summary, setSummary] = useState('')
   const [level, setLevel] = useState<Difficulty>('beginner')
+  const [status, setStatus] = useState<'core' | 'optional'>(parentOptional ? 'optional' : 'core')
   const [createEmptyDocument, setCreateEmptyDocument] = useState(true)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -47,8 +51,8 @@ function CreateTopicForm({
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     const result = validateCreateTopic(
-      { id: effectiveId, title, level, summary, createEmptyDocument },
-      { includeSummary, allowEmptyDocument },
+      { id: effectiveId, title, level, summary, status, createEmptyDocument },
+      { includeSummary, allowEmptyDocument, allowStatus },
     )
     if (!result.ok) {
       setErrors(result.errors)
@@ -152,6 +156,33 @@ function CreateTopicForm({
           error={errors.level}
         />
 
+        {allowStatus && (
+          <div>
+            <label htmlFor="create-topic-status" className={labelClass}>
+              Status
+            </label>
+            <select
+              id="create-topic-status"
+              value={status}
+              onChange={(e) => setStatus(e.target.value as 'core' | 'optional')}
+              className={inputClass}
+              disabled={busy}
+            >
+              <option value="core">Core</option>
+              <option value="optional">Optional</option>
+            </select>
+            <p className="mt-1 text-[10px] text-slate-400">
+              Optional cascades to all subtopics and sub-subtopics.
+            </p>
+          </div>
+        )}
+
+        {parentOptional && (
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Status is optional because the parent topic is optional.
+          </p>
+        )}
+
         {allowEmptyDocument && (
           <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
             <input
@@ -192,6 +223,7 @@ export interface CreateTopicDialogProps {
   subjectId: string
   parentId?: string
   parentDepth?: number
+  parentOptional?: boolean
   onClose: () => void
   onCreated: (topicId: string) => void
 }
@@ -201,6 +233,7 @@ export function CreateTopicDialog({
   subjectId,
   parentId,
   parentDepth,
+  parentOptional,
   onClose,
   onCreated,
 }: CreateTopicDialogProps) {
@@ -229,6 +262,7 @@ export function CreateTopicDialog({
           subjectId={subjectId}
           parentId={parentId}
           parentDepth={parentDepth}
+          parentOptional={parentOptional}
           heading={heading}
           onClose={onClose}
           onCreated={onCreated}

@@ -14,6 +14,9 @@ import { useEditMode } from '../../lib/editModeContext'
 import { useToast } from '../../lib/toastContext'
 import { useDirtyEditor } from '../../lib/useDirtyEditor'
 import { formatDuration, subtreeMinutes } from '../../lib/duration'
+import {
+  isTopicEffectivelyOptionalInTree,
+} from '../../lib/topic-status'
 import { fieldErrorClass, ghostInputClass, labelClass } from '../../lib/form-styles'
 import { topicLevelStyles } from '../../lib/topic-level-styles'
 import { DurationInput } from './DurationInput'
@@ -25,6 +28,8 @@ interface EditableTopicHeaderProps {
   topic: Topic
   isSubSubtopic: boolean
   editable: boolean
+  /** Ancestors from root → direct parent; used for inherited optional status. */
+  topicAncestors?: Topic[]
   onSaved?: (saved: TopicMeta) => void
   actions?: ReactNode
   completedLine?: ReactNode
@@ -32,15 +37,18 @@ interface EditableTopicHeaderProps {
 
 function ViewHeader({
   topic,
+  topicAncestors = [],
   isSubSubtopic,
   actions,
   completedLine,
 }: {
   topic: Topic
+  topicAncestors?: Topic[]
   isSubSubtopic: boolean
   actions?: ReactNode
   completedLine?: ReactNode
 }) {
+  const effectivelyOptional = isTopicEffectivelyOptionalInTree(topic, topicAncestors)
   return (
     <>
       <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">{topic.title}</h1>
@@ -58,6 +66,11 @@ function ViewHeader({
         >
           ⚡ {topic.level}
         </span>
+        {effectivelyOptional && (
+          <span className="chip border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+            Optional
+          </span>
+        )}
         <span className="chip">⏱️ {formatDuration(subtreeMinutes(topic))}</span>
         {topic.tags.map((t) => (
           <span key={t} className="chip">
@@ -76,6 +89,7 @@ export function EditableTopicHeader({
   topic,
   isSubSubtopic,
   editable,
+  topicAncestors = [],
   onSaved,
   actions,
   completedLine,
@@ -83,6 +97,8 @@ export function EditableTopicHeader({
   const { registerOnLeaveEditMode } = useEditMode()
   const { showToast } = useToast()
   const isParent = topic.subtopics.length > 0
+  const statusInheritedFromParent = topicAncestors.some((a) => a.status === 'optional')
+  const allowStatus = !statusInheritedFromParent
 
   const [committed, setCommitted] = useState(() => topicToMetaDraft(topic))
   const [draft, setDraft] = useState(committed)
@@ -114,7 +130,7 @@ export function EditableTopicHeader({
     setSaveStatus('idle')
     setSaveError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sync draft from reloaded topic
-  }, [topic.id, topic.title, topic.summary, topic.level, topic.hours, topic.tags])
+  }, [topic.id, topic.title, topic.summary, topic.level, topic.hours, topic.tags, topic.status])
 
   const dirty = !metaDraftsEqual(draft, committed)
 
@@ -141,6 +157,7 @@ export function EditableTopicHeader({
     const result = validateTopicMetaDraft(draft, {
       includeSummary: !isSubSubtopic,
       durationEditable: !isParent,
+      allowStatus,
     })
     if (!result.ok) {
       setFieldErrors(result.errors)
@@ -171,6 +188,7 @@ export function EditableTopicHeader({
     draft,
     isParent,
     isSubSubtopic,
+    allowStatus,
     onSaved,
     showToast,
     subjectId,
@@ -189,6 +207,7 @@ export function EditableTopicHeader({
     return (
       <ViewHeader
         topic={topic}
+        topicAncestors={topicAncestors}
         isSubSubtopic={isSubSubtopic}
         actions={actions}
         completedLine={completedLine}
@@ -276,6 +295,67 @@ export function EditableTopicHeader({
             disabled={saveStatus === 'saving'}
             error={fieldErrors.level}
           />
+          {allowStatus ? (
+            <div>
+              <label htmlFor="topic-status" className={labelClass}>
+                Status
+              </label>
+              <select
+                id="topic-status"
+                value={draft.status}
+                onChange={(e) =>
+                  setDraft((d) => ({
+                    ...d,
+                    status: e.target.value as TopicMetaDraft['status'],
+                  }))
+                }
+                className={clsx(
+                  ghostInputClass,
+                  'w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900',
+                )}
+                disabled={saveStatus === 'saving'}
+              >
+                <option value="core">Core</option>
+                <option value="optional">Optional</option>
+              </select>
+              <p className="mt-1 text-[10px] text-slate-400">
+                Optional cascades to all subtopics and sub-subtopics.
+              </p>
+            </div>
+          ) : statusInheritedFromParent ? (
+            <div>
+              <label className={labelClass}>Status</label>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Optional (inherited from parent)
+              </p>
+            </div>
+          ) : (
+            <DurationInput
+              useLevelDefault={draft.useLevelDefault}
+              days={draft.durationDays}
+              hours={draft.durationHours}
+              minutes={draft.durationMinutes}
+              level={draft.level}
+              onUseLevelDefaultChange={(useLevelDefault) =>
+                setDraft((d) => ({ ...d, useLevelDefault }))
+              }
+              onDaysChange={(durationDays) =>
+                setDraft((d) => ({ ...d, durationDays }))
+              }
+              onHoursChange={(durationHours) =>
+                setDraft((d) => ({ ...d, durationHours }))
+              }
+              onMinutesChange={(durationMinutes) =>
+                setDraft((d) => ({ ...d, durationMinutes }))
+              }
+              disabled={saveStatus === 'saving'}
+              readOnlyComputed={isParent ? topic : undefined}
+              error={fieldErrors.duration}
+            />
+          )}
+        </div>
+
+        {allowStatus ? (
           <DurationInput
             useLevelDefault={draft.useLevelDefault}
             days={draft.durationDays}
@@ -298,7 +378,7 @@ export function EditableTopicHeader({
             readOnlyComputed={isParent ? topic : undefined}
             error={fieldErrors.duration}
           />
-        </div>
+        ) : null}
 
         <div>
           <label className={labelClass}>Tags</label>

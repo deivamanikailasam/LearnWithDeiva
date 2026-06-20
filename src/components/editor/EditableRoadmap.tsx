@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import {
   DndContext,
+  DragOverlay,
   KeyboardSensor,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from '@dnd-kit/core'
 import {
   SortableContext,
@@ -18,18 +21,21 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import type { Roadmap, RoadmapNode, RoadmapStage, Subject, Topic } from '../../types/content'
-import { flattenTopics, getAncestors } from '../../content/data'
-import { saveRoadmap, type SaveStatus } from '../../lib/content-api'
+import { flattenTopics, findTopic, getAncestors, invalidateSubjectCache } from '../../content/data'
+import { createTopic, saveRoadmap, type SaveStatus } from '../../lib/content-api'
 import {
   cloneRoadmap,
+  isSafeTopicId,
   proposeNodeId,
   proposeStageId,
   roadmapFingerprint,
+  slugifyTitle,
   validateRoadmap,
 } from '../../lib/content-validation'
 import { useEditMode } from '../../lib/editModeContext'
 import { useToast } from '../../lib/toastContext'
 import { useDirtyEditor } from '../../lib/useDirtyEditor'
+import { paths } from '../../lib/paths'
 import { compactInputClass, fieldErrorClass, ghostInputClass, inputClass, labelClass } from '../../lib/form-styles'
 import { ConfirmDialog } from '../ConfirmDialog'
 
@@ -125,25 +131,85 @@ function TopicIdCombobox({
   )
 }
 
+function uniqueTopicId(title: string, subject: Subject, stages: RoadmapStage[]): string {
+  const used = new Set([
+    ...flattenTopics(subject).map((t) => t.id),
+    ...stages.flatMap((s) => s.nodes.map((n) => n.id)),
+  ])
+  const base = slugifyTitle(title)
+  if (!used.has(base)) return base
+  let n = 2
+  while (used.has(`${base}-${n}`)) n += 1
+  return `${base}-${n}`
+}
+
 function SortableNodeCard({
   node,
   subject,
+  stages,
   onChange,
   onDelete,
 }: {
   node: RoadmapNode
   subject: Subject
+  stages: RoadmapStage[]
   onChange: (patch: Partial<RoadmapNode>) => void
   onDelete: () => void
 }) {
+  const navigate = useNavigate()
+  const { showToast } = useToast()
+  const [creating, setCreating] = useState(false)
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
     useSortable({ id: node.id })
+
+  const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
+  const subCount = linked?.subtopics.length ?? 0
+
+  const handleCreateAndOpen = async () => {
+    const title = node.title.trim()
+    if (!title) {
+      showToast('Enter a node title first.', 'error')
+      return
+    }
+
+    const id = uniqueTopicId(title, subject, stages)
+    if (!isSafeTopicId(id)) {
+      showToast('Could not derive a valid topic id from the title.', 'error')
+      return
+    }
+
+    setCreating(true)
+    try {
+      const created = await createTopic(subject.id, {
+        id,
+        title,
+        level: 'beginner',
+        summary: node.description?.trim() || undefined,
+      })
+      onChange({ id: created.id, topicId: created.id, title: created.title })
+      showToast('Topic created. Save roadmap to keep the link.', 'success')
+      invalidateSubjectCache(subject.id)
+      navigate(paths.topic(subject.id, created.id))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Create failed'
+      if (message.includes('already exists')) {
+        onChange({ id, topicId: id })
+        showToast('Topic already exists — opened.', 'info')
+        invalidateSubjectCache(subject.id)
+        navigate(paths.topic(subject.id, id))
+      } else {
+        showToast(message, 'error')
+      }
+    } finally {
+      setCreating(false)
+    }
+  }
 
   return (
     <div
       ref={setNodeRef}
       style={{
-        transform: CSS.Transform.toString(transform),
+        transform: CSS.Translate.toString(transform),
         transition,
       }}
       className={clsx(
@@ -163,6 +229,35 @@ function SortableNodeCard({
           ⠿
         </button>
         <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {linked && node.topicId ? (
+              <Link
+                to={paths.topic(subject.id, node.topicId)}
+                className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-brand-700"
+              >
+                Open topic
+                {subCount > 0 ? (
+                  <span className="opacity-80">({subCount} subtopics)</span>
+                ) : (
+                  <span className="opacity-80">→ add subtopics</span>
+                )}
+              </Link>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void handleCreateAndOpen()}
+                disabled={creating}
+                className="inline-flex items-center gap-1 rounded-md border border-brand-300 bg-brand-50 px-2.5 py-1 text-xs font-semibold text-brand-700 transition hover:bg-brand-100 disabled:opacity-50 dark:border-brand-500/40 dark:bg-brand-500/10 dark:text-brand-300 dark:hover:bg-brand-500/15"
+              >
+                {creating ? 'Creating…' : 'Create topic & open →'}
+              </button>
+            )}
+            {node.topicId && !linked && (
+              <span className="text-xs text-amber-600 dark:text-amber-400">
+                Topic &quot;{node.topicId}&quot; not found — pick one below or create.
+              </span>
+            )}
+          </div>
           <input
             value={node.title}
             onChange={(e) => onChange({ title: e.target.value })}
@@ -210,10 +305,45 @@ function SortableNodeCard({
   )
 }
 
+function InsertStageButton({ onClick }: { onClick: () => void }) {
+  return (
+    <li className="relative list-none sm:pl-12">
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-semibold text-slate-500 transition hover:border-brand-300 hover:bg-brand-50/50 hover:text-brand-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/5 dark:hover:text-brand-300"
+      >
+        <span aria-hidden>+</span>
+        Insert stage here
+      </button>
+    </li>
+  )
+}
+
+function StageDragPreview({ stage, index }: { stage: RoadmapStage; index: number }) {
+  return (
+    <div className="relative w-[min(calc(100vw-2rem),42rem)] sm:pl-12">
+      <span className="absolute left-0 top-0 hidden h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-brand-500 to-violet-500 text-sm font-bold text-white shadow sm:grid">
+        {index + 1}
+      </span>
+      <div className="cursor-grabbing rounded-xl border border-brand-300 bg-white p-4 shadow-xl ring-2 ring-brand-400/30 dark:border-brand-500/40 dark:bg-slate-900 dark:ring-brand-500/20">
+        <p className="text-lg font-bold">{stage.title || 'Untitled stage'}</p>
+        {stage.summary ? (
+          <p className="mt-1 line-clamp-2 text-sm text-slate-500">{stage.summary}</p>
+        ) : null}
+        <p className="mt-2 text-xs text-slate-400">
+          {stage.nodes.length} node{stage.nodes.length === 1 ? '' : 's'}
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function SortableStageSection({
   stage,
   index,
   subject,
+  stages,
   onChange,
   onDelete,
   onAddNode,
@@ -224,6 +354,7 @@ function SortableStageSection({
   stage: RoadmapStage
   index: number
   subject: Subject
+  stages: RoadmapStage[]
   onChange: (patch: Partial<RoadmapStage>) => void
   onDelete: () => void
   onAddNode: () => void
@@ -240,6 +371,7 @@ function SortableStageSection({
     useSortable({ id: stage.id })
 
   const handleNodeDragEnd = (event: DragEndEvent) => {
+    if (isDragging) return
     const { active, over } = event
     if (!over || active.id === over.id) return
     const oldIndex = stage.nodes.findIndex((n) => n.id === active.id)
@@ -248,20 +380,29 @@ function SortableStageSection({
     onNodeReorder(arrayMove(stage.nodes, oldIndex, newIndex).map((n) => n.id))
   }
 
+  const sortableStyle = {
+    transform: isDragging ? undefined : CSS.Translate.toString(transform),
+    transition: isDragging ? undefined : transition,
+  }
+
   return (
     <li
       ref={setNodeRef}
-      style={{
-        transform: CSS.Transform.toString(transform),
-        transition,
-      }}
-      className={clsx('relative sm:pl-12', isDragging && 'z-10')}
+      style={sortableStyle}
+      className={clsx('relative list-none sm:pl-12', isDragging && 'opacity-40')}
     >
       <span className="absolute left-0 top-0 hidden h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-brand-500 to-violet-500 text-sm font-bold text-white shadow sm:grid">
         {index + 1}
       </span>
 
-      <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+      <div
+        className={clsx(
+          'mb-4 rounded-xl border p-4',
+          isDragging
+            ? 'border-dashed border-brand-300 bg-brand-50/30 dark:border-brand-500/40 dark:bg-brand-500/5'
+            : 'border-slate-200 bg-slate-50/50 dark:border-slate-800 dark:bg-slate-900/40',
+        )}
+      >
         <div className="flex items-start gap-2">
           <button
             type="button"
@@ -299,33 +440,40 @@ function SortableStageSection({
         </div>
       </div>
 
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleNodeDragEnd}>
-        <SortableContext
-          items={stage.nodes.map((n) => n.id)}
-          strategy={verticalListSortingStrategy}
-        >
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {stage.nodes.map((node) => (
-              <SortableNodeCard
-                key={node.id}
-                node={node}
-                subject={subject}
-                onChange={(patch) => onNodeChange(node.id, patch)}
-                onDelete={() => onNodeDelete(node.id)}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
+      {isDragging ? (
+        <p className="py-8 text-center text-sm text-slate-400">Dragging stage…</p>
+      ) : (
+        <>
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleNodeDragEnd}>
+            <SortableContext
+              items={stage.nodes.map((n) => n.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {stage.nodes.map((node) => (
+                  <SortableNodeCard
+                    key={node.id}
+                    node={node}
+                    subject={subject}
+                    stages={stages}
+                    onChange={(patch) => onNodeChange(node.id, patch)}
+                    onDelete={() => onNodeDelete(node.id)}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
 
-      <button
-        type="button"
-        onClick={onAddNode}
-        className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-semibold text-slate-500 transition hover:border-brand-300 hover:bg-brand-50/50 hover:text-brand-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/5 dark:hover:text-brand-300"
-      >
-        <span aria-hidden>+</span>
-        Add node
-      </button>
+          <button
+            type="button"
+            onClick={onAddNode}
+            className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-semibold text-slate-500 transition hover:border-brand-300 hover:bg-brand-50/50 hover:text-brand-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/5 dark:hover:text-brand-300"
+          >
+            <span aria-hidden>+</span>
+            Add node
+          </button>
+        </>
+      )}
     </li>
   )
 }
@@ -346,6 +494,7 @@ export function EditableRoadmap({
   const [status, setStatus] = useState<SaveStatus>('idle')
   const [errors, setErrors] = useState<string[]>([])
   const [deleteStageTarget, setDeleteStageTarget] = useState<RoadmapStage | null>(null)
+  const [activeStageId, setActiveStageId] = useState<string | null>(null)
   const pendingServerFingerprintRef = useRef<string | null>(null)
 
   const dirty = roadmapFingerprint(draft) !== roadmapFingerprint(committed)
@@ -418,7 +567,12 @@ export function EditableRoadmap({
     setStatus('idle')
   }, [])
 
+  const handleStageDragStart = (event: DragStartEvent) => {
+    setActiveStageId(String(event.active.id))
+  }
+
   const handleStageDragEnd = (event: DragEndEvent) => {
+    setActiveStageId(null)
     const { active, over } = event
     if (!over || active.id === over.id) return
     updateDraft((prev) => {
@@ -428,6 +582,27 @@ export function EditableRoadmap({
       return { ...prev, stages: arrayMove(prev.stages, oldIndex, newIndex) }
     })
   }
+
+  const insertStageAt = (index: number) => {
+    updateDraft((prev) => {
+      const title = 'New stage'
+      const stage: RoadmapStage = {
+        id: proposeStageId(title, prev.stages),
+        title,
+        nodes: [],
+      }
+      const stages = [...prev.stages]
+      stages.splice(index, 0, stage)
+      return { ...prev, stages }
+    })
+  }
+
+  const activeStage = activeStageId
+    ? draft.stages.find((s) => s.id === activeStageId)
+    : undefined
+  const activeStageIndex = activeStage
+    ? draft.stages.findIndex((s) => s.id === activeStage.id)
+    : -1
 
   const handleSaveClick = () => void handleSave()
 
@@ -494,105 +669,108 @@ export function EditableRoadmap({
         )}
       </div>
 
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleStageDragEnd}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleStageDragStart}
+        onDragEnd={handleStageDragEnd}
+      >
         <SortableContext
           items={draft.stages.map((s) => s.id)}
           strategy={verticalListSortingStrategy}
         >
-          <ol className="relative space-y-8 sm:space-y-10">
+          <ol className="relative space-y-4 sm:space-y-5">
             <span className="absolute left-[15px] top-2 bottom-2 hidden w-px bg-gradient-to-b from-brand-400 to-violet-400 sm:block" />
-            {draft.stages.map((stage, idx) => (
-              <SortableStageSection
-                key={stage.id}
-                stage={stage}
-                index={idx}
-                subject={subject}
-                onChange={(patch) =>
-                  updateDraft((prev) => ({
-                    ...prev,
-                    stages: prev.stages.map((s) =>
-                      s.id === stage.id ? { ...s, ...patch } : s,
-                    ),
-                  }))
-                }
-                onDelete={() => setDeleteStageTarget(stage)}
-                onAddNode={() =>
-                  updateDraft((prev) => {
-                    const title = 'New node'
-                    const id = proposeNodeId(title, prev.stages)
-                    const node: RoadmapNode = { id, title, status: 'core' }
-                    return {
-                      ...prev,
-                      stages: prev.stages.map((s) =>
-                        s.id === stage.id ? { ...s, nodes: [...s.nodes, node] } : s,
-                      ),
+            {draft.stages.length === 0 ? (
+              <InsertStageButton onClick={() => insertStageAt(0)} />
+            ) : (
+              <>
+                <InsertStageButton onClick={() => insertStageAt(0)} />
+                {draft.stages.flatMap((stage, idx) => [
+                  <SortableStageSection
+                    key={stage.id}
+                    stage={stage}
+                    index={idx}
+                    subject={subject}
+                    stages={draft.stages}
+                    onChange={(patch) =>
+                      updateDraft((prev) => ({
+                        ...prev,
+                        stages: prev.stages.map((s) =>
+                          s.id === stage.id ? { ...s, ...patch } : s,
+                        ),
+                      }))
                     }
-                  })
-                }
-                onNodeChange={(nodeId, patch) =>
-                  updateDraft((prev) => ({
-                    ...prev,
-                    stages: prev.stages.map((s) =>
-                      s.id === stage.id
-                        ? {
+                    onDelete={() => setDeleteStageTarget(stage)}
+                    onAddNode={() =>
+                      updateDraft((prev) => {
+                        const title = 'New node'
+                        const id = proposeNodeId(title, prev.stages)
+                        const node: RoadmapNode = { id, title, status: 'core' }
+                        return {
+                          ...prev,
+                          stages: prev.stages.map((s) =>
+                            s.id === stage.id ? { ...s, nodes: [...s.nodes, node] } : s,
+                          ),
+                        }
+                      })
+                    }
+                    onNodeChange={(nodeId, patch) =>
+                      updateDraft((prev) => ({
+                        ...prev,
+                        stages: prev.stages.map((s) =>
+                          s.id === stage.id
+                            ? {
+                                ...s,
+                                nodes: s.nodes.map((n) =>
+                                  n.id === nodeId ? { ...n, ...patch } : n,
+                                ),
+                              }
+                            : s,
+                        ),
+                      }))
+                    }
+                    onNodeDelete={(nodeId) =>
+                      updateDraft((prev) => ({
+                        ...prev,
+                        stages: prev.stages.map((s) =>
+                          s.id === stage.id
+                            ? { ...s, nodes: s.nodes.filter((n) => n.id !== nodeId) }
+                            : s,
+                        ),
+                      }))
+                    }
+                    onNodeReorder={(orderedIds) =>
+                      updateDraft((prev) => ({
+                        ...prev,
+                        stages: prev.stages.map((s) => {
+                          if (s.id !== stage.id) return s
+                          const byId = new Map(s.nodes.map((n) => [n.id, n]))
+                          return {
                             ...s,
-                            nodes: s.nodes.map((n) =>
-                              n.id === nodeId ? { ...n, ...patch } : n,
-                            ),
+                            nodes: orderedIds
+                              .map((id) => byId.get(id))
+                              .filter((n): n is RoadmapNode => Boolean(n)),
                           }
-                        : s,
-                    ),
-                  }))
-                }
-                onNodeDelete={(nodeId) =>
-                  updateDraft((prev) => ({
-                    ...prev,
-                    stages: prev.stages.map((s) =>
-                      s.id === stage.id
-                        ? { ...s, nodes: s.nodes.filter((n) => n.id !== nodeId) }
-                        : s,
-                    ),
-                  }))
-                }
-                onNodeReorder={(orderedIds) =>
-                  updateDraft((prev) => ({
-                    ...prev,
-                    stages: prev.stages.map((s) => {
-                      if (s.id !== stage.id) return s
-                      const byId = new Map(s.nodes.map((n) => [n.id, n]))
-                      return {
-                        ...s,
-                        nodes: orderedIds
-                          .map((id) => byId.get(id))
-                          .filter((n): n is RoadmapNode => Boolean(n)),
-                      }
-                    }),
-                  }))
-                }
-              />
-            ))}
+                        }),
+                      }))
+                    }
+                  />,
+                  <InsertStageButton
+                    key={`insert-after-${stage.id}`}
+                    onClick={() => insertStageAt(idx + 1)}
+                  />,
+                ])}
+              </>
+            )}
           </ol>
         </SortableContext>
+        <DragOverlay dropAnimation={null}>
+          {activeStage ? (
+            <StageDragPreview stage={activeStage} index={activeStageIndex} />
+          ) : null}
+        </DragOverlay>
       </DndContext>
-
-      <button
-        type="button"
-        onClick={() =>
-          updateDraft((prev) => {
-            const title = 'New stage'
-            const stage: RoadmapStage = {
-              id: proposeStageId(title, prev.stages),
-              title,
-              nodes: [],
-            }
-            return { ...prev, stages: [...prev.stages, stage] }
-          })
-        }
-        className="mt-6 flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 py-3 text-sm font-semibold text-slate-500 transition hover:border-brand-300 hover:bg-brand-50/50 hover:text-brand-700 dark:border-slate-700 dark:text-slate-400 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/5 dark:hover:text-brand-300"
-      >
-        <span aria-hidden>+</span>
-        Add stage
-      </button>
 
       <ConfirmDialog
         open={deleteStageTarget != null}

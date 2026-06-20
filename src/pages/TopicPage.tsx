@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
@@ -17,6 +17,7 @@ import {
   loadSubject,
   loadTopicBody,
   planCompletionCascade,
+  invalidateTopicDocumentCache,
 } from '../content/data'
 import { splitDocumentByHeading } from '../lib/split-document'
 import { getTiptapSectionNav } from '../lib/split-tiptap-document'
@@ -68,34 +69,67 @@ export function TopicPage() {
     setSubjectRefresh((n) => n + 1)
   }
 
+  const staleTopicRetryRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    staleTopicRetryRef.current = null
+    setSavedDocument(null)
+    invalidateTopicDocumentCache(subjectId, topicId)
+  }, [topicId, subjectId])
+
+  // After creating a topic elsewhere, the in-memory subject tree can be stale.
+  useEffect(() => {
+    if (subjectLoading || !subjectId || !topicId || !subject) return
+    if (findTopic(subject, topicId)) return
+
+    const retryKey = `${subjectId}::${topicId}`
+    if (staleTopicRetryRef.current === retryKey) return
+    staleTopicRetryRef.current = retryKey
+    invalidateSubjectCache(subjectId)
+    setSubjectRefresh((n) => n + 1)
+  }, [subject, subjectId, topicId, subjectLoading])
+
+  const topicDepth = useMemo(() => {
+    if (!subject || !topicId || !findTopic(subject, topicId)) return -1
+    return getAncestors(subject, topicId).length
+  }, [subject, topicId])
+
+  const isContentLevel = topicDepth >= 2
+
   const hasContent = topic?.hasContent ?? false
-  const canCreateInDev =
-    canUseEditMode && editMode && !hasContent && !savedDocument
+  const shouldLoadContent =
+    isContentLevel && (hasContent || savedDocument || metadataEditable)
+  const canShowDevEditor =
+    metadataEditable && isContentLevel && !savedDocument
 
   const { data: topicBody, loading: contentLoading } = useAsync(
     () =>
-      hasContent || savedDocument
+      shouldLoadContent
         ? loadTopicBody(subjectId, topicId)
         : Promise.resolve(undefined),
-    [subjectId, topicId, hasContent, savedDocument],
+    [subjectId, topicId, shouldLoadContent],
   )
+
+  const resolvedTopicBody = contentLoading ? undefined : topicBody
 
   const tiptapDocument =
     savedDocument ??
-    (topicBody?.format === 'tiptap/v1' ? topicBody.document : undefined)
+    (resolvedTopicBody?.format === 'tiptap/v1'
+      ? resolvedTopicBody.document
+      : undefined)
 
   const contentSections = useMemo(() => {
     if (tiptapDocument) {
       return getTiptapSectionNav(tiptapDocument.doc)
     }
-    if (topicBody?.format === 'blocks') {
-      return splitDocumentByHeading(topicBody.document).map((s) => ({
+    if (resolvedTopicBody?.format === 'blocks') {
+      return splitDocumentByHeading(resolvedTopicBody.document).map((s) => ({
         id: s.id,
         title: sectionNavLabel(s.title),
       }))
     }
     return []
-  }, [tiptapDocument, topicBody])
+  }, [tiptapDocument, resolvedTopicBody])
 
   const showNav = contentSections.length > 1
   const sectionIds = useMemo(
@@ -113,6 +147,16 @@ export function TopicPage() {
   }
 
   if (!subject || !topic) {
+    const staleRetryKey = `${subjectId}::${topicId}`
+    const awaitingStaleRetry =
+      Boolean(subject) && staleTopicRetryRef.current !== staleRetryKey
+    if (subjectLoading || awaitingStaleRetry) {
+      return (
+        <Container className="flex min-h-[50vh] items-center justify-center py-16">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
+        </Container>
+      )
+    }
     return (
       <Container className="py-16 text-center">
         <p className="text-lg">Topic not found.</p>
@@ -138,7 +182,9 @@ export function TopicPage() {
   }
 
   const renderBody = () => {
-    if ((hasContent || savedDocument) && contentLoading && !topicBody && !savedDocument) {
+    if (!isContentLevel) return null
+
+    if (shouldLoadContent && contentLoading && !tiptapDocument && !savedDocument) {
       return (
         <div className="flex min-h-[30vh] items-center justify-center">
           <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
@@ -149,6 +195,7 @@ export function TopicPage() {
     if (tiptapDocument) {
       return (
         <TopicDocumentEditor
+          key={`${subject.id}:${topic.id}`}
           subjectId={subject.id}
           topicId={topic.id}
           topicDocument={tiptapDocument}
@@ -157,8 +204,8 @@ export function TopicPage() {
       )
     }
 
-    if (topicBody?.format === 'blocks') {
-      const sections = splitDocumentByHeading(topicBody.document)
+    if (resolvedTopicBody?.format === 'blocks') {
+      const sections = splitDocumentByHeading(resolvedTopicBody.document)
       return (
         <div className="space-y-10 sm:space-y-12">
           {sections.map((s) => (
@@ -175,9 +222,10 @@ export function TopicPage() {
       )
     }
 
-    if (canCreateInDev) {
+    if (canShowDevEditor && !resolvedTopicBody) {
       return (
         <TopicDocumentEditor
+          key={`${subject.id}:${topic.id}`}
           subjectId={subject.id}
           topicId={topic.id}
           topicDocument={emptyTopicDocument()}
@@ -207,6 +255,7 @@ export function TopicPage() {
         <EditableTopicHeader
           subjectId={subject.id}
           topic={topic}
+          topicAncestors={getAncestors(subject, topic.id)}
           isSubSubtopic={isSubSubtopic}
           editable={metadataEditable}
           onSaved={refreshSubject}
@@ -275,20 +324,28 @@ export function TopicPage() {
         )}
 
         <div className="min-w-0 flex-1 lg:order-1">
-          {topic.subtopics.length > 0 && (
+          {(topic.subtopics.length > 0 || metadataEditable) && (
             <section className="mb-10">
               <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2 sm:gap-3">
                 <h2 className="flex items-center gap-2 text-xl font-bold sm:text-2xl">
                   <span>🧭</span> Subtopics
                 </h2>
-                <span className="text-xs text-slate-400 sm:text-sm">
-                  {topic.subtopics.length} direct · {countDescendants(topic)} total
-                </span>
+                {topic.subtopics.length > 0 ? (
+                  <span className="text-xs text-slate-400 sm:text-sm">
+                    {topic.subtopics.length} direct · {countDescendants(topic)} total
+                  </span>
+                ) : metadataEditable ? (
+                  <span className="text-xs text-slate-400 sm:text-sm">
+                    Optional — add subtopics to split this topic into sections
+                  </span>
+                ) : null}
               </div>
               <TopicTree
                 subjectId={subject.id}
                 topics={topic.subtopics}
                 currentTopicId={topic.id}
+                parentTopicId={topic.id}
+                parentDepth={ancestors.length}
                 defaultExpanded={!hasContent && topic.subtopics.length <= 12}
                 editable={metadataEditable}
                 onTreeChange={refreshSubject}

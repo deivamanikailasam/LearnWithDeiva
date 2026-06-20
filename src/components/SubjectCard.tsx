@@ -2,12 +2,13 @@ import { Link } from 'react-router-dom'
 import type { SubjectIndexEntry } from '../types/content'
 import { paths } from '../lib/paths'
 import { useProgress } from '../lib/progressContext'
+import { countRequiredCompleted } from '../lib/topic-status'
 import { formatDuration } from '../lib/duration'
 import { ProgressBar } from './ProgressBar'
 
 export function SubjectCard({ subject }: { subject: SubjectIndexEntry }) {
-  const { completedInSubject } = useProgress()
-  const done = completedInSubject(subject.id)
+  const { completed } = useProgress()
+  const done = countRequiredCompleted(subject.id, subject.optionalTopicIds, completed)
   return (
     <Link
       to={paths.subject(subject.id)}

@@ -18,6 +18,7 @@ import { readFile, readdir, mkdir, writeFile, rm, rename } from 'node:fs/promise
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readGlobalGlossary } from './lib/global-glossary.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -123,6 +124,47 @@ function subtreeMinutes(node) {
   const subs = node.subtopics ?? []
   if (subs.length === 0) return topicMinutes(node)
   return subs.reduce((sum, s) => sum + subtreeMinutes(s), 0)
+}
+
+function isOptionalStatus(status) {
+  return status === 'optional'
+}
+
+function isEffectivelyOptional(node, parentOptional = false) {
+  return parentOptional || isOptionalStatus(node.status)
+}
+
+/** Mirrors `requiredSubtreeMinutes` in src/lib/duration.ts. */
+function requiredSubtreeMinutes(node, parentOptional = false) {
+  const optional = isEffectivelyOptional(node, parentOptional)
+  if (optional) return 0
+  const subs = node.subtopics ?? []
+  if (subs.length === 0) return topicMinutes(node)
+  return subs.reduce((sum, s) => sum + requiredSubtreeMinutes(s, false), 0)
+}
+
+function countRequiredTopics(topics, parentOptional = false) {
+  let count = 0
+  for (const topic of topics) {
+    const optional = isEffectivelyOptional(topic, parentOptional)
+    if (!optional) count += 1
+    if (topic.subtopics?.length) {
+      count += countRequiredTopics(topic.subtopics, optional)
+    }
+  }
+  return count
+}
+
+function collectOptionalTopicIds(topics, parentOptional = false) {
+  const ids = []
+  for (const topic of topics) {
+    const optional = isEffectivelyOptional(topic, parentOptional)
+    if (optional) ids.push(topic.id)
+    if (topic.subtopics?.length) {
+      ids.push(...collectOptionalTopicIds(topic.subtopics, optional))
+    }
+  }
+  return ids
 }
 
 /** Read + parse a JSON file, returning `undefined` if it doesn't exist. */
@@ -517,6 +559,19 @@ async function runGenerateContent({ log = false, force = true } = {}) {
   const searchDocs = []
   const glossaryDocs = []
 
+  const globalGlossary = await readGlobalGlossary()
+  for (const it of globalGlossary.items) {
+    glossaryDocs.push({
+      term: it.term,
+      definition: clip(it.definition, 600),
+      subjectId: 'global',
+      subjectTitle: 'Global Glossary',
+      subjectIcon: '📖',
+      source: 'global',
+      url: `/glossary?q=${encodeURIComponent(it.term)}`,
+    })
+  }
+
   for (const subjectId of subjectIds) {
     const subjectDir = path.join(SUBJECTS_DIR, subjectId)
     const meta = await readJson(path.join(subjectDir, 'subject.json'))
@@ -539,6 +594,7 @@ async function runGenerateContent({ log = false, force = true } = {}) {
       tags: m.tags ?? [],
       parentId: m.parentId,
       hours: m.hours,
+      status: m.status === 'optional' ? 'optional' : undefined,
       subjectId,
       hasContent,
       contentSectionCount,
@@ -567,9 +623,10 @@ async function runGenerateContent({ log = false, force = true } = {}) {
         ? { min: meta.level, max: meta.level }
         : { min: LEVEL_BY_ORDER[min], max: LEVEL_BY_ORDER[max] }
 
-    // Total estimated study time: roll up each top-level topic (a parent is a
-    // pure aggregate of its subtopics; leaves contribute their own time).
-    const estimatedMinutes = roots.reduce((sum, n) => sum + subtreeMinutes(n), 0)
+    // Total estimated study time: required topics only (optional branches excluded).
+    const estimatedMinutes = roots.reduce((sum, n) => sum + requiredSubtreeMinutes(n), 0)
+    const topicCount = countRequiredTopics(roots)
+    const optionalTopicIds = collectOptionalTopicIds(roots)
 
     const subjectMetaOut = {
       id: meta.id,
@@ -581,7 +638,8 @@ async function runGenerateContent({ log = false, force = true } = {}) {
       tags: meta.tags ?? [],
       level: meta.level,
       estimatedMinutes,
-      topicCount: nodes.length,
+      topicCount,
+      optionalTopicIds: optionalTopicIds.length ? optionalTopicIds : undefined,
       levelRange,
       hasRoadmap: Boolean(roadmap),
     }

@@ -10,6 +10,9 @@
 
 export type Difficulty = 'beginner' | 'intermediate' | 'advanced'
 
+/** Whether a topic is required on the learning path or supplementary. */
+export type TopicStatus = 'core' | 'optional'
+
 /** Raw `subject.json` written by content authors. */
 export interface SubjectMeta {
   id: string
@@ -64,6 +67,8 @@ export interface TopicMeta {
   parentId?: string
   /** Explicit learning time in hours. When absent it is estimated by level. */
   hours?: number
+  /** Core topics count toward parent completion; optional topics do not. */
+  status?: TopicStatus
 }
 
 /* ------------------------------------------------------------------ */
@@ -455,8 +460,10 @@ export interface Topic extends TopicMeta {
 export interface Subject extends SubjectMeta {
   roadmap?: Roadmap
   topics: Topic[]
-  /** Total number of topics including subtopics. */
+  /** Total number of topics including subtopics. Counts required (non-optional) topics only. */
   topicCount: number
+  /** Topic ids excluded from progress and duration totals. Omitted when none. */
+  optionalTopicIds?: string[]
   levelRange: LevelRange
 }
 
@@ -467,6 +474,8 @@ export interface Subject extends SubjectMeta {
  */
 export interface SubjectIndexEntry extends SubjectMeta {
   topicCount: number
+  /** Topic ids excluded from progress and duration totals. Omitted when none. */
+  optionalTopicIds?: string[]
   levelRange: LevelRange
   hasRoadmap: boolean
 }

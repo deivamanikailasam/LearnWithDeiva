@@ -19,10 +19,11 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import type { Topic } from '../../types/content'
-import { collectSubtreeIds } from '../../content/data'
+import { collectSubtreeIds, invalidateSubjectCache, invalidateTopicDocumentCache } from '../../content/data'
 import { deleteTopic, reorderTopics } from '../../lib/content-api'
 import { addLabelForDepth } from '../../lib/content-validation'
 import { formatDuration, subtreeMinutes } from '../../lib/duration'
+import { isEffectivelyOptional } from '../../lib/topic-status'
 import { topicLevelStyles } from '../../lib/topic-level-styles'
 import { paths } from '../../lib/paths'
 import { useProgress } from '../../lib/progressContext'
@@ -38,6 +39,7 @@ interface SortableTopicListProps {
   topics: Topic[]
   parentId?: string
   parentDepth?: number
+  parentOptional?: boolean
   currentTopicId?: string
   defaultExpanded?: boolean
   depth: number
@@ -53,6 +55,7 @@ function SortableTopicRow({
   topic,
   currentTopicId,
   depth,
+  parentOptional = false,
   defaultExpanded,
   onTreeChange,
   onDeleteRequest,
@@ -61,12 +64,14 @@ function SortableTopicRow({
   topic: Topic
   currentTopicId?: string
   depth: number
+  parentOptional?: boolean
   defaultExpanded: boolean
   onTreeChange?: () => void
   onDeleteRequest: (topic: Topic) => void
 }) {
   const { isComplete, isBookmarked } = useProgress()
   const hasChildren = topic.subtopics.length > 0
+  const effectivelyOptional = isEffectivelyOptional(topic, parentOptional)
   const [expanded, setExpanded] = useState(defaultExpanded)
   const isActive = topic.id === currentTopicId
   const done = isComplete(subjectId, topic.id)
@@ -164,6 +169,11 @@ function SortableTopicRow({
             >
               {topic.level}
             </span>
+            {effectivelyOptional && (
+              <span className="chip hidden border-slate-200 bg-slate-50 text-[10px] text-slate-600 sm:inline-flex dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                Optional
+              </span>
+            )}
             {hasChildren ? (
               <span className="chip hidden text-[10px] sm:inline-flex">
                 {topic.subtopics.length} sub
@@ -191,6 +201,7 @@ function SortableTopicRow({
             topics={topic.subtopics}
             parentId={topic.id}
             parentDepth={depth}
+            parentOptional={effectivelyOptional}
             currentTopicId={currentTopicId}
             depth={depth + 1}
             onTreeChange={onTreeChange}
@@ -206,6 +217,7 @@ function SortableTopicList({
   topics,
   parentId,
   parentDepth,
+  parentOptional = false,
   currentTopicId,
   defaultExpanded = false,
   depth,
@@ -283,6 +295,7 @@ function SortableTopicList({
                 topic={topic}
                 currentTopicId={currentTopicId}
                 depth={depth}
+                parentOptional={parentOptional}
                 defaultExpanded={defaultExpanded}
                 onTreeChange={onTreeChange}
                 onDeleteRequest={setDeleteTarget}
@@ -308,8 +321,11 @@ function SortableTopicList({
         subjectId={subjectId}
         parentId={parentId}
         parentDepth={parentDepth}
+        parentOptional={parentOptional}
         onClose={() => setCreateOpen(false)}
         onCreated={(topicId) => {
+          invalidateSubjectCache(subjectId)
+          invalidateTopicDocumentCache(subjectId, topicId)
           onTreeChange?.()
           navigate(paths.topic(subjectId, topicId))
         }}
@@ -345,17 +361,23 @@ export function EditableTopicTree({
   currentTopicId,
   defaultExpanded = false,
   onTreeChange,
+  parentTopicId,
+  parentDepth,
 }: {
   subjectId: string
   topics: Topic[]
   currentTopicId?: string
   defaultExpanded?: boolean
   onTreeChange?: () => void
+  parentTopicId?: string
+  parentDepth?: number
 }) {
   return (
     <SortableTopicList
       subjectId={subjectId}
       topics={topics}
+      parentId={parentTopicId}
+      parentDepth={parentDepth}
       currentTopicId={currentTopicId}
       defaultExpanded={defaultExpanded}
       depth={0}

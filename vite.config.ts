@@ -6,6 +6,13 @@ import { existsSync } from 'node:fs'
 import { writeFile, mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { generateContent } from './scripts/gen-content.mjs'
 import { validateRoadmapPayload, validateSubjectMetaPayload } from './src/lib/content-validation'
+import {
+  readGlobalGlossary,
+  writeGlobalGlossary,
+  upsertGlobalEntry,
+  removeGlobalEntryIfUnused,
+  findGlobalEntryByTerm,
+} from './scripts/lib/global-glossary.mjs'
 
 const ROOT = path.resolve(__dirname)
 
@@ -96,6 +103,13 @@ function validateTopicMetaPatch(meta: unknown): { ok: true; patch: Record<string
     patch.tags = unique
   }
 
+  if ('status' in m) {
+    if (m.status !== 'core' && m.status !== 'optional') {
+      return { ok: false, error: 'Status must be core or optional.' }
+    }
+    patch.status = m.status
+  }
+
   return { ok: true, patch }
 }
 
@@ -154,6 +168,29 @@ function collectDescendantIds(metas: RawTopicMeta[], rootId: string): string[] {
   return out
 }
 
+function isMetaEffectivelyOptional(metas: RawTopicMeta[], meta: RawTopicMeta): boolean {
+  if (meta.status === 'optional') return true
+  if (!meta.parentId || typeof meta.parentId !== 'string') return false
+  const parent = metas.find((m) => m.id === meta.parentId)
+  return parent ? isMetaEffectivelyOptional(metas, parent) : false
+}
+
+async function applyTopicStatusCascade(
+  subjectDir: string,
+  metas: RawTopicMeta[],
+  rootId: string,
+  status: 'core' | 'optional',
+): Promise<void> {
+  for (const id of collectDescendantIds(metas, rootId)) {
+    const topicPath = path.join(subjectDir, 'topics', id, 'topic.json')
+    if (!existsSync(topicPath)) continue
+    const existing = JSON.parse(await readFile(topicPath, 'utf8')) as Record<string, unknown>
+    if (status === 'optional') existing.status = 'optional'
+    else delete existing.status
+    await writeFile(topicPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8')
+  }
+}
+
 /**
  * Dev-only API: write `document.json` under `src/content/subjects/.../topics/`.
  * The content watcher regenerates `public/data/` after the file lands.
@@ -163,6 +200,111 @@ function contentSaveApi(): Plugin {
   return {
     name: 'learnwithdeiva:content-save',
     configureServer(server) {
+      server.middlewares.use('/api/content/glossary/sync', async (req, res, next) => {
+        if (req.method !== 'POST') return next()
+        try {
+          const body = (await readJsonBody(req)) as {
+            action?: 'upsert' | 'remove'
+            term?: string
+            definition?: string
+            subjectId?: string
+            topicId?: string
+            pendingDocument?: unknown
+          }
+
+          const action = body.action
+          const term = typeof body.term === 'string' ? body.term.trim() : ''
+          const definition = typeof body.definition === 'string' ? body.definition.trim() : ''
+
+          if (action === 'upsert') {
+            if (!term || !definition) {
+              jsonResponse(res, 400, { error: 'Term and definition are required.' })
+              return
+            }
+
+            const glossary = await readGlobalGlossary()
+            const result = upsertGlobalEntry(glossary.items, { term, definition })
+            if (!result.ok) {
+              if ('conflict' in result && result.conflict) {
+                jsonResponse(res, 409, {
+                  ok: false,
+                  conflict: true,
+                  existing: result.existing,
+                })
+                return
+              }
+              jsonResponse(res, 400, { error: result.error ?? 'Invalid glossary entry.' })
+              return
+            }
+
+            if (result.action === 'added') {
+              await writeGlobalGlossary({ items: result.items })
+            }
+
+            jsonResponse(res, 200, {
+              ok: true,
+              action: result.action,
+              item: result.item,
+            })
+            return
+          }
+
+          if (action === 'remove') {
+            if (!term || !definition) {
+              jsonResponse(res, 400, { error: 'Term and definition are required.' })
+              return
+            }
+            if (!isSafeContentId(body.subjectId) || !isSafeContentId(body.topicId)) {
+              jsonResponse(res, 400, { error: 'Invalid subject or topic.' })
+              return
+            }
+
+            const glossary = await readGlobalGlossary()
+            const result = await removeGlobalEntryIfUnused(glossary.items, term, definition, {
+              subjectId: body.subjectId,
+              topicId: body.topicId,
+              pendingDocument: body.pendingDocument,
+            })
+
+            if (result.removed) {
+              await writeGlobalGlossary({ items: result.items })
+            }
+
+            jsonResponse(res, 200, {
+              ok: true,
+              removed: result.removed,
+              usage: result.usage,
+            })
+            return
+          }
+
+          jsonResponse(res, 400, { error: 'Invalid action.' })
+        } catch (err) {
+          jsonResponse(res, 500, {
+            error: err instanceof Error ? err.message : 'Glossary sync failed',
+          })
+        }
+      })
+
+      server.middlewares.use('/api/content/glossary', async (req, res, next) => {
+        if (req.method !== 'GET') return next()
+        try {
+          const glossary = await readGlobalGlossary()
+          const url = new URL(req.url ?? '', 'http://local')
+          const termQuery = url.searchParams.get('term')?.trim()
+          if (termQuery) {
+            const existing = findGlobalEntryByTerm(glossary.items, termQuery)
+            jsonResponse(res, 200, { item: existing })
+            return
+          }
+          jsonResponse(res, 200, glossary)
+        } catch (err) {
+          jsonResponse(res, 500, {
+            error: err instanceof Error ? err.message : 'Could not load glossary',
+          })
+        }
+      })
+
       server.middlewares.use('/api/content/document', async (req, res, next) => {
         if (req.method !== 'POST') return next()
         try {
@@ -236,6 +378,7 @@ function contentSaveApi(): Plugin {
               summary?: string
               level?: string
               parentId?: string
+              status?: string
               createEmptyDocument?: boolean
             }
           }
@@ -296,6 +439,13 @@ function contentSaveApi(): Plugin {
           if (parentId) nextTopic.parentId = parentId
           if (validated.patch.summary) nextTopic.summary = validated.patch.summary
 
+          const parentMeta = parentId ? metas.find((m) => m.id === parentId) : undefined
+          const inheritOptional =
+            parentMeta != null && isMetaEffectivelyOptional(metas, parentMeta)
+          if (inheritOptional || topic.status === 'optional') {
+            nextTopic.status = 'optional'
+          }
+
           const topicDir = path.join(subjectDir, 'topics', topic.id!)
           await mkdir(topicDir, { recursive: true })
           await writeFile(
@@ -304,8 +454,14 @@ function contentSaveApi(): Plugin {
             'utf8',
           )
 
-          const isSubSubtopic = parentId ? topicDepth(metas, parentId) === 1 : false
-          if (topic.createEmptyDocument && isSubSubtopic) {
+          if (topic.createEmptyDocument) {
+            const parentDepth = parentId ? topicDepth(metas, parentId) : -1
+            if (parentDepth !== 1) {
+              jsonResponse(res, 400, {
+                error: 'Empty content documents can only be created for sub-subtopics.',
+              })
+              return
+            }
             const doc = {
               format: 'tiptap/v1',
               updatedAt: new Date().toISOString(),
@@ -364,8 +520,9 @@ function contentSaveApi(): Plugin {
 
       server.middlewares.use('/api/content/topic', async (req, res, next) => {
         if (req.method !== 'POST') return next()
+        // Connect strips the mount path; subroutes use dedicated handlers above.
         const pathname = (req.url ?? '').split('?')[0]
-        if (pathname !== '/api/content/topic') return next()
+        if (pathname === '/create' || pathname === '/delete') return next()
         try {
           const body = (await readJsonBody(req)) as {
             subjectId?: string
@@ -418,8 +575,22 @@ function contentSaveApi(): Plugin {
           if ('tags' in patch) {
             nextTopic.tags = patch.tags
           }
+          if ('status' in patch) {
+            if (patch.status === 'optional') nextTopic.status = 'optional'
+            else delete nextTopic.status
+          }
 
           await writeFile(topicPath, `${JSON.stringify(nextTopic, null, 2)}\n`, 'utf8')
+          if ('status' in patch) {
+            const subjectDir = path.join(contentDir, 'subjects', subjectId!)
+            const metas = await listTopicMetas(subjectDir)
+            await applyTopicStatusCascade(
+              subjectDir,
+              metas,
+              topicId!,
+              patch.status === 'optional' ? 'optional' : 'core',
+            )
+          }
           await regenContent()
           jsonResponse(res, 200, { ok: true, topic: nextTopic })
         } catch (err) {
@@ -603,11 +774,12 @@ function contentData(isBuild: boolean): Plugin {
         if (!file.startsWith(contentDir)) return
         const isDocumentJson = file.endsWith(`${path.sep}document.json`)
         const isTopicJson = file.endsWith(`${path.sep}topic.json`)
+        const isGlobalGlossaryJson = file.endsWith(`${path.sep}glossary.json`)
         clearTimeout(timer)
         timer = setTimeout(async () => {
           await generateContent({ force: true, log: false })
           // Dev saves update the UI from the save response; skip full reload.
-          if (!isDocumentJson && !isTopicJson) {
+          if (!isDocumentJson && !isTopicJson && !isGlobalGlossaryJson) {
             server.ws.send({ type: 'full-reload' })
           }
         }, isDocumentJson || isTopicJson ? 3000 : 150)

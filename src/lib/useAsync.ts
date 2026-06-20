@@ -26,7 +26,7 @@ export function useAsync<T>(
     // Reset to a loading state when deps change. This is the intended
     // data-fetching reset, not an accidental cascading render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState((s) => ({ ...s, loading: true, error: undefined }))
+    setState({ data: undefined, loading: true, error: undefined })
     factory()
       .then((data) => {
         if (alive) setState({ data, loading: false, error: undefined })

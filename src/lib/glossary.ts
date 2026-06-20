@@ -15,7 +15,7 @@ export interface GlossaryEntry {
   subjectIcon: string
   topicId?: string
   topicTitle?: string
-  source: 'subject' | 'topic'
+  source: 'subject' | 'topic' | 'global'
   url: string
 }
 
@@ -23,6 +23,12 @@ const BASE = import.meta.env.BASE_URL
 
 let termsPromise: Promise<GlossaryEntry[]> | null = null
 let fusePromise: Promise<Fuse<GlossaryEntry>> | null = null
+
+/** Clear cached glossary data after in-app edits sync to the global store. */
+export function invalidateGlossaryCache(): void {
+  termsPromise = null
+  fusePromise = null
+}
 
 /**
  * Fetch the prebuilt, alphabetically-sorted glossary once. A missing artifact

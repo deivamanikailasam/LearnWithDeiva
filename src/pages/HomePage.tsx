@@ -5,12 +5,18 @@ import { loadSubjectIndex, resolveTopicKeys } from '../content/data'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useProgress } from '../lib/progressContext'
+import { countRequiredCompleted } from '../lib/topic-status'
 
 export function HomePage() {
   const { data: subjects } = useAsync(() => loadSubjectIndex(), [])
   const { bookmarks, completed } = useProgress()
 
   const totalTopics = subjects?.reduce((sum, s) => sum + s.topicCount, 0) ?? 0
+  const requiredCompleted =
+    subjects?.reduce(
+      (sum, s) => sum + countRequiredCompleted(s.id, s.optionalTopicIds, completed),
+      0,
+    ) ?? 0
 
   const { data: bookmarked } = useAsync(
     () => resolveTopicKeys(bookmarks),
@@ -67,7 +73,7 @@ export function HomePage() {
           <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-lg font-bold sm:text-xl">📌 My learning</h2>
-              <span className="chip">{completed.size} topics completed</span>
+              <span className="chip">{requiredCompleted} topics completed</span>
             </div>
             {bookmarked && bookmarked.length > 0 ? (
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
