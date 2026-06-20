@@ -68,6 +68,7 @@ export interface TopicMetaDraft {
   tags: string[]
   status: TopicStatus
   useLevelDefault: boolean
+  hoursSource?: TopicMeta['hoursSource']
   durationDays: number
   durationHours: number
   durationMinutes: number
@@ -76,6 +77,7 @@ export interface TopicMetaDraft {
 export type TopicMetaUpdatePayload = Pick<TopicMeta, 'title' | 'level' | 'tags' | 'status'> & {
   summary?: string
   hours?: number | null
+  hoursSource?: TopicMeta['hoursSource'] | null
 }
 
 export interface SubjectMetaDraft {
@@ -202,7 +204,10 @@ export function validateCreateTopic(
 }
 
 export function topicToMetaDraft(
-  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'>,
+  topic: Pick<
+    TopicMeta,
+    'title' | 'summary' | 'level' | 'hours' | 'hoursSource' | 'tags' | 'status'
+  >,
 ): TopicMetaDraft {
   const hasExplicitHours = typeof topic.hours === 'number' && topic.hours >= 0
   const parts = hoursToDurationParts(hasExplicitHours ? topic.hours : undefined)
@@ -213,6 +218,7 @@ export function topicToMetaDraft(
     tags: [...(topic.tags ?? [])],
     status: topic.status ?? 'core',
     useLevelDefault: !hasExplicitHours,
+    hoursSource: topic.hoursSource,
     durationDays: parts.days,
     durationHours: parts.hours,
     durationMinutes: parts.minutes,
@@ -220,20 +226,30 @@ export function topicToMetaDraft(
 }
 
 export function metaFromTopicMeta(
-  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'>,
-): Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'> {
+  topic: Pick<
+    TopicMeta,
+    'title' | 'summary' | 'level' | 'hours' | 'hoursSource' | 'tags' | 'status'
+  >,
+): Pick<
+  TopicMeta,
+  'title' | 'summary' | 'level' | 'hours' | 'hoursSource' | 'tags' | 'status'
+> {
   return {
     title: topic.title,
     summary: topic.summary,
     level: topic.level,
     hours: topic.hours,
+    hoursSource: topic.hoursSource,
     tags: topic.tags ?? [],
     status: topic.status ?? 'core',
   }
 }
 
 export function topicMetaFingerprint(
-  topic: Pick<TopicMeta, 'title' | 'summary' | 'level' | 'hours' | 'tags' | 'status'>,
+  topic: Pick<
+    TopicMeta,
+    'title' | 'summary' | 'level' | 'hours' | 'hoursSource' | 'tags' | 'status'
+  >,
 ): string {
   return JSON.stringify(metaFromTopicMeta(topic))
 }
@@ -297,6 +313,13 @@ export function validateTopicMetaDraft(
   if (options.allowStatus) payload.status = normalizeTopicStatus(draft.status)
   if (options.includeSummary) payload.summary = summary
   if (options.durationEditable) payload.hours = hours
+  if (options.durationEditable) {
+    if (draft.useLevelDefault) {
+      payload.hoursSource = null
+    } else {
+      payload.hoursSource = 'manual'
+    }
+  }
 
   return { ok: true, payload }
 }

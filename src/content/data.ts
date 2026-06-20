@@ -108,6 +108,11 @@ export function loadTopicSections(
   return p
 }
 
+/** Drop cached subject index after duration totals change. */
+export function invalidateSubjectIndexCache(): void {
+  indexPromise = null
+}
+
 /** Drop cached subject tree after a dev metadata save. */
 export function invalidateSubjectCache(id: string): void {
   subjectCache.delete(id)

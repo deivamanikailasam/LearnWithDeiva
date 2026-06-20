@@ -4,8 +4,12 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/core'
 import type { TopicDocument } from '../../types/tiptap-document'
 import { splitTiptapByH1 } from '../../lib/split-tiptap-document'
-import { saveTopicDocument, type SaveStatus } from '../../lib/save-topic-document'
-import { invalidateTopicDocumentCache, primeTopicDocumentCache } from '../../content/data'
+import { saveTopicDocument, type SaveStatus, type SavedTopicDocumentResult } from '../../lib/save-topic-document'
+import {
+  invalidateTopicDocumentCache,
+  primeTopicDocumentCache,
+} from '../../content/data'
+import { formatDuration } from '../../lib/duration'
 import { sanitizeTiptapDocument } from '../../lib/sanitize-tiptap-document'
 import { TiptapViewer } from './TiptapViewer'
 import { useEditMode } from '../../lib/editModeContext'
@@ -25,7 +29,7 @@ interface TopicDocumentEditorProps {
   subjectId: string
   topicId: string
   topicDocument: TopicDocument
-  onDocumentSaved?: (doc: TopicDocument) => void
+  onDocumentSaved?: (result: SavedTopicDocumentResult) => void
 }
 
 function ToolbarButton({
@@ -122,15 +126,22 @@ export function TopicDocumentEditor({
       setSaveStatus('saving')
       setSaveError(null)
       try {
-        const saved = await saveTopicDocument(subjectId, topicId, doc)
-        latestDoc.current = saved
-        baselineRef.current = JSON.stringify(saved.doc)
+        const result = await saveTopicDocument(subjectId, topicId, doc)
+        latestDoc.current = result.document
+        baselineRef.current = JSON.stringify(result.document.doc)
         setDirty(false)
         invalidateTopicDocumentCache(subjectId, topicId)
-        primeTopicDocumentCache(subjectId, topicId, saved)
+        primeTopicDocumentCache(subjectId, topicId, result.document)
         setSaveStatus('idle')
-        showToast('Document saved', 'success')
-        onDocumentSaved?.(saved)
+        if (result.duration) {
+          showToast(
+            `Document saved · ~${formatDuration(Math.round(result.duration.hours * 60))} estimated`,
+            'success',
+          )
+        } else {
+          showToast('Document saved', 'success')
+        }
+        onDocumentSaved?.(result)
         return true
       } catch (err) {
         setSaveStatus('error')

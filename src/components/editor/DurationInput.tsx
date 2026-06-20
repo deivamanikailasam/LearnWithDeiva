@@ -10,6 +10,7 @@ import type { Difficulty, Topic } from '../../types/content'
 
 interface DurationInputProps {
   useLevelDefault: boolean
+  hoursSource?: 'manual' | 'computed'
   days: number
   hours: number
   minutes: number
@@ -65,6 +66,7 @@ function DurationField({
 
 export function DurationInput({
   useLevelDefault,
+  hoursSource,
   days,
   hours,
   minutes,
@@ -99,6 +101,11 @@ export function DurationInput({
         <span className={labelClass}>Duration</span>
         <span className="text-[10px] tabular-nums text-slate-400">
           {formatDuration(previewMinutes)}
+          {!readOnlyComputed && hoursSource === 'computed' && !useLevelDefault
+            ? ' · auto'
+            : !readOnlyComputed && hoursSource === 'manual' && !useLevelDefault
+              ? ' · manual'
+              : ''}
         </span>
       </div>
       <div className="flex flex-wrap items-center gap-2">

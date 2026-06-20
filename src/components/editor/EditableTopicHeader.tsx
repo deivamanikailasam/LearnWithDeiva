@@ -130,7 +130,7 @@ export function EditableTopicHeader({
     setSaveStatus('idle')
     setSaveError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sync draft from reloaded topic
-  }, [topic.id, topic.title, topic.summary, topic.level, topic.hours, topic.tags, topic.status])
+  }, [topic.id, topic.title, topic.summary, topic.level, topic.hours, topic.hoursSource, topic.tags, topic.status])
 
   const dirty = !metaDraftsEqual(draft, committed)
 
@@ -332,6 +332,7 @@ export function EditableTopicHeader({
           ) : (
             <DurationInput
               useLevelDefault={draft.useLevelDefault}
+              hoursSource={draft.hoursSource}
               days={draft.durationDays}
               hours={draft.durationHours}
               minutes={draft.durationMinutes}
@@ -358,6 +359,7 @@ export function EditableTopicHeader({
         {allowStatus ? (
           <DurationInput
             useLevelDefault={draft.useLevelDefault}
+            hoursSource={draft.hoursSource}
             days={draft.durationDays}
             hours={draft.durationHours}
             minutes={draft.durationMinutes}

@@ -2,11 +2,19 @@ import type { TopicDocument } from '../types/tiptap-document'
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
+export interface SavedTopicDocumentResult {
+  document: TopicDocument
+  duration?: {
+    hours: number
+    hoursSource: 'computed'
+  }
+}
+
 export async function saveTopicDocument(
   subjectId: string,
   topicId: string,
   document: TopicDocument,
-): Promise<TopicDocument> {
+): Promise<SavedTopicDocumentResult> {
   const payload: TopicDocument = {
     ...document,
     format: 'tiptap/v1',
@@ -31,6 +39,14 @@ export async function saveTopicDocument(
     throw new Error(message)
   }
 
-  const body = (await res.json()) as { document?: TopicDocument }
-  return body.document ?? payload
+  const body = (await res.json()) as {
+    document?: TopicDocument
+    duration?: { hours?: number; hoursSource?: 'computed' }
+  }
+  const saved = body.document ?? payload
+  const duration =
+    typeof body.duration?.hours === 'number' && body.duration.hoursSource === 'computed'
+      ? { hours: body.duration.hours, hoursSource: 'computed' as const }
+      : undefined
+  return { document: saved, duration }
 }

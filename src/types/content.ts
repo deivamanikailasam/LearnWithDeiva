@@ -67,6 +67,8 @@ export interface TopicMeta {
   parentId?: string
   /** Explicit learning time in hours. When absent it is estimated by level. */
   hours?: number
+  /** Whether `hours` was set by the author or derived from content. */
+  hoursSource?: 'manual' | 'computed'
   /** Core topics count toward parent completion; optional topics do not. */
   status?: TopicStatus
 }

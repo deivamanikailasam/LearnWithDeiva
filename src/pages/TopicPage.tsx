@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from 'react'
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
@@ -14,6 +14,7 @@ import {
   flattenTopics,
   getAncestors,
   invalidateSubjectCache,
+  invalidateSubjectIndexCache,
   loadSubject,
   loadTopicBody,
   planCompletionCascade,
@@ -22,6 +23,7 @@ import {
 import { splitDocumentByHeading } from '../lib/split-document'
 import { getTiptapSectionNav } from '../lib/split-tiptap-document'
 import { emptyTopicDocument, type TopicDocument } from '../types/tiptap-document'
+import type { SavedTopicDocumentResult } from '../lib/save-topic-document'
 import { paths } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
@@ -68,6 +70,18 @@ export function TopicPage() {
     invalidateSubjectCache(subjectId)
     setSubjectRefresh((n) => n + 1)
   }
+
+  const handleDocumentSaved = useCallback(
+    (result: SavedTopicDocumentResult) => {
+      setSavedDocument(result.document)
+      if (result.duration) {
+        invalidateSubjectCache(subjectId)
+        invalidateSubjectIndexCache()
+        setSubjectRefresh((n) => n + 1)
+      }
+    },
+    [subjectId],
+  )
 
   const staleTopicRetryRef = useRef<string | null>(null)
 
@@ -199,7 +213,7 @@ export function TopicPage() {
           subjectId={subject.id}
           topicId={topic.id}
           topicDocument={tiptapDocument}
-          onDocumentSaved={setSavedDocument}
+          onDocumentSaved={handleDocumentSaved}
         />
       )
     }
@@ -229,7 +243,7 @@ export function TopicPage() {
           subjectId={subject.id}
           topicId={topic.id}
           topicDocument={emptyTopicDocument()}
-          onDocumentSaved={setSavedDocument}
+          onDocumentSaved={handleDocumentSaved}
         />
       )
     }

@@ -4,7 +4,8 @@ import react from '@vitejs/plugin-react'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { writeFile, mkdir, readFile, readdir, rm } from 'node:fs/promises'
-import { generateContent } from './scripts/gen-content.mjs'
+import { generateContent, regenerateSubject } from './scripts/gen-content.mjs'
+import { estimateDurationFromTiptap } from './scripts/lib/estimate-duration-from-tiptap.mjs'
 import { validateRoadmapPayload, validateSubjectMetaPayload } from './src/lib/content-validation'
 import {
   readGlobalGlossary,
@@ -73,6 +74,16 @@ function validateTopicMetaPatch(meta: unknown): { ok: true; patch: Record<string
       patch.hours = Math.round(m.hours * 100) / 100
     } else {
       return { ok: false, error: 'Hours must be a non-negative number or null.' }
+    }
+  }
+
+  if ('hoursSource' in m) {
+    if (m.hoursSource === null) {
+      patch.hoursSource = null
+    } else if (m.hoursSource === 'manual' || m.hoursSource === 'computed') {
+      patch.hoursSource = m.hoursSource
+    } else {
+      return { ok: false, error: 'hoursSource must be manual, computed, or null.' }
     }
   }
 
@@ -357,7 +368,35 @@ function contentSaveApi(): Plugin {
           await mkdir(path.dirname(publicSection), { recursive: true })
           await writeFile(publicSection, `${JSON.stringify(payload)}\n`, 'utf8')
 
-          jsonResponse(res, 200, { ok: true, document: payload })
+          const topicPath = path.join(topicDir, 'topic.json')
+          const topicMeta = JSON.parse(await readFile(topicPath, 'utf8')) as Record<
+            string,
+            unknown
+          >
+          const subjectDir = path.join(contentDir, 'subjects', subjectId!)
+          const metas = await listTopicMetas(subjectDir)
+          const isLeaf = !metas.some((m) => m.parentId === topicId)
+          const isManual = topicMeta.hoursSource === 'manual'
+          let durationUpdate: { hours?: number; hoursSource?: string } | undefined
+
+          if (isLeaf && !isManual) {
+            const level =
+              typeof topicMeta.level === 'string' && DIFFICULTY.has(topicMeta.level)
+                ? topicMeta.level
+                : 'beginner'
+            const hours = estimateDurationFromTiptap(document.doc, level)
+            topicMeta.hours = hours
+            topicMeta.hoursSource = 'computed'
+            await writeFile(topicPath, `${JSON.stringify(topicMeta, null, 2)}\n`, 'utf8')
+            durationUpdate = { hours, hoursSource: 'computed' }
+            await regenerateSubject(subjectId!)
+          }
+
+          jsonResponse(res, 200, {
+            ok: true,
+            document: payload,
+            duration: durationUpdate,
+          })
         } catch (err) {
           jsonResponse(res, 500, {
             error: err instanceof Error ? err.message : 'Save failed',
@@ -569,8 +608,17 @@ function contentSaveApi(): Plugin {
             else delete nextTopic.summary
           }
           if ('hours' in patch) {
-            if (patch.hours === null) delete nextTopic.hours
-            else nextTopic.hours = patch.hours
+            if (patch.hours === null) {
+              delete nextTopic.hours
+              delete nextTopic.hoursSource
+            } else {
+              nextTopic.hours = patch.hours
+              nextTopic.hoursSource =
+                patch.hoursSource === 'computed' ? 'computed' : 'manual'
+            }
+          } else if ('hoursSource' in patch) {
+            if (patch.hoursSource === null) delete nextTopic.hoursSource
+            else nextTopic.hoursSource = patch.hoursSource
           }
           if ('tags' in patch) {
             nextTopic.tags = patch.tags

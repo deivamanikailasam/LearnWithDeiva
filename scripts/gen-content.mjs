@@ -526,6 +526,195 @@ function extractSubjectExtraDocs(subjectMeta, extras) {
   return docs
 }
 
+/** Build one subject's topic tree + index metadata (no file writes). */
+async function buildOneSubject(subjectId) {
+  const subjectDir = path.join(SUBJECTS_DIR, subjectId)
+  const meta = await readJson(path.join(subjectDir, 'subject.json'))
+  if (!meta) return null
+
+  const roadmap = await readJson(path.join(subjectDir, 'roadmap.json'))
+  const extras = await loadSubjectExtras(subjectDir)
+
+  const topicIds = await listDirs(path.join(subjectDir, 'topics'))
+  const loaded = (
+    await mapLimit(topicIds, 64, (id) => loadTopic(subjectDir, id))
+  ).filter(Boolean)
+
+  const nodes = loaded.map(({ meta: m, hasContent, contentSectionCount }) => ({
+    id: m.id,
+    title: m.title,
+    summary: m.summary,
+    order: m.order ?? 0,
+    level: m.level ?? 'beginner',
+    tags: m.tags ?? [],
+    parentId: m.parentId,
+    hours: m.hours,
+    hoursSource:
+      m.hoursSource === 'manual' || m.hoursSource === 'computed'
+        ? m.hoursSource
+        : undefined,
+    status: m.status === 'optional' ? 'optional' : undefined,
+    subjectId,
+    hasContent,
+    contentSectionCount,
+    subtopics: [],
+  }))
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const roots = []
+  for (const n of nodes) {
+    if (n.parentId && byId.has(n.parentId)) byId.get(n.parentId).subtopics.push(n)
+    else roots.push(n)
+  }
+  const sortByOrder = (a, b) => a.order - b.order
+  roots.sort(sortByOrder)
+  for (const n of nodes) n.subtopics.sort(sortByOrder)
+
+  let min = LEVEL_ORDER.advanced
+  let max = LEVEL_ORDER.beginner
+  for (const n of nodes) {
+    const o = LEVEL_ORDER[n.level] ?? 0
+    if (o < min) min = o
+    if (o > max) max = o
+  }
+  const levelRange =
+    min > max
+      ? { min: meta.level, max: meta.level }
+      : { min: LEVEL_BY_ORDER[min], max: LEVEL_BY_ORDER[max] }
+
+  const estimatedMinutes = roots.reduce((sum, n) => sum + requiredSubtreeMinutes(n), 0)
+  const topicCount = countRequiredTopics(roots)
+  const optionalTopicIds = collectOptionalTopicIds(roots)
+
+  const subjectMetaOut = {
+    id: meta.id,
+    title: meta.title,
+    tagline: meta.tagline,
+    description: meta.description,
+    icon: meta.icon,
+    gradient: meta.gradient,
+    tags: meta.tags ?? [],
+    level: meta.level,
+    estimatedMinutes,
+    topicCount,
+    optionalTopicIds: optionalTopicIds.length ? optionalTopicIds : undefined,
+    levelRange,
+    hasRoadmap: Boolean(roadmap),
+  }
+
+  const searchDocsForSubject = [
+    {
+      id: `subject/${subjectId}`,
+      type: 'subject',
+      subjectId,
+      subjectTitle: meta.title,
+      title: meta.title,
+      text: clip(`${meta.tagline ?? ''} ${meta.description ?? ''}`),
+      tags: meta.tags ?? [],
+      url: `/subjects/${subjectId}`,
+    },
+    ...extractSubjectExtraDocs({ id: subjectId, title: meta.title, tags: meta.tags }, extras),
+  ]
+
+  const glossaryDocsForSubject = []
+  extras.glossary?.items?.forEach((it) => {
+    if (!it?.term) return
+    glossaryDocsForSubject.push({
+      term: String(it.term),
+      definition: clip(it.definition ?? '', 600),
+      subjectId,
+      subjectTitle: meta.title,
+      subjectIcon: meta.icon ?? '',
+      source: 'subject',
+      url: `/subjects/${subjectId}/glossary`,
+    })
+  })
+
+  const bodyById = new Map(loaded.map((t) => [t.meta.id, t]))
+  for (const n of nodes) {
+    searchDocsForSubject.push({
+      id: `topic/${subjectId}/${n.id}`,
+      type: 'topic',
+      subjectId,
+      subjectTitle: meta.title,
+      topicId: n.id,
+      topicTitle: n.title,
+      title: n.title,
+      text: clip(n.summary),
+      tags: n.tags,
+      url: `/subjects/${subjectId}/topics/${n.id}`,
+    })
+    const loadedTopic = bodyById.get(n.id)
+    if (loadedTopic?.document) {
+      searchDocsForSubject.push(
+        ...extractTiptapSectionDocs(
+          { id: subjectId, title: meta.title },
+          n,
+          loadedTopic.document,
+        ),
+      )
+    } else if (loadedTopic?.explanation) {
+      searchDocsForSubject.push(
+        ...extractSectionDocs(
+          { id: subjectId, title: meta.title },
+          n,
+          loadedTopic.explanation,
+        ),
+      )
+    }
+  }
+
+  return {
+    subjectMetaOut,
+    roots,
+    roadmap,
+    extras,
+    loaded,
+    searchDocsForSubject,
+    glossaryDocsForSubject,
+  }
+}
+
+export async function regenerateSubject(subjectId, { log = false } = {}) {
+  contentGenerationQueue = contentGenerationQueue
+    .catch(() => undefined)
+    .then(() => runRegenerateSubject(subjectId, { log }))
+  return contentGenerationQueue
+}
+
+async function runRegenerateSubject(subjectId, { log = false } = {}) {
+  const start = Date.now()
+  if (!existsSync(OUT_DIR)) {
+    return generateContent({ force: true, log })
+  }
+
+  const built = await buildOneSubject(subjectId)
+  if (!built) return { ok: false }
+
+  const { subjectMetaOut, roots, roadmap } = built
+  await mkdir(path.join(OUT_DIR, 'subjects'), { recursive: true })
+  await writeFile(
+    path.join(OUT_DIR, 'subjects', `${subjectId}.json`),
+    JSON.stringify({ ...subjectMetaOut, roadmap: roadmap ?? undefined, topics: roots }),
+  )
+
+  const indexPath = path.join(OUT_DIR, 'index.json')
+  const index = (await readJson(indexPath)) ?? { subjects: [] }
+  const subjects = Array.isArray(index.subjects) ? [...index.subjects] : []
+  const idx = subjects.findIndex((s) => s.id === subjectId)
+  if (idx >= 0) subjects[idx] = subjectMetaOut
+  else subjects.push(subjectMetaOut)
+  subjects.sort((a, b) => a.title.localeCompare(b.title))
+  await writeFile(
+    indexPath,
+    JSON.stringify({ ...index, generatedAt: Date.now(), subjects }),
+  )
+
+  if (log) {
+    console.log(`[content] regenerated ${subjectId} (${Date.now() - start}ms)`)
+  }
+  return { ok: true }
+}
+
 export async function generateContent({ log = false, force = true } = {}) {
   contentGenerationQueue = contentGenerationQueue
     .catch(() => undefined)
@@ -573,84 +762,24 @@ async function runGenerateContent({ log = false, force = true } = {}) {
   }
 
   for (const subjectId of subjectIds) {
-    const subjectDir = path.join(SUBJECTS_DIR, subjectId)
-    const meta = await readJson(path.join(subjectDir, 'subject.json'))
-    if (!meta) continue
-    const roadmap = await readJson(path.join(subjectDir, 'roadmap.json'))
-    const extras = await loadSubjectExtras(subjectDir)
+    const built = await buildOneSubject(subjectId)
+    if (!built) continue
 
-    const topicIds = await listDirs(path.join(subjectDir, 'topics'))
-    const loaded = (
-      await mapLimit(topicIds, 64, (id) => loadTopic(subjectDir, id))
-    ).filter(Boolean)
+    const {
+      subjectMetaOut,
+      roots,
+      roadmap,
+      extras,
+      loaded,
+      searchDocsForSubject,
+      glossaryDocsForSubject,
+    } = built
 
-    // Build parent/child tree from parentId references.
-    const nodes = loaded.map(({ meta: m, hasContent, contentSectionCount }) => ({
-      id: m.id,
-      title: m.title,
-      summary: m.summary,
-      order: m.order ?? 0,
-      level: m.level ?? 'beginner',
-      tags: m.tags ?? [],
-      parentId: m.parentId,
-      hours: m.hours,
-      status: m.status === 'optional' ? 'optional' : undefined,
-      subjectId,
-      hasContent,
-      contentSectionCount,
-      subtopics: [],
-    }))
-    const byId = new Map(nodes.map((n) => [n.id, n]))
-    const roots = []
-    for (const n of nodes) {
-      if (n.parentId && byId.has(n.parentId)) byId.get(n.parentId).subtopics.push(n)
-      else roots.push(n)
-    }
-    const sortByOrder = (a, b) => a.order - b.order
-    roots.sort(sortByOrder)
-    for (const n of nodes) n.subtopics.sort(sortByOrder)
-
-    // Difficulty span across all topics.
-    let min = LEVEL_ORDER.advanced
-    let max = LEVEL_ORDER.beginner
-    for (const n of nodes) {
-      const o = LEVEL_ORDER[n.level] ?? 0
-      if (o < min) min = o
-      if (o > max) max = o
-    }
-    const levelRange =
-      min > max
-        ? { min: meta.level, max: meta.level }
-        : { min: LEVEL_BY_ORDER[min], max: LEVEL_BY_ORDER[max] }
-
-    // Total estimated study time: required topics only (optional branches excluded).
-    const estimatedMinutes = roots.reduce((sum, n) => sum + requiredSubtreeMinutes(n), 0)
-    const topicCount = countRequiredTopics(roots)
-    const optionalTopicIds = collectOptionalTopicIds(roots)
-
-    const subjectMetaOut = {
-      id: meta.id,
-      title: meta.title,
-      tagline: meta.tagline,
-      description: meta.description,
-      icon: meta.icon,
-      gradient: meta.gradient,
-      tags: meta.tags ?? [],
-      level: meta.level,
-      estimatedMinutes,
-      topicCount,
-      optionalTopicIds: optionalTopicIds.length ? optionalTopicIds : undefined,
-      levelRange,
-      hasRoadmap: Boolean(roadmap),
-    }
-
-    // Per-subject file (full tree + roadmap, no heavy section bodies).
     await writeFile(
       path.join(outDir, 'subjects', `${subjectId}.json`),
       JSON.stringify({ ...subjectMetaOut, roadmap: roadmap ?? undefined, topics: roots }),
     )
 
-    // Per-topic section bodies (only for topics that actually have sections).
     const withContent = loaded.filter((t) => t.hasContent)
     if (withContent.length) {
       const secDir = path.join(outDir, 'subjects', subjectId, 'sections')
@@ -660,9 +789,6 @@ async function runGenerateContent({ log = false, force = true } = {}) {
       )
     }
 
-    // Subject-level extras. Split so the subject page only pays for what it
-    // shows: a tiny counts manifest (always emitted, for the tab badges) plus
-    // one file per non-empty category, fetched lazily when its tab is opened.
     const subjectOutDir = path.join(outDir, 'subjects', subjectId)
     await mkdir(subjectOutDir, { recursive: true })
     const extraCounts = {}
@@ -684,69 +810,9 @@ async function runGenerateContent({ log = false, force = true } = {}) {
       )
     }
 
-    // Index entry (no topics) for cards / stats.
     indexEntries.push(subjectMetaOut)
-
-    // Search docs: subject + every topic + its section units.
-    searchDocs.push({
-      id: `subject/${subjectId}`,
-      type: 'subject',
-      subjectId,
-      subjectTitle: meta.title,
-      title: meta.title,
-      text: clip(`${meta.tagline ?? ''} ${meta.description ?? ''}`),
-      tags: meta.tags ?? [],
-      url: `/subjects/${subjectId}`,
-    })
-    searchDocs.push(...extractSubjectExtraDocs({ id: subjectId, title: meta.title, tags: meta.tags }, extras))
-
-    // Global glossary: subject-level glossary extras (authored once per subject).
-    extras.glossary?.items?.forEach((it) => {
-      if (!it?.term) return
-      glossaryDocs.push({
-        term: String(it.term),
-        definition: clip(it.definition ?? '', 600),
-        subjectId,
-        subjectTitle: meta.title,
-        subjectIcon: meta.icon ?? '',
-        source: 'subject',
-        url: `/subjects/${subjectId}/glossary`,
-      })
-    })
-
-    const bodyById = new Map(loaded.map((t) => [t.meta.id, t]))
-    for (const n of nodes) {
-      searchDocs.push({
-        id: `topic/${subjectId}/${n.id}`,
-        type: 'topic',
-        subjectId,
-        subjectTitle: meta.title,
-        topicId: n.id,
-        topicTitle: n.title,
-        title: n.title,
-        text: clip(n.summary),
-        tags: n.tags,
-        url: `/subjects/${subjectId}/topics/${n.id}`,
-      })
-      const loadedTopic = bodyById.get(n.id)
-      if (loadedTopic?.document) {
-        searchDocs.push(
-          ...extractTiptapSectionDocs(
-            { id: subjectId, title: meta.title },
-            n,
-            loadedTopic.document,
-          ),
-        )
-      } else if (loadedTopic?.explanation) {
-        searchDocs.push(
-          ...extractSectionDocs(
-            { id: subjectId, title: meta.title },
-            n,
-            loadedTopic.explanation,
-          ),
-        )
-      }
-    }
+    searchDocs.push(...searchDocsForSubject)
+    glossaryDocs.push(...glossaryDocsForSubject)
   }
 
   indexEntries.sort((a, b) => a.title.localeCompare(b.title))
