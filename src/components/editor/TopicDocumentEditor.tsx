@@ -24,6 +24,7 @@ import {
   findGlobalGlossaryEntry,
   type GlobalGlossaryItem,
 } from '../../lib/global-glossary'
+import { deleteBlockAtCursor } from '../../lib/delete-block-at-cursor'
 
 interface TopicDocumentEditorProps {
   subjectId: string
@@ -610,6 +611,12 @@ export function TopicDocumentEditor({
         }}
       />
       <span className="mx-1 text-slate-300 dark:text-slate-600">|</span>
+      <ToolbarButton
+        title="Delete line"
+        onClick={() => run(() => (editor ? deleteBlockAtCursor(editor) : false))}
+      >
+        🗑
+      </ToolbarButton>
       <ToolbarButton
         title="Undo"
         onClick={() => run(() => editor?.chain().focus().undo().run() ?? false)}
