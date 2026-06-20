@@ -1,4 +1,5 @@
 import { isLanguageLabel, normalizeLanguage } from './code-languages'
+import { stripCitationsFromHtml } from './strip-perplexity-citations'
 
 function languageFromCodeEl(code: Element | null): string | null {
   if (!code) return null
@@ -247,7 +248,7 @@ export function normalizePastedHtml(html: string): string {
     for (const pre of [...doc.querySelectorAll('pre')]) {
       absorbTrailingCodeLines(pre)
     }
-    return doc.body.innerHTML
+    return stripCitationsFromHtml(doc.body.innerHTML)
   } catch {
     return html
   }

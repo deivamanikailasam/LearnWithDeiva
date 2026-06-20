@@ -1,4 +1,9 @@
 import { isLanguageLabel, normalizeLanguage } from './code-languages'
+import { parseInlineMarkdown, stripOrphanMarkdownDelimiters } from './parse-inline-markdown'
+import {
+  stripPerplexityCitations,
+  stripPerplexityInlineCitations,
+} from './strip-perplexity-citations'
 
 function isCodeLikePlainLine(line: string): boolean {
   const t = line.trim()
@@ -23,6 +28,10 @@ export type MarkdownPasteBlock =
   | { type: 'heading'; level: number; text: string }
   | { type: 'code'; language: string; code: string }
   | { type: 'table'; rows: string[][]; hasHeader: boolean }
+  | { type: 'horizontalRule' }
+  | { type: 'bulletList'; items: string[] }
+  | { type: 'orderedList'; items: string[] }
+  | { type: 'blockquote'; paragraphs: string[] }
 
 function parseMarkdownTableRow(line: string): string[] | null {
   const trimmed = line.trim()
@@ -32,7 +41,7 @@ function parseMarkdownTableRow(line: string): string[] | null {
   if (inner.startsWith('|')) inner = inner.slice(1)
   if (inner.endsWith('|')) inner = inner.slice(0, -1)
 
-  const cells = inner.split('|').map((cell) => cell.trim())
+  const cells = inner.split('|').map((cell) => normalizeMarkdownTableCell(cell))
   if (!cells.length || cells.every((cell) => cell === '')) return null
   return cells
 }
@@ -41,6 +50,45 @@ function isMarkdownTableSeparator(line: string): boolean {
   const trimmed = line.trim()
   if (!trimmed.includes('-')) return false
   return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed)
+}
+
+function isHorizontalRuleLine(line: string): boolean {
+  return /^(\*{3,}|-{3,}|_{3,})\s*$/.test(line.trim())
+}
+
+function parseBulletItem(line: string): string | null {
+  const match = line.match(/^[-*+]\s+(.+)$/)
+  return match ? stripPerplexityInlineCitations(match[1].trim()) : null
+}
+
+function parseOrderedItem(line: string): string | null {
+  const match = line.match(/^\d+\.\s+(.+)$/)
+  return match ? stripPerplexityInlineCitations(match[1].trim()) : null
+}
+
+function parseBlockquoteLine(line: string): string | null {
+  const match = line.match(/^>\s?(.*)$/)
+  if (!match) return null
+  return stripOrphanMarkdownDelimiters(stripPerplexityInlineCitations(match[1].trim()))
+}
+
+/** TipTap supports heading levels 1–4 in this app. */
+export function clampHeadingLevel(level: number): number {
+  return Math.min(Math.max(level, 1), 4)
+}
+
+/** Normalize cell text copied from Perplexity markdown tables. */
+export function normalizeMarkdownTableCell(cell: string): string {
+  return stripOrphanMarkdownDelimiters(
+    stripPerplexityInlineCitations(cell.replace(/\\\|/g, '|').trim()),
+  )
+}
+
+export function inlineMarkdownToPlainText(text: string): string {
+  return parseInlineMarkdown(text)
+    .map((seg) => seg.text)
+    .join('')
+    .trim()
 }
 
 function tryParseMarkdownTable(
@@ -109,17 +157,23 @@ export function markdownPasteHasTable(text: string): boolean {
  * Used when HTML paste loses code block structure.
  */
 export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
-  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const lines = stripPerplexityCitations(text).replace(/\r\n/g, '\n').split('\n')
   const blocks: MarkdownPasteBlock[] = []
   let i = 0
 
   const pushParagraph = (raw: string) => {
-    const t = raw.trim()
+    const t = stripOrphanMarkdownDelimiters(stripPerplexityInlineCitations(raw.trim()))
     if (t) blocks.push({ type: 'paragraph', text: t })
   }
 
   while (i < lines.length) {
     const line = lines[i]
+
+    if (isHorizontalRuleLine(line)) {
+      blocks.push({ type: 'horizontalRule' })
+      i++
+      continue
+    }
 
     const fence = line.match(/^```([\w+#.-]*)$/)
     if (fence) {
@@ -142,14 +196,72 @@ export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
       continue
     }
 
-    const heading = line.match(/^(#{1,3})\s+(.+)$/)
+    const heading = line.match(/^(#{1,6})\s+(.+)$/)
     if (heading) {
       blocks.push({
         type: 'heading',
-        level: heading[1].length,
-        text: heading[2].trim(),
+        level: clampHeadingLevel(heading[1].length),
+        text: stripOrphanMarkdownDelimiters(
+          stripPerplexityInlineCitations(heading[2].trim()),
+        ),
       })
       i++
+      continue
+    }
+
+    const blockquoteLine = parseBlockquoteLine(line)
+    if (blockquoteLine !== null) {
+      const paragraphs: string[] = []
+      const group: string[] = [blockquoteLine]
+      i++
+      while (i < lines.length) {
+        const nextLine = parseBlockquoteLine(lines[i])
+        if (nextLine !== null) {
+          group.push(nextLine)
+          i++
+          continue
+        }
+        if (lines[i].trim() === '') {
+          if (group.length) {
+            paragraphs.push(group.join(' '))
+            group.length = 0
+          }
+          i++
+          if (i < lines.length && parseBlockquoteLine(lines[i]) !== null) continue
+          break
+        }
+        break
+      }
+      if (group.length) paragraphs.push(group.join(' '))
+      if (paragraphs.length) blocks.push({ type: 'blockquote', paragraphs })
+      continue
+    }
+
+    const bulletItem = parseBulletItem(line)
+    if (bulletItem !== null) {
+      const items: string[] = [bulletItem]
+      i++
+      while (i < lines.length) {
+        const nextItem = parseBulletItem(lines[i])
+        if (nextItem === null) break
+        items.push(nextItem)
+        i++
+      }
+      blocks.push({ type: 'bulletList', items })
+      continue
+    }
+
+    const orderedItem = parseOrderedItem(line)
+    if (orderedItem !== null) {
+      const items: string[] = [orderedItem]
+      i++
+      while (i < lines.length) {
+        const nextItem = parseOrderedItem(lines[i])
+        if (nextItem === null) break
+        items.push(nextItem)
+        i++
+      }
+      blocks.push({ type: 'orderedList', items })
       continue
     }
 
@@ -205,8 +317,9 @@ export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
     const para: string[] = [line]
     i++
     while (i < lines.length && lines[i].trim() !== '' && !lines[i].startsWith('```')) {
-      const h = lines[i].match(/^(#{1,3})\s+/)
+      const h = lines[i].match(/^(#{1,6})\s+/)
       if (h) break
+      if (parseBlockquoteLine(lines[i]) !== null) break
       if (isLanguageLabel(lines[i].trim()) && i + 1 < lines.length) break
       para.push(lines[i])
       i++
@@ -218,12 +331,34 @@ export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
 }
 
 export function markdownPasteHasStructure(text: string): boolean {
-  if (/```/.test(text) || /^#{1,3}\s/m.test(text) || markdownPasteHasTable(text)) return true
+  if (/```/.test(text) || /^#{1,6}\s/m.test(text) || markdownPasteHasTable(text)) return true
+  if (/^>\s+/m.test(text)) return true
+  if (/\*\*[^*\n]+\*\*/.test(text) || /^(\*{3,}|-{3,}|_{3,})\s*$/m.test(text)) return true
+  if (/^[-*+]\s+/m.test(text) || /^\d+\.\s+/m.test(text)) return true
   const lines = text.replace(/\r\n/g, '\n').split('\n')
   for (let i = 0; i < lines.length - 1; i++) {
     if (!isLanguageLabel(lines[i].trim())) continue
     const next = lines.slice(i + 1).find((l) => l.trim() !== '')
     if (next && (next.startsWith('```') || isCodeLikePlainLine(next))) return true
   }
+  return false
+}
+
+/** Prefer plain-text markdown over HTML when AI copy leaves literal ** / tables in HTML. */
+export function shouldPreferMarkdownPaste(text: string, html: string): boolean {
+  if (!text.trim() || !markdownPasteHasStructure(text)) return false
+  if (!html.trim()) return true
+
+  if (/```/.test(text)) return true
+  if (markdownPasteHasTable(text)) return true
+
+  const mdBold = (text.match(/\*\*[^*\n]+\*\*/g) ?? []).length
+  const htmlBold = (html.match(/<(?:strong|b)\b/gi) ?? []).length
+  if (mdBold > 0 && htmlBold < Math.max(1, mdBold / 2)) return true
+
+  if (/^(\*{3,}|-{3,}|_{3,})\s*$/m.test(text) && !/<hr\b/i.test(html)) return true
+  if (/^>\s+/m.test(text) && !/<blockquote[\s>]/i.test(html)) return true
+  if (/^#{4,6}\s/m.test(text)) return true
+
   return false
 }

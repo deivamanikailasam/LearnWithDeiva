@@ -8,7 +8,7 @@ import { tiptapTableExtensions } from './tiptap-table-extensions'
 /** TipTap extensions for read-only viewers (syntax-highlighted code blocks). */
 export const viewTiptapExtensions = [
   StarterKit.configure({
-    heading: { levels: [1, 2, 3] },
+    heading: { levels: [1, 2, 3, 4] },
     link: false,
     codeBlock: false,
   }),

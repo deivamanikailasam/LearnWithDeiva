@@ -1,27 +1,51 @@
 import { Extension } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { Fragment, Slice } from '@tiptap/pm/model'
+import { Fragment, Slice, type Node as PmNode, type Schema } from '@tiptap/pm/model'
 import {
   normalizePastedHtml,
   pastedHtmlLooksBroken,
 } from '../../lib/normalize-pasted-html'
+import { parseInlineMarkdown } from '../../lib/parse-inline-markdown'
 import {
   markdownPasteHasStructure,
   markdownPasteHasTable,
   parseMarkdownPaste,
   parseTsvPaste,
   plainTextLooksLikeTsv,
+  shouldPreferMarkdownPaste,
 } from '../../lib/parse-markdown-paste'
 
 function clipboardHtmlHasTable(html: string): boolean {
   return /<table[\s>]/i.test(html)
 }
 
+function inlineTextToNodes(schema: Schema, text: string): PmNode[] {
+  const segments = parseInlineMarkdown(text)
+  if (!segments.length) return text ? [schema.text(text)] : []
+
+  return segments.flatMap((seg) => {
+    if (!seg.text) return []
+    const marks = seg.marks.flatMap((mark) => {
+      const markType = schema.marks[mark.type]
+      if (!markType) return []
+      return [markType.create(mark.attrs)]
+    })
+    return [schema.text(seg.text, marks)]
+  })
+}
+
+function paragraphFromText(schema: Schema, text: string): PmNode | null {
+  const paragraph = schema.nodes.paragraph
+  if (!paragraph) return null
+  const content = inlineTextToNodes(schema, text)
+  return paragraph.create({}, content.length ? content : undefined)
+}
+
 function buildTableNode(
-  schema: import('@tiptap/pm/model').Schema,
+  schema: Schema,
   rows: string[][],
   hasHeader: boolean,
-): import('@tiptap/pm/model').Node | null {
+): PmNode | null {
   const table = schema.nodes.table
   const tableRow = schema.nodes.tableRow
   const tableCell = schema.nodes.tableCell
@@ -31,13 +55,17 @@ function buildTableNode(
 
   const makeCell = (text: string, header: boolean) => {
     const type = header && tableHeader ? tableHeader : tableCell
-    const content = text
-      ? [paragraph.create({}, schema.text(text))]
-      : [paragraph.create()]
+    const inline = inlineTextToNodes(schema, text)
+    const content = inline.length ? [paragraph.create({}, inline)] : [paragraph.create()]
     return type.create({}, content)
   }
 
-  const rowNodes = rows.map((cells, rowIndex) => {
+  const normalizedRows = rows.map((row) => {
+    const maxCols = Math.max(...rows.map((r) => r.length))
+    return Array.from({ length: maxCols }, (_, i) => row[i] ?? '')
+  })
+
+  const rowNodes = normalizedRows.map((cells, rowIndex) => {
     const headerRow = hasHeader && rowIndex === 0
     return tableRow.create({}, cells.map((cell) => makeCell(cell, headerRow)))
   })
@@ -98,41 +126,74 @@ function insertImage(
   return true
 }
 
+function blockToNode(schema: Schema, block: ReturnType<typeof parseMarkdownPaste>[number]): PmNode | null {
+  const codeBlock = schema.nodes.codeBlock
+  const paragraph = schema.nodes.paragraph
+  const heading = schema.nodes.heading
+  const horizontalRule = schema.nodes.horizontalRule
+  const bulletList = schema.nodes.bulletList
+  const orderedList = schema.nodes.orderedList
+  const listItem = schema.nodes.listItem
+  const blockquote = schema.nodes.blockquote
+
+  switch (block.type) {
+    case 'code':
+      return codeBlock?.create(
+        { language: block.language },
+        block.code ? schema.text(block.code) : undefined,
+      ) ?? null
+    case 'heading':
+      if (!heading) return paragraphFromText(schema, block.text)
+      return heading.create({ level: block.level }, inlineTextToNodes(schema, block.text))
+    case 'paragraph':
+      return paragraphFromText(schema, block.text)
+    case 'table':
+      return buildTableNode(schema, block.rows, block.hasHeader)
+    case 'horizontalRule':
+      return horizontalRule?.create() ?? null
+    case 'bulletList': {
+      if (!bulletList || !listItem || !paragraph) return null
+      const items = block.items.map((item) => {
+        const content = paragraphFromText(schema, item)
+        return listItem.create({}, content ? [content] : [paragraph.create()])
+      })
+      return bulletList.create({}, items)
+    }
+    case 'orderedList': {
+      if (!orderedList || !listItem || !paragraph) return null
+      const items = block.items.map((item) => {
+        const content = paragraphFromText(schema, item)
+        return listItem.create({}, content ? [content] : [paragraph.create()])
+      })
+      return orderedList.create({}, items)
+    }
+    case 'blockquote': {
+      if (!blockquote || !paragraph) return null
+      const paragraphs = block.paragraphs
+        .map((text) => paragraphFromText(schema, text))
+        .filter((node): node is PmNode => node != null)
+      if (!paragraphs.length) return null
+      return blockquote.create({}, paragraphs)
+    }
+    default:
+      return null
+  }
+}
+
 function insertParsedMarkdown(
   view: import('@tiptap/pm/view').EditorView,
   text: string,
 ): boolean {
   const { schema } = view.state
-  const codeBlock = schema.nodes.codeBlock
   const paragraph = schema.nodes.paragraph
-  const heading = schema.nodes.heading
-  if (!codeBlock || !paragraph) return false
+  if (!paragraph) return false
 
   const blocks = parseMarkdownPaste(text)
   if (!blocks.length) return false
 
   const nodes = blocks
-    .map((block) => {
-      switch (block.type) {
-        case 'code':
-          return codeBlock.create(
-            { language: block.language },
-            block.code ? schema.text(block.code) : undefined,
-          )
-        case 'heading':
-          return heading?.create(
-            { level: block.level },
-            block.text ? schema.text(block.text) : undefined,
-          )
-        case 'paragraph':
-          return paragraph.create({}, block.text ? schema.text(block.text) : undefined)
-        case 'table':
-          return buildTableNode(schema, block.rows, block.hasHeader)
-        default:
-          return null
-      }
-    })
-    .filter((n): n is NonNullable<typeof n> => n != null)
+    .map((block) => blockToNode(schema, block))
+    .filter((n): n is PmNode => n != null)
 
   if (!nodes.length) return false
 
@@ -171,28 +232,36 @@ export const PasteEnhancement = Extension.create({
             const text = clipboard.getData('text/plain')
             if (!text) return false
 
-            if (html && clipboardHtmlHasTable(html)) {
-              return false
-            }
-
             if (plainTextLooksLikeTsv(text)) {
               event.preventDefault()
               return insertTableFromRows(view, parseTsvPaste(text), true)
             }
 
-            const normalized = html ? normalizePastedHtml(html) : ''
+            const normalizedHtml = html ? normalizePastedHtml(html) : ''
 
-            if (markdownPasteHasTable(text) && (!html || !clipboardHtmlHasTable(html))) {
+            // Markdown tables in plain text are more reliable than Perplexity HTML tables.
+            if (markdownPasteHasTable(text)) {
+              event.preventDefault()
+              return insertParsedMarkdown(view, text)
+            }
+
+            if (shouldPreferMarkdownPaste(text, html)) {
               event.preventDefault()
               return insertParsedMarkdown(view, text)
             }
 
             // Perplexity: plain-text markdown with fences is usually more faithful than HTML.
             if (markdownPasteHasStructure(text)) {
-              const htmlBroken = !html || pastedHtmlLooksBroken(normalized || html)
+              const htmlBroken = !html || pastedHtmlLooksBroken(normalizedHtml || html)
               if (htmlBroken || /```/.test(text)) {
+                event.preventDefault()
                 return insertParsedMarkdown(view, text)
               }
+            }
+
+            // Let TipTap handle well-formed HTML (including native HTML tables).
+            if (html && clipboardHtmlHasTable(html)) {
+              return false
             }
 
             return false
