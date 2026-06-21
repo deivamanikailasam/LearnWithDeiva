@@ -23,6 +23,7 @@ import { useProgress } from '../lib/progressContext'
 import { countRequiredCompleted } from '../lib/topic-status'
 import { useEditMode } from '../lib/editModeContext'
 import { formatDuration } from '../lib/duration'
+import { findTopicsWithSubSubtopicContentGaps } from '../lib/audit-sub-subtopic-content'
 
 /** The currently active subject view. Extras are keyed by their descriptor. */
 type View = 'roadmap' | 'topics' | (typeof SUBJECT_EXTRA_DESCRIPTORS)[number]['key']
@@ -31,6 +32,9 @@ export function SubjectPage() {
   const { subjectId = '', view } = useParams()
   const navigate = useNavigate()
   const [subjectRefresh, setSubjectRefresh] = useState(0)
+  const [contentGapTopicIds, setContentGapTopicIds] = useState<Set<string> | null>(
+    null,
+  )
   const { data: subject, loading } = useAsync(
     () => loadSubject(subjectId),
     [subjectId, subjectRefresh],
@@ -200,6 +204,30 @@ export function SubjectPage() {
               totalMinutes={subject.estimatedMinutes}
             />
           </div>
+          {import.meta.env.DEV ? (
+            <div className="mt-4 flex flex-wrap items-center gap-2 sm:mt-5">
+              <button
+                type="button"
+                onClick={() =>
+                  setContentGapTopicIds(
+                    findTopicsWithSubSubtopicContentGaps(subject.topics),
+                  )
+                }
+                className="btn border border-amber-300 bg-amber-50 text-sm text-amber-800 hover:bg-amber-100 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200 dark:hover:bg-amber-500/15"
+              >
+                Audit sub-subtopic content
+              </button>
+              {contentGapTopicIds !== null ? (
+                <span className="text-sm text-amber-800 dark:text-amber-200">
+                  {contentGapTopicIds.size === 0
+                    ? 'All topics have complete sub-subtopic content.'
+                    : `Highlighting ${contentGapTopicIds.size} topic${
+                        contentGapTopicIds.size === 1 ? '' : 's'
+                      } with missing content.`}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </Container>
       </section>
 
@@ -279,16 +307,22 @@ export function SubjectPage() {
             <EditableRoadmap
               subject={subject}
               roadmap={subject.roadmap}
+              contentGapTopicIds={contentGapTopicIds}
               onSaved={refreshSubject}
             />
           ) : (
-            <Roadmap subject={subject} roadmap={subject.roadmap} />
+            <Roadmap
+              subject={subject}
+              roadmap={subject.roadmap}
+              contentGapTopicIds={contentGapTopicIds}
+            />
           )
         ) : activeView === 'topics' ? (
           <TopicTree
             subjectId={subject.id}
             topics={subject.topics}
             editable={treeEditable}
+            contentGapTopicIds={contentGapTopicIds}
             onTreeChange={refreshSubject}
           />
         ) : activeExtra ? (

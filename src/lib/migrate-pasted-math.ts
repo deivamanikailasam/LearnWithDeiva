@@ -2,12 +2,20 @@ import type { Editor } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import { mathMigrationRegex } from '@tiptap/extension-mathematics'
 import { inlineTextToPmNodes } from './inline-math-to-nodes'
-import { normalizeLatexForKatex, looksLikeLatexFormulaLine } from './normalize-latex-for-katex'
-import { shouldSkipMathMigrationAtPos } from './paste-math'
+import {
+  latexHasRawInlineDelimiters,
+  latexIsProseAndMathBlob,
+  looksLikeLatexFormulaLine,
+  normalizeLatexForKatex,
+} from './normalize-latex-for-katex'
+import { INLINE_LATEX_PAREN_INNER, shouldSkipMathMigrationAtPos, textHasInlineMathDelimiters } from './paste-math'
 import { repairMathLatexInEditor } from './repair-math-latex'
 
 const blockMathRegex = /\$\$([\s\S]+?)\$\$/g
-const latexParenRegex = /\\\(([^\\\n]+?)\\\)/g
+const latexParenRegex = new RegExp(
+  String.raw`\\\(((${INLINE_LATEX_PAREN_INNER}))\\\)`,
+  'g',
+)
 const wholeBracketBlockRegex = /^\s*\\\[\s*([\s\S]+?)\s*\\\]\s*$/
 
 function replaceMathInTextNodes(
@@ -281,6 +289,94 @@ function migrateSingleDollarMath(
   return tr
 }
 
+/** Plain text for math migration — includes atom `inlineMath` attrs (omitted from `textContent`). */
+function textblockTextForMathMigration(node: PmNode): string {
+  let text = ''
+  node.forEach((child) => {
+    if (child.isText) {
+      text += child.text ?? ''
+      return
+    }
+    if (child.type.name === 'inlineMath') {
+      const latex = typeof child.attrs.latex === 'string' ? child.attrs.latex : ''
+      if (latex) text += latex
+    }
+  })
+  return text
+}
+
+/**
+ * Rebuild textblock inline content when delimiters span multiple text nodes (HTML paste)
+ * or when per-node regex migration missed `\(...\)` / `$...$` with LaTeX commands.
+ */
+function migrateInlineMathInTextblocks(
+  editor: Editor,
+  tr: import('@tiptap/pm/state').Transaction,
+): import('@tiptap/pm/state').Transaction {
+  const inlineMath = editor.schema.nodes.inlineMath
+  if (!inlineMath) return tr
+
+  const jobs: { from: number; to: number; nodes: PmNode[] }[] = []
+
+  tr.doc.descendants((node, pos) => {
+    if (node.type.name === 'codeBlock') return false
+    if (!node.isTextblock || node.childCount === 0) return
+
+    let textOnly = ''
+    const brokenMath: { childPos: number; latex: string }[] = []
+    let hasValidMathNode = false
+
+    node.forEach((child, offset) => {
+      if (child.isText) {
+        textOnly += child.text ?? ''
+        return
+      }
+      if (child.type.name !== 'inlineMath') return
+
+      const raw = typeof child.attrs.latex === 'string' ? child.attrs.latex : ''
+      if (!raw) return
+      if (latexHasRawInlineDelimiters(raw)) {
+        brokenMath.push({ childPos: pos + 1 + offset, latex: raw })
+      } else {
+        hasValidMathNode = true
+      }
+    })
+
+    if (hasValidMathNode) return
+
+    const needsRebuild =
+      textHasInlineMathDelimiters(textOnly) ||
+      brokenMath.some((entry) => latexIsProseAndMathBlob(entry.latex))
+
+    if (needsRebuild) {
+      const text = textblockTextForMathMigration(node)
+      if (!textHasInlineMathDelimiters(text) && brokenMath.length === 0) return
+
+      const pmNodes = inlineTextToPmNodes(editor.schema, text)
+      if (!pmNodes.some((n) => n.type.name === 'inlineMath')) return
+
+      jobs.push({
+        from: pos + 1,
+        to: pos + node.nodeSize - 1,
+        nodes: pmNodes,
+      })
+      return
+    }
+
+    for (const entry of brokenMath) {
+      const fixed = normalizeLatexForKatex(entry.latex)
+      if (!fixed || fixed === entry.latex) continue
+      tr.setNodeMarkup(tr.mapping.map(entry.childPos), inlineMath, { latex: fixed })
+    }
+  })
+
+  for (const job of jobs.reverse()) {
+    tr.replaceWith(tr.mapping.map(job.from), tr.mapping.map(job.to), job.nodes)
+  }
+
+  return tr
+}
+
 /** Convert pasted LaTeX delimiters in prose into math nodes. Never touches code blocks. */
 export function migratePastedMath(editor: Editor): void {
   const { inlineMath, blockMath } = editor.schema.nodes
@@ -299,6 +395,7 @@ export function migratePastedMath(editor: Editor): void {
   }
 
   if (inlineMath) {
+    tr = migrateInlineMathInTextblocks(editor, tr)
     tr = migrateSingleDollarMath(editor, tr)
     tr = replaceMathInTextNodes(editor, tr, latexParenRegex, (latex) =>
       inlineMath.create({ latex }),

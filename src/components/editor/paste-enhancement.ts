@@ -19,6 +19,7 @@ import {
   plainTextLooksLikeTsv,
   shouldPreferMarkdownPaste,
 } from '../../lib/parse-markdown-paste'
+import { fixPastedSliceSpacing } from '../../lib/reconcile-pasted-spacing'
 import { migratePastedMath } from '../../lib/migrate-pasted-math'
 import { pasteTextHasMath } from '../../lib/paste-math'
 
@@ -216,22 +217,41 @@ export const PasteEnhancement = Extension.create({
       }, 0)
     }
 
+    let pendingPlainText: string | null = null
+
     return [
       new Plugin({
         key: new PluginKey('pasteEnhancement'),
         props: {
           transformPastedHTML(html) {
-            return normalizePastedHtml(preprocessKatexHtml(html))
+            return normalizePastedHtml(
+              preprocessKatexHtml(html),
+              pendingPlainText ?? undefined,
+            )
+          },
+
+          transformPasted(slice) {
+            if (!pendingPlainText) {
+              return fixPastedSliceSpacing(slice, undefined, editor.schema)
+            }
+            const fixed = fixPastedSliceSpacing(slice, pendingPlainText, editor.schema)
+            pendingPlainText = null
+            return fixed
           },
 
           handlePaste(view, event) {
             const clipboard = event.clipboardData
             if (!clipboard) return false
 
+            const html = clipboard.getData('text/html')
+            const text = clipboard.getData('text/plain')
+            pendingPlainText = text || null
+
             const imageItems = [...clipboard.items].filter((item) =>
               item.type.startsWith('image/'),
             )
             if (imageItems.length > 0) {
+              pendingPlainText = null
               event.preventDefault()
               void readClipboardImage(clipboard).then((image) => {
                 if (image) insertImage(view, image.src, image.alt)
@@ -239,12 +259,14 @@ export const PasteEnhancement = Extension.create({
               return true
             }
 
-            const html = clipboard.getData('text/html')
-            const text = clipboard.getData('text/plain')
-            if (!text) return false
+            if (!text) {
+              pendingPlainText = null
+              return false
+            }
 
             // Plain-text LaTeX from Perplexity is more faithful than rendered KaTeX HTML.
             if (pasteTextHasMath(text)) {
+              pendingPlainText = null
               event.preventDefault()
               const ok = insertParsedMarkdown(view, text)
               if (ok) {
@@ -254,19 +276,22 @@ export const PasteEnhancement = Extension.create({
             }
 
             if (plainTextLooksLikeTsv(text) && !pasteTextHasMath(text)) {
+              pendingPlainText = null
               event.preventDefault()
               return insertTableFromRows(view, parseTsvPaste(text), true)
             }
 
-            const normalizedHtml = html ? normalizePastedHtml(html) : ''
+            const normalizedHtml = html ? normalizePastedHtml(html, text) : ''
 
             // Markdown tables in plain text are more reliable than Perplexity HTML tables.
             if (markdownPasteHasTable(text) && !pasteTextHasMath(text)) {
+              pendingPlainText = null
               event.preventDefault()
               return insertParsedMarkdown(view, text)
             }
 
             if (shouldPreferMarkdownPaste(text, html) && !pasteTextHasMath(text)) {
+              pendingPlainText = null
               event.preventDefault()
               return insertParsedMarkdown(view, text)
             }
@@ -275,6 +300,7 @@ export const PasteEnhancement = Extension.create({
             if (markdownPasteHasStructure(text)) {
               const htmlBroken = !html || pastedHtmlLooksBroken(normalizedHtml || html)
               if (htmlBroken || /```/.test(text)) {
+                pendingPlainText = null
                 event.preventDefault()
                 return insertParsedMarkdown(view, text)
               }

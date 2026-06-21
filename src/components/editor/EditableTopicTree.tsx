@@ -25,6 +25,10 @@ import { addLabelForDepth } from '../../lib/content-validation'
 import { formatDuration, subtreeMinutes } from '../../lib/duration'
 import { isEffectivelyOptional } from '../../lib/topic-status'
 import { topicLevelStyles } from '../../lib/topic-level-styles'
+import {
+  CONTENT_GAP_CARD_CLASS,
+  isContentGapHighlighted,
+} from '../../lib/audit-sub-subtopic-content'
 import { paths } from '../../lib/paths'
 import { useProgress } from '../../lib/progressContext'
 import { ConfirmDialog } from '../ConfirmDialog'
@@ -44,6 +48,7 @@ interface SortableTopicListProps {
   defaultExpanded?: boolean
   depth: number
   onTreeChange?: () => void
+  contentGapTopicIds?: ReadonlySet<string> | null
 }
 
 function topicsOrderKey(topics: Topic[]): string {
@@ -59,6 +64,7 @@ function SortableTopicRow({
   defaultExpanded,
   onTreeChange,
   onDeleteRequest,
+  contentGapTopicIds,
 }: {
   subjectId: string
   topic: Topic
@@ -68,6 +74,7 @@ function SortableTopicRow({
   defaultExpanded: boolean
   onTreeChange?: () => void
   onDeleteRequest: (topic: Topic) => void
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   const { isComplete, isBookmarked } = useProgress()
   const hasChildren = topic.subtopics.length > 0
@@ -77,6 +84,7 @@ function SortableTopicRow({
   const done = isComplete(subjectId, topic.id)
   const bookmarked = isBookmarked(subjectId, topic.id)
   const sections = sectionCount(topic)
+  const contentGap = depth === 0 && isContentGapHighlighted(contentGapTopicIds, topic.id)
 
   const {
     attributes,
@@ -134,7 +142,9 @@ function SortableTopicRow({
             'flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border px-2.5 py-2 transition hover:shadow-sm sm:px-3 sm:py-2.5',
             isActive
               ? 'border-brand-300 bg-brand-50 dark:border-brand-500/40 dark:bg-brand-500/10'
-              : done
+              : contentGap
+                ? CONTENT_GAP_CARD_CLASS
+                : done
                 ? 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-500/30 dark:bg-emerald-500/5'
                 : 'border-slate-200 bg-white hover:border-brand-200 dark:border-slate-800 dark:bg-slate-900',
           )}
@@ -205,6 +215,7 @@ function SortableTopicRow({
             currentTopicId={currentTopicId}
             depth={depth + 1}
             onTreeChange={onTreeChange}
+            contentGapTopicIds={contentGapTopicIds}
           />
         </div>
       )}
@@ -222,6 +233,7 @@ function SortableTopicList({
   defaultExpanded = false,
   depth,
   onTreeChange,
+  contentGapTopicIds,
 }: SortableTopicListProps) {
   const orderKey = topicsOrderKey(topics)
   const [optimistic, setOptimistic] = useState<{ key: string; items: Topic[] } | null>(
@@ -299,6 +311,7 @@ function SortableTopicList({
                 defaultExpanded={defaultExpanded}
                 onTreeChange={onTreeChange}
                 onDeleteRequest={setDeleteTarget}
+                contentGapTopicIds={contentGapTopicIds}
               />
             ))}
           </ul>
@@ -363,6 +376,7 @@ export function EditableTopicTree({
   onTreeChange,
   parentTopicId,
   parentDepth,
+  contentGapTopicIds,
 }: {
   subjectId: string
   topics: Topic[]
@@ -371,6 +385,7 @@ export function EditableTopicTree({
   onTreeChange?: () => void
   parentTopicId?: string
   parentDepth?: number
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   return (
     <SortableTopicList
@@ -382,6 +397,7 @@ export function EditableTopicTree({
       defaultExpanded={defaultExpanded}
       depth={0}
       onTreeChange={onTreeChange}
+      contentGapTopicIds={contentGapTopicIds}
     />
   )
 }

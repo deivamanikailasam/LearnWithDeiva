@@ -8,6 +8,10 @@ import { useProgress } from '../lib/progressContext'
 import { formatDuration, subtreeMinutes } from '../lib/duration'
 import { isEffectivelyOptional } from '../lib/topic-status'
 import { EditableTopicTree } from './editor/EditableTopicTree'
+import {
+  CONTENT_GAP_CARD_CLASS,
+  isContentGapHighlighted,
+} from '../lib/audit-sub-subtopic-content'
 
 function sectionCount(topic: Topic): number {
   return topic.contentSectionCount
@@ -33,6 +37,7 @@ function TopicNode({
   depth,
   parentOptional = false,
   defaultExpanded,
+  contentGapTopicIds,
 }: {
   subjectId: string
   topic: Topic
@@ -40,6 +45,7 @@ function TopicNode({
   depth: number
   parentOptional?: boolean
   defaultExpanded: boolean
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   const { isComplete, isBookmarked } = useProgress()
   const hasChildren = topic.subtopics.length > 0
@@ -49,6 +55,7 @@ function TopicNode({
   const done = isComplete(subjectId, topic.id)
   const bookmarked = isBookmarked(subjectId, topic.id)
   const sections = sectionCount(topic)
+  const contentGap = depth === 0 && isContentGapHighlighted(contentGapTopicIds, topic.id)
 
   return (
     <li>
@@ -80,7 +87,9 @@ function TopicNode({
             'flex min-w-0 flex-1 items-center justify-between gap-2 rounded-xl border p-3 transition hover:shadow-md sm:gap-3 sm:p-3.5',
             isActive
               ? 'border-brand-300 bg-brand-50 dark:border-brand-500/40 dark:bg-brand-500/10'
-              : done
+              : contentGap
+                ? CONTENT_GAP_CARD_CLASS
+                : done
                 ? 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-500/30 dark:bg-emerald-500/5'
                 : 'border-slate-200 bg-white hover:border-brand-200 dark:border-slate-800 dark:bg-slate-900',
           )}
@@ -142,6 +151,7 @@ function TopicNode({
               depth={depth + 1}
               parentOptional={effectivelyOptional}
               defaultExpanded={false}
+              contentGapTopicIds={contentGapTopicIds}
             />
           ))}
         </ul>
@@ -159,6 +169,7 @@ export function TopicTree({
   onTreeChange,
   parentTopicId,
   parentDepth,
+  contentGapTopicIds,
 }: {
   subjectId: string
   topics: Topic[]
@@ -170,6 +181,7 @@ export function TopicTree({
   /** When listing a topic's children, pass the host topic id and its depth. */
   parentTopicId?: string
   parentDepth?: number
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   if (editable) {
     return (
@@ -181,6 +193,7 @@ export function TopicTree({
         onTreeChange={onTreeChange}
         parentTopicId={parentTopicId}
         parentDepth={parentDepth}
+        contentGapTopicIds={contentGapTopicIds}
       />
     )
   }
@@ -193,6 +206,7 @@ export function TopicTree({
       currentTopicId={currentTopicId}
       depth={0}
       defaultExpanded={defaultExpanded}
+      contentGapTopicIds={contentGapTopicIds}
     />
   )
 

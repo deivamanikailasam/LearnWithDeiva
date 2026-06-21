@@ -11,7 +11,7 @@ import { TopicTree } from '../components/TopicTree'
 import {
   collectSubtreeIds,
   findTopic,
-  flattenTopics,
+  flattenTopicsForNavigation,
   getAncestors,
   invalidateSubjectCache,
   invalidateSubjectIndexCache,
@@ -186,7 +186,7 @@ export function TopicPage() {
   const completedTs = isComplete(subject.id, topic.id)
     ? completedAt(subject.id, topic.id)
     : undefined
-  const flat = flattenTopics(subject)
+  const flat = flattenTopicsForNavigation(subject)
   const idx = flat.findIndex((t) => t.id === topic.id)
   const prev = idx > 0 ? flat[idx - 1] : undefined
   const next = idx < flat.length - 1 ? flat[idx + 1] : undefined
@@ -268,6 +268,7 @@ export function TopicPage() {
       <header className="mt-4 sm:mt-5">
         <EditableTopicHeader
           subjectId={subject.id}
+          subjectTitle={subject.title}
           topic={topic}
           topicAncestors={getAncestors(subject, topic.id)}
           isSubSubtopic={isSubSubtopic}

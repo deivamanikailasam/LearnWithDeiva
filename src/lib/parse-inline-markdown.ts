@@ -16,6 +16,27 @@ function marksEqual(a: InlineMark[], b: InlineMark[]): boolean {
   return a.length === b.length && a.every((m, i) => m.type === b[i]?.type)
 }
 
+function ensureSpaceBeforeFormattedRun(
+  input: string,
+  delimiterIndex: number,
+  innerStart: number,
+  segments: InlineSegment[],
+  marks: InlineMark[],
+) {
+  const prevChar = input[delimiterIndex - 1]
+  const nextChar = input[innerStart]
+  if (!prevChar || !nextChar || prevChar === ' ' || /\s/.test(prevChar)) return
+  if (!/\w/.test(prevChar) || !/\w/.test(nextChar)) return
+
+  const last = segments[segments.length - 1]
+  if (last && marksEqual(last.marks, marks) && !last.text.endsWith(' ')) {
+    last.text += ' '
+    return
+  }
+
+  pushSegment(segments, ' ', marks)
+}
+
 function pushSegment(segments: InlineSegment[], text: string, marks: InlineMark[]) {
   if (!text) return
   const cleaned = marks.map(({ type, attrs }) =>
@@ -86,6 +107,7 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
     if (input[i] === '`') {
       const end = input.indexOf('`', i + 1)
       if (end > i + 1) {
+        ensureSpaceBeforeFormattedRun(input, i, i + 1, segments, activeMarks())
         pushSegment(segments, input.slice(i + 1, end), [...activeMarks(), { type: 'code' }])
         i = end + 1
         continue
@@ -109,7 +131,10 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
     if (double === '**' || double === '__') {
       const idx = stack.findIndex((entry) => entry.token === double)
       if (idx >= 0) stack.splice(idx, 1)
-      else stack.push({ token: double, marks: [{ type: 'bold' }] })
+      else {
+        ensureSpaceBeforeFormattedRun(input, i, i + 2, segments, activeMarks())
+        stack.push({ token: double, marks: [{ type: 'bold' }] })
+      }
       i += 2
       continue
     }
@@ -146,6 +171,27 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
 
     pushSegment(segments, ch, activeMarks())
     i += 1
+  }
+
+  return ensureInlineSegmentSpacing(segments)
+}
+
+function markKey(marks: InlineMark[]): string {
+  return marks
+    .map((m) => (m.type === 'link' ? `link:${m.attrs?.href ?? ''}` : m.type))
+    .join('|')
+}
+
+/** Insert missing spaces between adjacent inline runs with different marks. */
+export function ensureInlineSegmentSpacing(segments: InlineSegment[]): InlineSegment[] {
+  if (segments.length < 2) return segments
+
+  for (let i = 1; i < segments.length; i++) {
+    const prev = segments[i - 1]!
+    const curr = segments[i]!
+    if (markKey(prev.marks) === markKey(curr.marks)) continue
+    if (!/\w$/.test(prev.text) || !/^\w/.test(curr.text)) continue
+    prev.text += ' '
   }
 
   return segments

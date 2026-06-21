@@ -33,9 +33,11 @@ const headerActionDisabledClass =
   'shrink-0 cursor-not-allowed rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-300 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-600'
 
 function TopicPathCopyButton({
+  subjectTitle,
   ancestors,
   topic,
 }: {
+  subjectTitle: string
   ancestors: Topic[]
   topic: Topic
 }) {
@@ -44,7 +46,9 @@ function TopicPathCopyButton({
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(formatSubSubtopicPath(ancestors, topic))
+      await navigator.clipboard.writeText(
+        formatSubSubtopicPath(subjectTitle, ancestors, topic),
+      )
       setCopied(true)
       showToast('Topic path copied', 'success')
       window.setTimeout(() => setCopied(false), 1500)
@@ -67,12 +71,14 @@ function TopicPathCopyButton({
 
 function SubSubtopicHeaderToolbar({
   subjectId,
+  subjectTitle,
   ancestors,
   topic,
   prevTopic,
   nextTopic,
 }: {
   subjectId: string
+  subjectTitle: string
   ancestors: Topic[]
   topic: Topic
   prevTopic?: Pick<Topic, 'id' | 'title'>
@@ -93,7 +99,11 @@ function SubSubtopicHeaderToolbar({
           ← Previous
         </span>
       )}
-      <TopicPathCopyButton ancestors={ancestors} topic={topic} />
+      <TopicPathCopyButton
+        subjectTitle={subjectTitle}
+        ancestors={ancestors}
+        topic={topic}
+      />
       {nextTopic ? (
         <Link
           to={paths.topic(subjectId, nextTopic.id)}
@@ -113,6 +123,7 @@ function SubSubtopicHeaderToolbar({
 
 interface EditableTopicHeaderProps {
   subjectId: string
+  subjectTitle: string
   topic: Topic
   isSubSubtopic: boolean
   editable: boolean
@@ -127,6 +138,7 @@ interface EditableTopicHeaderProps {
 
 function ViewHeader({
   subjectId,
+  subjectTitle,
   topic,
   topicAncestors = [],
   isSubSubtopic,
@@ -136,6 +148,7 @@ function ViewHeader({
   completedLine,
 }: {
   subjectId: string
+  subjectTitle: string
   topic: Topic
   topicAncestors?: Topic[]
   isSubSubtopic: boolean
@@ -153,6 +166,7 @@ function ViewHeader({
         {showToolbar && (
           <SubSubtopicHeaderToolbar
             subjectId={subjectId}
+            subjectTitle={subjectTitle}
             ancestors={topicAncestors}
             topic={topic}
             prevTopic={prevTopic}
@@ -194,6 +208,7 @@ function ViewHeader({
 
 export function EditableTopicHeader({
   subjectId,
+  subjectTitle,
   topic,
   isSubSubtopic,
   editable,
@@ -317,6 +332,7 @@ export function EditableTopicHeader({
     return (
       <ViewHeader
         subjectId={subjectId}
+        subjectTitle={subjectTitle}
         topic={topic}
         topicAncestors={topicAncestors}
         isSubSubtopic={isSubSubtopic}
@@ -339,6 +355,7 @@ export function EditableTopicHeader({
             {isSubSubtopic && topicAncestors.length >= 2 && (
               <SubSubtopicHeaderToolbar
                 subjectId={subjectId}
+                subjectTitle={subjectTitle}
                 ancestors={topicAncestors}
                 topic={topic}
                 prevTopic={prevTopic}

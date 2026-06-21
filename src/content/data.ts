@@ -232,6 +232,46 @@ export function flattenTopics(subject: Subject): Topic[] {
   return indexSubject(subject).flat
 }
 
+function walkTopicTree(topics: Topic[], flat: Topic[]) {
+  for (const t of topics) {
+    flat.push(t)
+    if (t.subtopics.length) walkTopicTree(t.subtopics, flat)
+  }
+}
+
+/**
+ * Flatten topics for prev/next navigation. When a subject has a roadmap, root
+ * topics follow stage and node order from the roadmap; topics not linked in the
+ * roadmap are appended in their tree order.
+ */
+export function flattenTopicsForNavigation(subject: Subject): Topic[] {
+  const roadmap = subject.roadmap
+  if (!roadmap?.stages.length) return flattenTopics(subject)
+
+  const orderedRoots: Topic[] = []
+  const seenRootIds = new Set<string>()
+
+  for (const stage of roadmap.stages) {
+    for (const node of stage.nodes) {
+      if (!node.topicId) continue
+      const topic = findTopic(subject, node.topicId)
+      if (!topic) continue
+      const root = getAncestors(subject, topic.id)[0] ?? topic
+      if (seenRootIds.has(root.id)) continue
+      seenRootIds.add(root.id)
+      orderedRoots.push(root)
+    }
+  }
+
+  for (const root of subject.topics) {
+    if (!seenRootIds.has(root.id)) orderedRoots.push(root)
+  }
+
+  const flat: Topic[] = []
+  walkTopicTree(orderedRoots, flat)
+  return flat
+}
+
 /** Resolve a topic within an already-loaded subject. */
 export function findTopic(subject: Subject, topicId: string): Topic | undefined {
   return indexSubject(subject).byId.get(topicId)

@@ -1,3 +1,45 @@
+/** `\(...\)` inner — allows `\infty`, `\rightarrow`, etc. (mirrors paste-math.ts). */
+const INLINE_MATH_PAREN_INNER = '(?:[^\\\\]|\\\\.)+?'
+
+const WRAPPED_PAREN_MATH_RE = new RegExp(
+  String.raw`^\\\(${INLINE_MATH_PAREN_INNER}\\\)$`,
+)
+const WRAPPED_DOLLAR_MATH_RE = /^(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)$/
+
+/** KaTeX math nodes must not keep prose delimiters like `\(` or `$...$`. */
+export function latexHasRawInlineDelimiters(latex: string): boolean {
+  const t = latex.trim()
+  if (!t) return false
+  if (/\\\(|\\\)/.test(t)) return true
+  return /(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$)/.test(t)
+}
+
+/**
+ * Strip `\(...\)` / `$...$` wrappers when the entire string is math delimiters only.
+ * Does not extract math from prose blobs — structural migration handles those.
+ */
+export function stripInlineMathDelimiters(latex: string): string {
+  let out = latex.trim()
+  if (!out) return out
+
+  if (WRAPPED_PAREN_MATH_RE.test(out)) {
+    return out.slice(2, -2).trim()
+  }
+
+  const wrappedDollar = out.match(WRAPPED_DOLLAR_MATH_RE)
+  if (wrappedDollar) return wrappedDollar[1].trim()
+
+  return out
+}
+
+/** Math node `latex` wrongly includes prose outside delimiters (needs paragraph rebuild). */
+export function latexIsProseAndMathBlob(latex: string): boolean {
+  const t = latex.trim()
+  if (!latexHasRawInlineDelimiters(t)) return false
+  if (WRAPPED_PAREN_MATH_RE.test(t) || WRAPPED_DOLLAR_MATH_RE.test(t)) return false
+  return true
+}
+
 /** Commands whose `{...}` argument is text mode — underscores must be escaped for KaTeX. */
 const TEXT_BRACE_COMMANDS = [
   'text',
@@ -51,7 +93,7 @@ function collapseOverEscapedCommands(latex: string): string {
  * Fixes common patterns that render in AI UIs but break KaTeX.
  */
 export function normalizeLatexForKatex(latex: string): string {
-  let out = latex.trim()
+  let out = stripInlineMathDelimiters(latex.trim())
   if (!out) return out
 
   out = collapseOverEscapedCommands(out)

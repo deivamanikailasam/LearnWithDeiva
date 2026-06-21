@@ -37,6 +37,10 @@ import { useToast } from '../../lib/toastContext'
 import { useDirtyEditor } from '../../lib/useDirtyEditor'
 import { paths } from '../../lib/paths'
 import { compactInputClass, fieldErrorClass, ghostInputClass, inputClass, labelClass } from '../../lib/form-styles'
+import {
+  CONTENT_GAP_CARD_CLASS,
+  isContentGapHighlighted,
+} from '../../lib/audit-sub-subtopic-content'
 import { ConfirmDialog } from '../ConfirmDialog'
 
 function topicLabel(subject: Subject, topic: Topic): string {
@@ -149,12 +153,14 @@ function SortableNodeCard({
   stages,
   onChange,
   onDelete,
+  contentGapTopicIds,
 }: {
   node: RoadmapNode
   subject: Subject
   stages: RoadmapStage[]
   onChange: (patch: Partial<RoadmapNode>) => void
   onDelete: () => void
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   const navigate = useNavigate()
   const { showToast } = useToast()
@@ -164,6 +170,7 @@ function SortableNodeCard({
 
   const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
   const subCount = linked?.subtopics.length ?? 0
+  const contentGap = isContentGapHighlighted(contentGapTopicIds, node.topicId)
 
   const handleCreateAndOpen = async () => {
     const title = node.title.trim()
@@ -213,7 +220,10 @@ function SortableNodeCard({
         transition,
       }}
       className={clsx(
-        'rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900',
+        'rounded-xl border p-3 dark:border-slate-800 dark:bg-slate-900',
+        contentGap
+          ? CONTENT_GAP_CARD_CLASS
+          : 'border-slate-200 bg-white',
         isDragging && 'z-10 shadow-lg',
       )}
     >
@@ -350,6 +360,7 @@ function SortableStageSection({
   onNodeChange,
   onNodeDelete,
   onNodeReorder,
+  contentGapTopicIds,
 }: {
   stage: RoadmapStage
   index: number
@@ -361,6 +372,7 @@ function SortableStageSection({
   onNodeChange: (nodeId: string, patch: Partial<RoadmapNode>) => void
   onNodeDelete: (nodeId: string) => void
   onNodeReorder: (orderedIds: string[]) => void
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -458,6 +470,7 @@ function SortableStageSection({
                     stages={stages}
                     onChange={(patch) => onNodeChange(node.id, patch)}
                     onDelete={() => onNodeDelete(node.id)}
+                    contentGapTopicIds={contentGapTopicIds}
                   />
                 ))}
               </div>
@@ -481,10 +494,12 @@ function SortableStageSection({
 export function EditableRoadmap({
   subject,
   roadmap,
+  contentGapTopicIds,
   onSaved,
 }: {
   subject: Subject
   roadmap: Roadmap
+  contentGapTopicIds?: ReadonlySet<string> | null
   onSaved?: () => void
 }) {
   const { registerOnLeaveEditMode } = useEditMode()
@@ -755,6 +770,7 @@ export function EditableRoadmap({
                         }),
                       }))
                     }
+                    contentGapTopicIds={contentGapTopicIds}
                   />,
                   <InsertStageButton
                     key={`insert-after-${stage.id}`}

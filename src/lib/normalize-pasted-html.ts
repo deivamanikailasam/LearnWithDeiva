@@ -1,4 +1,5 @@
 import { isLanguageLabel, normalizeLanguage } from './code-languages'
+import { reconcileHtmlSpacingFromPlain } from './reconcile-pasted-spacing'
 import { stripCitationsFromHtml } from './strip-perplexity-citations'
 
 function languageFromCodeEl(code: Element | null): string | null {
@@ -21,6 +22,149 @@ function isCopyUi(el: Element): boolean {
   if (text === 'copy' || text === 'copied') return true
   if (el.matches('button, [role="button"], svg, [aria-label*="copy" i]')) return true
   return false
+}
+
+const SKIPPED_BOUNDARY_TAGS = new Set([
+  'PRE',
+  'CODE',
+  'TABLE',
+  'THEAD',
+  'TBODY',
+  'TR',
+  'UL',
+  'OL',
+  'LI',
+  'BLOCKQUOTE',
+  'HR',
+  'IMG',
+  'BR',
+])
+
+function isInlineCodeElement(el: Element): boolean {
+  return el.tagName === 'CODE' && !el.closest('pre')
+}
+
+function isBoldLike(el: Element): boolean {
+  if (el.matches('strong, b')) return true
+  const cls = el.getAttribute('class') ?? ''
+  if (/\bfont-(?:bold|semibold|medium)\b/.test(cls)) return true
+  const style = el.getAttribute('style') ?? ''
+  return /font-weight\s*:\s*(?:bold|[5-9]00)/i.test(style)
+}
+
+function isItalicLike(el: Element): boolean {
+  if (el.matches('em, i')) return true
+  const cls = el.getAttribute('class') ?? ''
+  if (/\bitalic\b/.test(cls)) return true
+  const style = el.getAttribute('style') ?? ''
+  return /font-style\s*:\s*italic/i.test(style)
+}
+
+type InlineFormat = { bold: boolean; italic: boolean; code: boolean }
+
+function trailingChar(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent ?? ''
+    for (let i = text.length - 1; i >= 0; i--) {
+      const ch = text[i]!
+      if (!/\s/.test(ch)) return ch
+    }
+    return ''
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return ''
+  const el = node as Element
+  for (let i = el.childNodes.length - 1; i >= 0; i--) {
+    const ch = trailingChar(el.childNodes[i]!)
+    if (ch) return ch
+  }
+  return ''
+}
+
+function leadingChar(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent ?? ''
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!
+      if (!/\s/.test(ch)) return ch
+    }
+    return ''
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return ''
+  const el = node as Element
+  for (const child of el.childNodes) {
+    const ch = leadingChar(child)
+    if (ch) return ch
+  }
+  return ''
+}
+
+function hasVisibleText(node: Node): boolean {
+  if (node.nodeType === Node.TEXT_NODE) return Boolean((node.textContent ?? '').trim())
+  if (node.nodeType !== Node.ELEMENT_NODE) return false
+  const el = node as Element
+  if (el.matches('br, img')) return false
+  return [...el.childNodes].some((child) => hasVisibleText(child))
+}
+
+function inlineFormatOf(node: Node): InlineFormat | null {
+  if (!hasVisibleText(node)) return null
+  if (node.nodeType === Node.TEXT_NODE) {
+    const parent = node.parentElement
+    if (parent?.closest('pre')) return null
+    return {
+      bold: false,
+      italic: false,
+      code: Boolean(parent?.closest('code')),
+    }
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return null
+  const el = node as Element
+  if (el.closest('pre')) return null
+  return {
+    bold: isBoldLike(el),
+    italic: isItalicLike(el),
+    code: isInlineCodeElement(el),
+  }
+}
+
+function shouldInsertBoundarySpace(left: Node, right: Node): boolean {
+  const leftEnd = trailingChar(left)
+  const rightStart = leadingChar(right)
+  if (!leftEnd || !rightStart) return false
+  if (!/\w/.test(leftEnd) || !/\w/.test(rightStart)) return false
+
+  const leftFormat = inlineFormatOf(left)
+  const rightFormat = inlineFormatOf(right)
+  if (!leftFormat || !rightFormat) return false
+
+  return (
+    leftFormat.bold !== rightFormat.bold ||
+    leftFormat.italic !== rightFormat.italic ||
+    leftFormat.code !== rightFormat.code
+  )
+}
+
+/**
+ * Perplexity / Docs HTML often omits spaces between adjacent inline runs with
+ * different formatting (`and` + bold `gRPC` → `andgRPC`). Insert missing spaces.
+ */
+function insertSpacesAtFormattedBoundaries(container: Element): void {
+  if (SKIPPED_BOUNDARY_TAGS.has(container.tagName)) return
+
+  const children = [...container.childNodes]
+  for (let i = 0; i < children.length - 1; i++) {
+    const left = children[i]!
+    const right = children[i + 1]!
+    if (shouldInsertBoundarySpace(left, right)) {
+      container.insertBefore(container.ownerDocument.createTextNode(' '), right)
+    }
+  }
+
+  for (const child of container.childNodes) {
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      insertSpacesAtFormattedBoundaries(child as Element)
+    }
+  }
 }
 
 function isCodeLikeText(text: string): boolean {
@@ -236,7 +380,7 @@ function hoistCodeFromContainers(doc: Document): void {
  * Normalize rich clipboard HTML (Perplexity, ChatGPT, Docs) into clean
  * `<pre><code class="language-…">` blocks TipTap can parse.
  */
-export function normalizePastedHtml(html: string): string {
+export function normalizePastedHtml(html: string, plainText?: string): string {
   if (!html.trim()) return html
   try {
     const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -248,6 +392,10 @@ export function normalizePastedHtml(html: string): string {
     for (const pre of [...doc.querySelectorAll('pre')]) {
       absorbTrailingCodeLines(pre)
     }
+    if (plainText?.trim()) {
+      reconcileHtmlSpacingFromPlain(doc, plainText)
+    }
+    insertSpacesAtFormattedBoundaries(doc.body)
     return stripCitationsFromHtml(doc.body.innerHTML)
   } catch {
     return html

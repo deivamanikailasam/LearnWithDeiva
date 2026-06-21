@@ -1,10 +1,16 @@
 import type { Node as PmNode, Schema } from '@tiptap/pm/model'
 import { normalizeLatexForKatex } from './normalize-latex-for-katex'
-import { parseInlineMarkdown } from './parse-inline-markdown'
+import { ensureInlineSegmentSpacing, parseInlineMarkdown } from './parse-inline-markdown'
+import {
+  INLINE_LATEX_PAREN_INNER,
+  textHasInlineMathDelimiters,
+} from './paste-math'
 
-/** `$x$` and `\(...\)` inline LaTeX delimiters. */
-const inlineMathPattern =
-  /(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)|\\\(([^\\\n]+?)\\\)/g
+/** `$x$` and `\(...\)` inline LaTeX delimiters (global — for splitting only). */
+const inlineMathSplitPattern = new RegExp(
+  String.raw`(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)|\\\(((${INLINE_LATEX_PAREN_INNER}))\\\)`,
+  'g',
+)
 
 export type InlineMathSegment = { type: 'text' | 'math'; text: string }
 
@@ -14,7 +20,7 @@ export function splitInlineMathSegments(input: string): InlineMathSegment[] {
   const segments: InlineMathSegment[] = []
   let last = 0
   let match: RegExpExecArray | null
-  const regex = new RegExp(inlineMathPattern.source, inlineMathPattern.flags)
+  const regex = new RegExp(inlineMathSplitPattern.source, inlineMathSplitPattern.flags)
 
   while ((match = regex.exec(input)) !== null) {
     const latex = (match[1] ?? match[2] ?? '').trim()
@@ -38,12 +44,8 @@ export function splitInlineMathSegments(input: string): InlineMathSegment[] {
   return segments
 }
 
-export function textHasInlineMathDelimiters(text: string): boolean {
-  return /(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)|\\\(([^\\\n]+?)\\\)/.test(text)
-}
-
 function markdownSegmentsToNodes(schema: Schema, text: string): PmNode[] {
-  const segments = parseInlineMarkdown(text)
+  const segments = ensureInlineSegmentSpacing(parseInlineMarkdown(text))
   if (!segments.length) return text ? [schema.text(text)] : []
 
   return segments.flatMap((seg) => {

@@ -14,6 +14,10 @@ import { useProgress } from '../lib/progressContext'
 import { formatDuration, requiredSubtreeMinutes } from '../lib/duration'
 import { countRequiredTopics } from '../lib/topic-status'
 import { ConfirmDialog } from './ConfirmDialog'
+import {
+  CONTENT_GAP_CARD_CLASS,
+  isContentGapHighlighted,
+} from '../lib/audit-sub-subtopic-content'
 
 const levelStyles: Record<string, string> = {
   beginner:
@@ -27,14 +31,17 @@ const levelStyles: Record<string, string> = {
 function NodeCard({
   subject,
   node,
+  contentGapTopicIds,
 }: {
   subject: Subject
   node: RoadmapNode
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   const subjectId = subject.id
   const { isComplete } = useProgress()
   const optional = node.status === 'optional'
   const done = node.topicId ? isComplete(subjectId, node.topicId) : false
+  const contentGap = isContentGapHighlighted(contentGapTopicIds, node.topicId)
   const linked = node.topicId ? findTopic(subject, node.topicId) : undefined
   const level = linked?.level
   const subCount = linked?.subtopics.length ?? 0
@@ -46,7 +53,9 @@ function NodeCard({
         node.topicId
           ? 'cursor-pointer hover:-translate-y-0.5 hover:shadow-md'
           : 'opacity-90',
-        done
+        contentGap
+          ? CONTENT_GAP_CARD_CLASS
+          : done
           ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-500/40 dark:bg-emerald-500/10'
           : optional
             ? 'border-dashed border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-900/50'
@@ -108,10 +117,12 @@ function StageItem({
   subject,
   stage,
   index,
+  contentGapTopicIds,
 }: {
   subject: Subject
   stage: RoadmapStage
   index: number
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   const { isComplete, setCompletedKeys } = useProgress()
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -226,7 +237,12 @@ function StageItem({
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {stage.nodes.map((node) => (
-          <NodeCard key={node.id} subject={subject} node={node} />
+          <NodeCard
+            key={node.id}
+            subject={subject}
+            node={node}
+            contentGapTopicIds={contentGapTopicIds}
+          />
         ))}
       </div>
 
@@ -263,9 +279,11 @@ function StageItem({
 export function Roadmap({
   subject,
   roadmap,
+  contentGapTopicIds,
 }: {
   subject: Subject
   roadmap: RoadmapData
+  contentGapTopicIds?: ReadonlySet<string> | null
 }) {
   return (
     <div>
@@ -278,6 +296,7 @@ export function Roadmap({
             subject={subject}
             stage={stage}
             index={idx}
+            contentGapTopicIds={contentGapTopicIds}
           />
         ))}
       </ol>
