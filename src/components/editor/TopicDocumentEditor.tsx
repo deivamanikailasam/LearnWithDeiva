@@ -15,9 +15,10 @@ import { TiptapViewer } from './TiptapViewer'
 import { useEditMode } from '../../lib/editModeContext'
 import { useToast } from '../../lib/toastContext'
 import { useDirtyEditor } from '../../lib/useDirtyEditor'
-import { tiptapEditEditorProps, tiptapExtensions } from './tiptap-extensions'
+import { tiptapEditEditorProps, createTiptapExtensions } from './tiptap-extensions'
 import { GlossaryTermEditorDialog } from './GlossaryTermEditorDialog'
 import { GlossaryTermConflictDialog } from './GlossaryTermConflictDialog'
+import { EditorTableControls } from './EditorTableControls'
 import {
   removeGlobalGlossaryEntry,
   syncGlobalGlossaryEntry,
@@ -25,6 +26,8 @@ import {
   type GlobalGlossaryItem,
 } from '../../lib/global-glossary'
 import { deleteBlockAtCursor } from '../../lib/delete-block-at-cursor'
+import { repairMathLatexInEditor } from '../../lib/repair-math-latex'
+import { normalizeLatexForKatex } from '../../lib/normalize-latex-for-katex'
 
 interface TopicDocumentEditorProps {
   subjectId: string
@@ -90,6 +93,7 @@ export function TopicDocumentEditor({
   } | null>(null)
   const glossarySelectionRef = useRef<{ from: number; to: number } | null>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const editorRef = useRef<Editor | null>(null)
   const latestDoc = useRef(topicDocument)
   const canEditRef = useRef(false)
   const baselineRef = useRef(JSON.stringify(topicDocument.doc))
@@ -155,8 +159,13 @@ export function TopicDocumentEditor({
     [subjectId, topicId, onDocumentSaved, showToast],
   )
 
+  const extensions = useMemo(
+    () => createTiptapExtensions({ getEditor: () => editorRef.current }),
+    [],
+  )
+
   const editor = useEditor({
-    extensions: tiptapExtensions,
+    extensions,
     content: topicDocument.doc,
     editable: false,
     editorProps: tiptapEditEditorProps,
@@ -176,8 +185,11 @@ export function TopicDocumentEditor({
     },
   })
 
-  // Sync read-only view when the loaded document changes. Edit mode is owned by
-  // the TipTap instance; topic navigation remounts this component via `key`.
+  useEffect(() => {
+    editorRef.current = editor ?? null
+  }, [editor])
+
+  // Sync read-only view when the loaded document changes. Topic navigation remounts via `key`.
   useEffect(() => {
     if (!editor || canEdit) return
     ignoreDocChangeRef.current = true
@@ -186,6 +198,13 @@ export function TopicDocumentEditor({
     baselineRef.current = topicDocKey
     setDirty(false)
   }, [editor, canEdit, topicDocKey, displayDocument.doc, topicDocument])
+
+  useEffect(() => {
+    if (!editor || !canEdit) return
+    if (repairMathLatexInEditor(editor)) {
+      syncDirtyFromEditor(editor)
+    }
+  }, [editor, canEdit, topicDocKey, syncDirtyFromEditor])
 
   useEffect(() => {
     if (!editor) return
@@ -482,7 +501,21 @@ export function TopicDocumentEditor({
     !editor.isActive('codeBlock') &&
     !editor.isActive('blockquote')
 
-  const toolbarControls = canEdit ? (
+  const insertInlineMath = () => {
+    const latex = window.prompt('Inline math (LaTeX)', 'x^2 + y^2 = z^2')
+    if (!latex?.trim()) return
+    const normalized = normalizeLatexForKatex(latex.trim())
+    run(() => editor?.chain().focus().insertInlineMath({ latex: normalized }).run() ?? false)
+  }
+
+  const insertBlockMath = () => {
+    const latex = window.prompt('Block math (LaTeX)', '\\sum_{i=1}^{n} x_i')
+    if (!latex?.trim()) return
+    const normalized = normalizeLatexForKatex(latex.trim())
+    run(() => editor?.chain().focus().insertBlockMath({ latex: normalized }).run() ?? false)
+  }
+
+  const toolbarControls = canEdit && editor ? (
     <>
       <ToolbarButton
         title="Bold"
@@ -591,6 +624,14 @@ export function TopicDocumentEditor({
         onClick={() => run(() => editor?.chain().focus().setHorizontalRule().run() ?? false)}
       >
         ―
+      </ToolbarButton>
+      <span className="mx-1 text-slate-300 dark:text-slate-600">|</span>
+      <EditorTableControls editor={editor} run={run} />
+      <ToolbarButton title="Inline math" onClick={insertInlineMath}>
+        𝑓(x)
+      </ToolbarButton>
+      <ToolbarButton title="Block math" onClick={insertBlockMath}>
+        ∫
       </ToolbarButton>
       <span className="mx-1 text-slate-300 dark:text-slate-600">|</span>
       <ToolbarButton title="Insert image from URL" onClick={insertImageFromUrl}>

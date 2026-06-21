@@ -1,5 +1,11 @@
 import { isLanguageLabel, normalizeLanguage } from './code-languages'
+import {
+  looksLikeLatexFormulaLine,
+  normalizeLatexForKatex,
+  parseLatexEnvironmentStart,
+} from './normalize-latex-for-katex'
 import { parseInlineMarkdown, stripOrphanMarkdownDelimiters } from './parse-inline-markdown'
+import { pasteTextHasMath } from './paste-math'
 import {
   stripPerplexityCitations,
   stripPerplexityInlineCitations,
@@ -28,10 +34,98 @@ export type MarkdownPasteBlock =
   | { type: 'heading'; level: number; text: string }
   | { type: 'code'; language: string; code: string }
   | { type: 'table'; rows: string[][]; hasHeader: boolean }
+  | { type: 'blockMath'; latex: string }
   | { type: 'horizontalRule' }
   | { type: 'bulletList'; items: string[] }
   | { type: 'orderedList'; items: string[] }
   | { type: 'blockquote'; paragraphs: string[] }
+
+function tryParseBlockMath(
+  lines: string[],
+  start: number,
+): { block: Extract<MarkdownPasteBlock, { type: 'blockMath' }>; nextIndex: number } | null {
+  const trimmed = lines[start].trim()
+
+  if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
+    return {
+      block: { type: 'blockMath', latex: normalizeLatexForKatex(trimmed.slice(2, -2)) },
+      nextIndex: start + 1,
+    }
+  }
+
+  if (trimmed === '$$') {
+    const latexLines: string[] = []
+    let i = start + 1
+    while (i < lines.length && lines[i].trim() !== '$$') {
+      latexLines.push(lines[i])
+      i++
+    }
+    if (i < lines.length) {
+      return {
+        block: {
+          type: 'blockMath',
+          latex: normalizeLatexForKatex(latexLines.join('\n').trim()),
+        },
+        nextIndex: i + 1,
+      }
+    }
+  }
+
+  if (trimmed.startsWith('\\[') && trimmed.endsWith('\\]') && trimmed.length > 4) {
+    return {
+      block: { type: 'blockMath', latex: normalizeLatexForKatex(trimmed.slice(2, -2)) },
+      nextIndex: start + 1,
+    }
+  }
+
+  if (trimmed === '\\[') {
+    const latexLines: string[] = []
+    let i = start + 1
+    while (i < lines.length && lines[i].trim() !== '\\]') {
+      latexLines.push(lines[i])
+      i++
+    }
+    if (i < lines.length) {
+      return {
+        block: {
+          type: 'blockMath',
+          latex: normalizeLatexForKatex(latexLines.join('\n').trim()),
+        },
+        nextIndex: i + 1,
+      }
+    }
+  }
+
+  if (looksLikeLatexFormulaLine(trimmed)) {
+    return {
+      block: { type: 'blockMath', latex: normalizeLatexForKatex(trimmed) },
+      nextIndex: start + 1,
+    }
+  }
+
+  const envName = parseLatexEnvironmentStart(trimmed)
+  if (envName) {
+    const latexLines: string[] = [lines[start]]
+    let i = start + 1
+    const endTag = `\\end{${envName}}`
+    while (i < lines.length && lines[i].trim() !== endTag) {
+      latexLines.push(lines[i])
+      i++
+    }
+    if (i < lines.length) {
+      latexLines.push(lines[i])
+      return {
+        block: {
+          type: 'blockMath',
+          latex: normalizeLatexForKatex(latexLines.join('\n').trim()),
+        },
+        nextIndex: i + 1,
+      }
+    }
+  }
+
+  return null
+}
 
 function parseMarkdownTableRow(line: string): string[] | null {
   const trimmed = line.trim()
@@ -196,6 +290,13 @@ export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
       continue
     }
 
+    const blockMath = tryParseBlockMath(lines, i)
+    if (blockMath) {
+      blocks.push(blockMath.block)
+      i = blockMath.nextIndex
+      continue
+    }
+
     const heading = line.match(/^(#{1,6})\s+(.+)$/)
     if (heading) {
       blocks.push({
@@ -351,6 +452,7 @@ export function shouldPreferMarkdownPaste(text: string, html: string): boolean {
 
   if (/```/.test(text)) return true
   if (markdownPasteHasTable(text)) return true
+  if (pasteTextHasMath(text)) return true
 
   const mdBold = (text.match(/\*\*[^*\n]+\*\*/g) ?? []).length
   const htmlBold = (html.match(/<(?:strong|b)\b/gi) ?? []).length

@@ -5,7 +5,12 @@ import {
   normalizePastedHtml,
   pastedHtmlLooksBroken,
 } from '../../lib/normalize-pasted-html'
-import { parseInlineMarkdown } from '../../lib/parse-inline-markdown'
+import { inlineTextToPmNodes } from '../../lib/inline-math-to-nodes'
+import { normalizeLatexForKatex } from '../../lib/normalize-latex-for-katex'
+import {
+  clipboardHtmlHasKatex,
+  preprocessKatexHtml,
+} from '../../lib/preprocess-katex-html'
 import {
   markdownPasteHasStructure,
   markdownPasteHasTable,
@@ -14,24 +19,15 @@ import {
   plainTextLooksLikeTsv,
   shouldPreferMarkdownPaste,
 } from '../../lib/parse-markdown-paste'
+import { migratePastedMath } from '../../lib/migrate-pasted-math'
+import { pasteTextHasMath } from '../../lib/paste-math'
 
 function clipboardHtmlHasTable(html: string): boolean {
   return /<table[\s>]/i.test(html)
 }
 
 function inlineTextToNodes(schema: Schema, text: string): PmNode[] {
-  const segments = parseInlineMarkdown(text)
-  if (!segments.length) return text ? [schema.text(text)] : []
-
-  return segments.flatMap((seg) => {
-    if (!seg.text) return []
-    const marks = seg.marks.flatMap((mark) => {
-      const markType = schema.marks[mark.type]
-      if (!markType) return []
-      return [markType.create(mark.attrs)]
-    })
-    return [schema.text(seg.text, marks)]
-  })
+  return inlineTextToPmNodes(schema, text)
 }
 
 function paragraphFromText(schema: Schema, text: string): PmNode | null {
@@ -135,6 +131,7 @@ function blockToNode(schema: Schema, block: ReturnType<typeof parseMarkdownPaste
   const orderedList = schema.nodes.orderedList
   const listItem = schema.nodes.listItem
   const blockquote = schema.nodes.blockquote
+  const blockMath = schema.nodes.blockMath
 
   switch (block.type) {
     case 'code':
@@ -149,6 +146,8 @@ function blockToNode(schema: Schema, block: ReturnType<typeof parseMarkdownPaste
       return paragraphFromText(schema, block.text)
     case 'table':
       return buildTableNode(schema, block.rows, block.hasHeader)
+    case 'blockMath':
+      return blockMath?.create({ latex: normalizeLatexForKatex(block.latex) }) ?? null
     case 'horizontalRule':
       return horizontalRule?.create() ?? null
     case 'bulletList': {
@@ -205,12 +204,24 @@ export const PasteEnhancement = Extension.create({
   name: 'pasteEnhancement',
 
   addProseMirrorPlugins() {
+    const editor = this.editor
+
+    const scheduleMathMigration = (plainText: string, html?: string) => {
+      const needsMath =
+        pasteTextHasMath(plainText) || (html && clipboardHtmlHasKatex(html))
+      if (!needsMath) return
+      window.setTimeout(() => {
+        if (editor.isDestroyed) return
+        migratePastedMath(editor)
+      }, 0)
+    }
+
     return [
       new Plugin({
         key: new PluginKey('pasteEnhancement'),
         props: {
           transformPastedHTML(html) {
-            return normalizePastedHtml(html)
+            return normalizePastedHtml(preprocessKatexHtml(html))
           },
 
           handlePaste(view, event) {
@@ -232,7 +243,17 @@ export const PasteEnhancement = Extension.create({
             const text = clipboard.getData('text/plain')
             if (!text) return false
 
-            if (plainTextLooksLikeTsv(text)) {
+            // Plain-text LaTeX from Perplexity is more faithful than rendered KaTeX HTML.
+            if (pasteTextHasMath(text)) {
+              event.preventDefault()
+              const ok = insertParsedMarkdown(view, text)
+              if (ok) {
+                scheduleMathMigration(text, html)
+                return true
+              }
+            }
+
+            if (plainTextLooksLikeTsv(text) && !pasteTextHasMath(text)) {
               event.preventDefault()
               return insertTableFromRows(view, parseTsvPaste(text), true)
             }
@@ -240,12 +261,12 @@ export const PasteEnhancement = Extension.create({
             const normalizedHtml = html ? normalizePastedHtml(html) : ''
 
             // Markdown tables in plain text are more reliable than Perplexity HTML tables.
-            if (markdownPasteHasTable(text)) {
+            if (markdownPasteHasTable(text) && !pasteTextHasMath(text)) {
               event.preventDefault()
               return insertParsedMarkdown(view, text)
             }
 
-            if (shouldPreferMarkdownPaste(text, html)) {
+            if (shouldPreferMarkdownPaste(text, html) && !pasteTextHasMath(text)) {
               event.preventDefault()
               return insertParsedMarkdown(view, text)
             }
@@ -264,6 +285,7 @@ export const PasteEnhancement = Extension.create({
               return false
             }
 
+            scheduleMathMigration(text, html)
             return false
           },
         },

@@ -6,6 +6,7 @@ import { TableHeader } from '@tiptap/extension-table-header'
 export const tiptapTableExtensions = [
   Table.configure({
     resizable: false,
+    renderWrapper: true,
     HTMLAttributes: { class: 'tiptap-table' },
   }),
   TableRow,

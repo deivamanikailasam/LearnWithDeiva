@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
+import { formatSubSubtopicPath } from '../../lib/topic-path'
 import clsx from 'clsx'
 import type { Topic, TopicMeta } from '../../types/content'
+import { paths } from '../../lib/paths'
 import { saveTopicMeta, type SaveStatus } from '../../lib/content-api'
 import {
   metaDraftsEqual,
@@ -23,6 +26,91 @@ import { DurationInput } from './DurationInput'
 import { LevelSelect } from './LevelSelect'
 import { TagsInput } from './TagsInput'
 
+const headerActionClass =
+  'shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-brand-300 hover:text-brand-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-brand-500/40 dark:hover:text-brand-300'
+
+const headerActionDisabledClass =
+  'shrink-0 cursor-not-allowed rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-300 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-600'
+
+function TopicPathCopyButton({
+  ancestors,
+  topic,
+}: {
+  ancestors: Topic[]
+  topic: Topic
+}) {
+  const { showToast } = useToast()
+  const [copied, setCopied] = useState(false)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(formatSubSubtopicPath(ancestors, topic))
+      setCopied(true)
+      showToast('Topic path copied', 'success')
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      showToast('Could not copy to clipboard', 'error')
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      title="Copy topic path"
+      className={headerActionClass}
+    >
+      {copied ? '✓ Copied' : 'Copy path'}
+    </button>
+  )
+}
+
+function SubSubtopicHeaderToolbar({
+  subjectId,
+  ancestors,
+  topic,
+  prevTopic,
+  nextTopic,
+}: {
+  subjectId: string
+  ancestors: Topic[]
+  topic: Topic
+  prevTopic?: Pick<Topic, 'id' | 'title'>
+  nextTopic?: Pick<Topic, 'id' | 'title'>
+}) {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+      {prevTopic ? (
+        <Link
+          to={paths.topic(subjectId, prevTopic.id)}
+          title={prevTopic.title}
+          className={headerActionClass}
+        >
+          ← Previous
+        </Link>
+      ) : (
+        <span className={headerActionDisabledClass} aria-disabled="true">
+          ← Previous
+        </span>
+      )}
+      <TopicPathCopyButton ancestors={ancestors} topic={topic} />
+      {nextTopic ? (
+        <Link
+          to={paths.topic(subjectId, nextTopic.id)}
+          title={nextTopic.title}
+          className={headerActionClass}
+        >
+          Next →
+        </Link>
+      ) : (
+        <span className={headerActionDisabledClass} aria-disabled="true">
+          Next →
+        </span>
+      )}
+    </div>
+  )
+}
+
 interface EditableTopicHeaderProps {
   subjectId: string
   topic: Topic
@@ -30,28 +118,48 @@ interface EditableTopicHeaderProps {
   editable: boolean
   /** Ancestors from root → direct parent; used for inherited optional status. */
   topicAncestors?: Topic[]
+  prevTopic?: Pick<Topic, 'id' | 'title'>
+  nextTopic?: Pick<Topic, 'id' | 'title'>
   onSaved?: (saved: TopicMeta) => void
   actions?: ReactNode
   completedLine?: ReactNode
 }
 
 function ViewHeader({
+  subjectId,
   topic,
   topicAncestors = [],
   isSubSubtopic,
+  prevTopic,
+  nextTopic,
   actions,
   completedLine,
 }: {
+  subjectId: string
   topic: Topic
   topicAncestors?: Topic[]
   isSubSubtopic: boolean
+  prevTopic?: Pick<Topic, 'id' | 'title'>
+  nextTopic?: Pick<Topic, 'id' | 'title'>
   actions?: ReactNode
   completedLine?: ReactNode
 }) {
   const effectivelyOptional = isTopicEffectivelyOptionalInTree(topic, topicAncestors)
+  const showToolbar = isSubSubtopic && topicAncestors.length >= 2
   return (
     <>
-      <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">{topic.title}</h1>
+      <div className="flex items-start justify-between gap-3">
+        <h1 className="text-2xl font-extrabold sm:text-3xl lg:text-4xl">{topic.title}</h1>
+        {showToolbar && (
+          <SubSubtopicHeaderToolbar
+            subjectId={subjectId}
+            ancestors={topicAncestors}
+            topic={topic}
+            prevTopic={prevTopic}
+            nextTopic={nextTopic}
+          />
+        )}
+      </div>
       {!isSubSubtopic && topic.summary && (
         <p className="mt-2 max-w-3xl text-base text-slate-600 sm:text-lg dark:text-slate-400">
           {topic.summary}
@@ -90,6 +198,8 @@ export function EditableTopicHeader({
   isSubSubtopic,
   editable,
   topicAncestors = [],
+  prevTopic,
+  nextTopic,
   onSaved,
   actions,
   completedLine,
@@ -206,9 +316,12 @@ export function EditableTopicHeader({
   if (!editable) {
     return (
       <ViewHeader
+        subjectId={subjectId}
         topic={topic}
         topicAncestors={topicAncestors}
         isSubSubtopic={isSubSubtopic}
+        prevTopic={prevTopic}
+        nextTopic={nextTopic}
         actions={actions}
         completedLine={completedLine}
       />
@@ -223,6 +336,15 @@ export function EditableTopicHeader({
             Metadata
           </span>
           <div className="flex items-center gap-1.5">
+            {isSubSubtopic && topicAncestors.length >= 2 && (
+              <SubSubtopicHeaderToolbar
+                subjectId={subjectId}
+                ancestors={topicAncestors}
+                topic={topic}
+                prevTopic={prevTopic}
+                nextTopic={nextTopic}
+              />
+            )}
             {saveStatus === 'saving' && (
               <span className="text-xs text-slate-400">Saving…</span>
             )}

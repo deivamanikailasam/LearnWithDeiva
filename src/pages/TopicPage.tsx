@@ -271,6 +271,8 @@ export function TopicPage() {
           topic={topic}
           topicAncestors={getAncestors(subject, topic.id)}
           isSubSubtopic={isSubSubtopic}
+          prevTopic={prev}
+          nextTopic={next}
           editable={metadataEditable}
           onSaved={refreshSubject}
           actions={

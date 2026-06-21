@@ -4,6 +4,7 @@ import Image from '@tiptap/extension-image'
 import { ViewCodeBlock } from './ViewCodeBlock'
 import { GlossaryTerm } from './glossary-term'
 import { tiptapTableExtensions } from './tiptap-table-extensions'
+import { viewMathExtensions } from './tiptap-math-extensions'
 
 /** TipTap extensions for read-only viewers (syntax-highlighted code blocks). */
 export const viewTiptapExtensions = [
@@ -20,4 +21,5 @@ export const viewTiptapExtensions = [
   Image.configure({ HTMLAttributes: { class: 'rounded-lg max-w-full' } }),
   GlossaryTerm,
   ...tiptapTableExtensions,
+  viewMathExtensions,
 ]

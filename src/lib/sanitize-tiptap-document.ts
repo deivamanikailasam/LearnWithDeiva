@@ -2,6 +2,7 @@ import type { JSONContent } from '@tiptap/core'
 import type { TopicDocument } from '../types/tiptap-document'
 import { isLanguageLabel, normalizeLanguage } from './code-languages'
 import { inferLanguageFromCode } from './infer-code-language'
+import { sanitizeMathInJson } from './repair-math-latex'
 
 function nodeText(node: JSONContent): string {
   if (typeof node.text === 'string') return node.text
@@ -71,13 +72,14 @@ function mergeAdjacentCodeBlocks(nodes: JSONContent[]): JSONContent[] {
   return out
 }
 
-/** Normalize code blocks before save / after paste (language labels, inference). */
+/** Normalize code blocks and math LaTeX before save / after paste. */
 export function sanitizeTiptapDocument(document: TopicDocument): TopicDocument {
+  const codeSanitized = sanitizeBlocks(document.doc.content ?? [])
   return {
     ...document,
     doc: {
       type: 'doc',
-      content: sanitizeBlocks(document.doc.content ?? []),
+      content: sanitizeMathInJson(codeSanitized),
     },
   }
 }
