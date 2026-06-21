@@ -1,10 +1,13 @@
 import type { Topic } from '../types/content'
 
-/** `subject: root topic: subtopic: sub-subtopic` for clipboard / prompts. */
+/** Prompt-style path for clipboard: sub-subtopic in subtopic, as part of subject: topic. */
 export function formatSubSubtopicPath(
   subjectTitle: string,
   ancestors: Topic[],
   topic: Topic,
 ): string {
-  return `${subjectTitle}: ${ancestors[0].title}: ${ancestors[1].title}: ${topic.title}`
+  const rootTopic = ancestors[0].title
+  const subtopic = ancestors[1].title
+  const subSubtopic = topic.title
+  return `Explain ${subSubtopic} in ${subtopic}, as part of ${subjectTitle}: ${rootTopic}`
 }
