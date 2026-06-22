@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -86,4 +86,45 @@ export function addTopics(additions) {
 
   console.log(`Added ${count} topic files.`)
   return count
+}
+
+/**
+ * Attach sub-subtopics under existing subtopics (depth-2 leaves).
+ *
+ * @param {Array<{ parentId: string, children: Array<{ id: string, title: string, level?: string }> }>} attachments
+ */
+export function attachSubSubtopics(attachments) {
+  const { byId } = loadTopics()
+  let written = 0
+  let skipped = 0
+
+  for (const { parentId, children } of attachments) {
+    const parent = byId.get(parentId)
+    if (!parent) throw new Error(`Missing parent "${parentId}"`)
+
+    children.forEach((child, idx) => {
+      const id = `${parentId}--${child.id}`
+      if (byId.has(id)) {
+        skipped += 1
+        return
+      }
+      const meta = {
+        id,
+        title: child.title,
+        summary: child.summary ?? child.title,
+        order: idx + 1,
+        level: child.level ?? parent.level ?? 'intermediate',
+        tags: parent.tags ?? [],
+        parentId,
+      }
+      const dir = resolve(TOPICS_DIR, id)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(resolve(dir, 'topic.json'), JSON.stringify(meta, null, 2) + '\n')
+      byId.set(id, meta)
+      written += 1
+    })
+  }
+
+  console.log(`[agentic-ai] attachSubSubtopics: wrote ${written}, skipped ${skipped}`)
+  return { written, skipped }
 }
