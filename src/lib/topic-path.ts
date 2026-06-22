@@ -9,5 +9,5 @@ export function formatSubSubtopicPath(
   const rootTopic = ancestors[0].title
   const subtopic = ancestors[1].title
   const subSubtopic = topic.title
-  return `Explain ${subSubtopic} in ${subtopic}, as part of ${subjectTitle}: ${rootTopic}`
+  return `Explain '${subSubtopic}' in '${subtopic}', as part of '${subjectTitle}': '${rootTopic}'`
 }
