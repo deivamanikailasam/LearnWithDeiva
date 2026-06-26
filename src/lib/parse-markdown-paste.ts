@@ -5,7 +5,8 @@ import {
   parseLatexEnvironmentStart,
 } from './normalize-latex-for-katex'
 import { parseInlineMarkdown, stripOrphanMarkdownDelimiters } from './parse-inline-markdown'
-import { pasteTextHasMath } from './paste-math'
+import { clipboardHtmlFromClaude } from './detect-claude-clipboard'
+import { pasteTextHasMath, plainTextHasMathContent } from './paste-math'
 import {
   stripPerplexityCitations,
   stripPerplexityInlineCitations,
@@ -127,15 +128,37 @@ function tryParseBlockMath(
   return null
 }
 
+/** Split a table row on unescaped `|` only, so escaped `\|` stays inside its cell. */
+function splitTableRowCells(inner: string): string[] {
+  const cells: string[] = []
+  let current = ''
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]
+    if (ch === '\\' && inner[i + 1] === '|') {
+      current += '\\|'
+      i++
+      continue
+    }
+    if (ch === '|') {
+      cells.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  cells.push(current)
+  return cells
+}
+
 function parseMarkdownTableRow(line: string): string[] | null {
   const trimmed = line.trim()
   if (!trimmed.includes('|')) return null
 
   let inner = trimmed
   if (inner.startsWith('|')) inner = inner.slice(1)
-  if (inner.endsWith('|')) inner = inner.slice(0, -1)
+  if (inner.endsWith('|') && !inner.endsWith('\\|')) inner = inner.slice(0, -1)
 
-  const cells = inner.split('|').map((cell) => normalizeMarkdownTableCell(cell))
+  const cells = splitTableRowCells(inner).map((cell) => normalizeMarkdownTableCell(cell))
   if (!cells.length || cells.every((cell) => cell === '')) return null
   return cells
 }
@@ -219,6 +242,15 @@ function tryParseMarkdownTable(
   return { block: { type: 'table', rows, hasHeader }, nextIndex: i }
 }
 
+/** Plain code copied from a Claude code-block copy button (no markdown fences). */
+export function plainTextLooksLikeCodeOnly(text: string): boolean {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const nonEmpty = lines.filter((line) => line.trim())
+  if (!nonEmpty.length) return false
+  if (markdownPasteHasStructure(text)) return false
+  return nonEmpty.every((line) => isCodeLikePlainLine(line))
+}
+
 export function plainTextLooksLikeTsv(text: string): boolean {
   const lines = text.replace(/\r\n/g, '\n').split('\n').filter((line) => line.trim())
   if (lines.length < 2) return false
@@ -244,6 +276,16 @@ export function markdownPasteHasTable(text: string): boolean {
     if (tryParseMarkdownTable(lines, i)) return true
   }
   return false
+}
+
+/**
+ * Claude's message copy button puts faithful markdown in `text/plain` and styled
+ * chat HTML in `text/html`. Prefer plain markdown whenever both are present.
+ */
+export function shouldPreferClaudeMarkdownPaste(text: string, html: string): boolean {
+  if (!text.trim() || !html.trim()) return false
+  if (!clipboardHtmlFromClaude(html)) return false
+  return markdownPasteHasStructure(text) || plainTextHasMathContent(text)
 }
 
 /**
@@ -418,10 +460,7 @@ export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
     const para: string[] = [line]
     i++
     while (i < lines.length && lines[i].trim() !== '' && !lines[i].startsWith('```')) {
-      const h = lines[i].match(/^(#{1,6})\s+/)
-      if (h) break
-      if (parseBlockquoteLine(lines[i]) !== null) break
-      if (isLanguageLabel(lines[i].trim()) && i + 1 < lines.length) break
+      if (lineStartsStructuredBlock(lines[i])) break
       para.push(lines[i])
       i++
     }
@@ -431,8 +470,33 @@ export function parseMarkdownPaste(text: string): MarkdownPasteBlock[] {
   return blocks
 }
 
+function lineStartsBlockMath(line: string): boolean {
+  const t = line.trim()
+  if (!t) return false
+  if (t === '$$' || t === '\\[') return true
+  if (t.startsWith('$$') && t.endsWith('$$') && t.length > 4) return true
+  if (t.startsWith('\\[') && t.endsWith('\\]') && t.length > 4) return true
+  if (looksLikeLatexFormulaLine(t)) return true
+  if (parseLatexEnvironmentStart(t)) return true
+  return false
+}
+
+function lineStartsStructuredBlock(line: string): boolean {
+  if (line.startsWith('```')) return true
+  if (/^(#{1,6})\s+/.test(line)) return true
+  if (parseBlockquoteLine(line) !== null) return true
+  if (parseBulletItem(line) !== null) return true
+  if (parseOrderedItem(line) !== null) return true
+  if (isHorizontalRuleLine(line)) return true
+  if (parseMarkdownTableRow(line)) return true
+  if (lineStartsBlockMath(line)) return true
+  if (isLanguageLabel(line.trim()) && line.trim().length > 0) return true
+  return false
+}
+
 export function markdownPasteHasStructure(text: string): boolean {
   if (/```/.test(text) || /^#{1,6}\s/m.test(text) || markdownPasteHasTable(text)) return true
+  if (plainTextHasMathContent(text)) return true
   if (/^>\s+/m.test(text)) return true
   if (/\*\*[^*\n]+\*\*/.test(text) || /^(\*{3,}|-{3,}|_{3,})\s*$/m.test(text)) return true
   if (/^[-*+]\s+/m.test(text) || /^\d+\.\s+/m.test(text)) return true
@@ -447,6 +511,7 @@ export function markdownPasteHasStructure(text: string): boolean {
 
 /** Prefer plain-text markdown over HTML when AI copy leaves literal ** / tables in HTML. */
 export function shouldPreferMarkdownPaste(text: string, html: string): boolean {
+  if (shouldPreferClaudeMarkdownPaste(text, html)) return true
   if (!text.trim() || !markdownPasteHasStructure(text)) return false
   if (!html.trim()) return true
 

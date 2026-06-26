@@ -19,7 +19,7 @@ export function latexHasRawInlineDelimiters(latex: string): boolean {
  * Does not extract math from prose blobs — structural migration handles those.
  */
 export function stripInlineMathDelimiters(latex: string): string {
-  let out = latex.trim()
+  const out = latex.trim()
   if (!out) return out
 
   if (WRAPPED_PAREN_MATH_RE.test(out)) {
@@ -70,9 +70,58 @@ function escapeUnderscoresInBraceCommands(latex: string): string {
 /** AI pastes `\sum{j}` instead of `\sum_{j}`. */
 function fixMalformedOperatorBraces(latex: string): string {
   return latex.replace(
-    /\\(sum|prod|lim|max|min|log|ln|exp|det|gcd|inf|sup|arg)\{([^}]+)\}/g,
+    /\\(sum|prod|lim|max|min|log|ln|exp|det|gcd|inf|sup|arg|mathbb|mathrm|mathbf|operatorname)\{([^}]+)\}/g,
     '\\$1_{$2}',
   )
+}
+
+/** `\frac{a}{b}` pasted as `\frac a b` with missing braces around multi-char args is ok for KaTeX; fix `\frac12` style. */
+function fixMissingFracBraces(latex: string): string {
+  return latex.replace(/\\frac\s+([^\s\\{}]+)\s+([^\s\\{}]+)/g, '\\frac{$1}{$2}')
+}
+
+/** Common AI conflation of comparison operators outside `\text{}`. */
+function normalizeComparisonOperators(latex: string): string {
+  return latex
+    .replace(/(?<!\\)<=(?!=)/g, '\\le ')
+    .replace(/(?<!\\)>=(?!=)/g, '\\ge ')
+    .replace(/(?<!\\)!=(?!=)/g, '\\ne ')
+    .replace(/(?<!\\)->/g, '\\rightarrow ')
+    .replace(/(?<!\\)<->/g, '\\leftrightarrow ')
+}
+
+/** Unicode math symbols pasted from rendered Claude HTML selections. */
+function replaceUnicodeMathSymbols(latex: string): string {
+  return latex
+    .replace(/×/g, '\\times ')
+    .replace(/÷/g, '\\div ')
+    .replace(/±/g, '\\pm ')
+    .replace(/∓/g, '\\mp ')
+    .replace(/≤/g, '\\le ')
+    .replace(/≥/g, '\\ge ')
+    .replace(/≠/g, '\\ne ')
+    .replace(/≈/g, '\\approx ')
+    .replace(/≡/g, '\\equiv ')
+    .replace(/∞/g, '\\infty ')
+    .replace(/∑/g, '\\sum ')
+    .replace(/∏/g, '\\prod ')
+    .replace(/∫/g, '\\int ')
+    .replace(/∂/g, '\\partial ')
+    .replace(/√/g, '\\sqrt ')
+    .replace(/→/g, '\\rightarrow ')
+    .replace(/←/g, '\\leftarrow ')
+    .replace(/↔/g, '\\leftrightarrow ')
+    .replace(/⇒/g, '\\Rightarrow ')
+    .replace(/⇐/g, '\\Leftarrow ')
+    .replace(/∈/g, '\\in ')
+    .replace(/∉/g, '\\notin ')
+    .replace(/⊂/g, '\\subset ')
+    .replace(/⊆/g, '\\subseteq ')
+    .replace(/∪/g, '\\cup ')
+    .replace(/∩/g, '\\cap ')
+    .replace(/·/g, '\\cdot ')
+    .replace(/…/g, '\\ldots ')
+    .replace(/⋯/g, '\\cdots ')
 }
 
 function braceSingleCharScripts(latex: string): string {
@@ -88,6 +137,28 @@ function collapseOverEscapedCommands(latex: string): string {
   return latex.replace(/\\\\([a-zA-Z])/g, '\\$1')
 }
 
+/** Environments where `\\` separates rows/lines — a lone `\ ` there is a mangled separator. */
+const ROW_SEPARATOR_ENVIRONMENTS =
+  'matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix|cases|dcases|array|aligned|alignedat|gathered|split'
+
+const ROW_SEPARATOR_ENV_RE = new RegExp(
+  String.raw`(\\begin\{(?:${ROW_SEPARATOR_ENVIRONMENTS})\})([\s\S]*?)(\\end\{(?:${ROW_SEPARATOR_ENVIRONMENTS})\})`,
+  'g',
+)
+
+/**
+ * Markdown/JSON round-trips and AI paste often collapse `\\` row separators into a
+ * single backslash, leaving a control-space `\ ` between cells. Inside matrix/cases/
+ * aligned environments that turns a column vector into a single row. Restore `\\`.
+ */
+function restoreEnvironmentRowSeparators(latex: string): string {
+  if (!latex.includes('\\begin{')) return latex
+  return latex.replace(ROW_SEPARATOR_ENV_RE, (_match, open, body: string, close) => {
+    const fixed = body.replace(/(?<!\\)\\(?!\\)(?=\s)/g, '\\\\')
+    return `${open}${fixed}${close}`
+  })
+}
+
 /**
  * Normalize LaTeX from AI paste (Perplexity, ChatGPT, Claude) before KaTeX rendering.
  * Fixes common patterns that render in AI UIs but break KaTeX.
@@ -97,8 +168,12 @@ export function normalizeLatexForKatex(latex: string): string {
   if (!out) return out
 
   out = collapseOverEscapedCommands(out)
+  out = restoreEnvironmentRowSeparators(out)
+  out = replaceUnicodeMathSymbols(out)
+  out = normalizeComparisonOperators(out)
   out = escapeUnderscoresInBraceCommands(out)
   out = fixMalformedOperatorBraces(out)
+  out = fixMissingFracBraces(out)
   out = braceSingleCharScripts(out)
 
   return out
@@ -116,7 +191,7 @@ export function looksLikeLatexFormulaLine(line: string): boolean {
   if (/^\\(text|min|max|frac|sum|int|log|ln|sin|cos|lim|exp|det|gcd|operatorname|mathbf|mathrm)\b/.test(t)) {
     return true
   }
-  if (/\\(times|cdot|div|pm|leq|geq|neq|approx|equiv|infty)\b/.test(t) && /[=+\-<>]/.test(t)) {
+  if (/\\(times|cdot|div|pm|leq|geq|neq|approx|equiv|infty|le|ge|ne|to|rightarrow|leftarrow|Rightarrow|sum|prod|int|partial|sqrt|alpha|beta|gamma|delta|theta|lambda|sigma|omega)\b/.test(t) && /[=+\-<>^_\\]/.test(t)) {
     return true
   }
   return false

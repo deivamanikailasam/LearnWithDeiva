@@ -12,6 +12,9 @@ export interface InlineSegment {
   marks: InlineMark[]
 }
 
+/** CommonMark unescapes a backslash only before ASCII punctuation (not before letters). */
+const ASCII_PUNCTUATION = new Set("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+
 function marksEqual(a: InlineMark[], b: InlineMark[]): boolean {
   return a.length === b.length && a.every((m, i) => m.type === b[i]?.type)
 }
@@ -71,6 +74,16 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
   ]
 
   while (i < input.length) {
+    // Backslash escape: `\|`, `\*`, `\#`, etc. → literal char (LaTeX `\alpha` untouched).
+    if (input[i] === '\\') {
+      const next = input[i + 1]
+      if (next && ASCII_PUNCTUATION.has(next)) {
+        pushSegment(segments, next, activeMarks())
+        i += 2
+        continue
+      }
+    }
+
     // Autolinks skipped; explicit [label](url)
     if (input[i] === '[') {
       const closeBracket = input.indexOf(']', i + 1)

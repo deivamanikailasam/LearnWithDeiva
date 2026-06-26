@@ -1,4 +1,5 @@
 import { isLanguageLabel, normalizeLanguage } from './code-languages'
+import { clipboardHtmlFromClaude } from './detect-claude-clipboard'
 import { reconcileHtmlSpacingFromPlain } from './reconcile-pasted-spacing'
 import { stripCitationsFromHtml } from './strip-perplexity-citations'
 
@@ -19,9 +20,113 @@ function languageFromCodeEl(code: Element | null): string | null {
 
 function isCopyUi(el: Element): boolean {
   const text = (el.textContent ?? '').trim().toLowerCase()
-  if (text === 'copy' || text === 'copied') return true
+  if (text === 'copy' || text === 'copied' || text === 'copy code') return true
   if (el.matches('button, [role="button"], svg, [aria-label*="copy" i]')) return true
+  const testId = el.getAttribute('data-testid') ?? ''
+  if (/copy/i.test(testId)) return true
+  const cls = el.getAttribute('class') ?? ''
+  if (/\b(?:copy-button|code-block__copy|group\/copy)\b/i.test(cls)) return true
   return false
+}
+
+function isClaudeChrome(el: Element): boolean {
+  const testId = el.getAttribute('data-testid') ?? ''
+  if (/^(?:thinking|tool-use|tool-result|artifact)-/i.test(testId)) return true
+  const cls = el.getAttribute('class') ?? ''
+  return /\b(?:thinking-block|tool-call|artifact-card)\b/i.test(cls)
+}
+
+/** Drop Claude copy buttons, tool/thinking chrome, and empty header bars. */
+function stripClaudeChrome(doc: Document): void {
+  for (const el of [...doc.querySelectorAll('button, [role="button"], svg')]) {
+    if (isCopyUi(el)) el.remove()
+  }
+
+  for (const el of [...doc.querySelectorAll('[data-testid], [class]')]) {
+    if (isClaudeChrome(el)) el.remove()
+  }
+
+  for (const el of [...doc.querySelectorAll('div, span')]) {
+    if (el.querySelector('pre, table, ul, ol, h1, h2, h3, h4, h5, h6, blockquote, hr, img')) {
+      continue
+    }
+    const text = (el.textContent ?? '').trim()
+    if (!text) {
+      el.remove()
+      continue
+    }
+    if (isCopyUi(el) || text.toLowerCase() === 'copy' || text.toLowerCase() === 'copied') {
+      el.remove()
+    }
+  }
+}
+
+function isPreLikeDiv(el: Element): boolean {
+  if (el.tagName !== 'DIV') return false
+  if (el.querySelector('pre, table, ul, ol, h1, h2, h3, h4, h5, h6, blockquote')) return false
+  const cls = el.getAttribute('class') ?? ''
+  const style = el.getAttribute('style') ?? ''
+  if (/\b(?:whitespace-pre(?:-wrap|-line)?|font-mono|code-block__code)\b/i.test(cls)) {
+    return true
+  }
+  if (/white-space\s*:\s*pre/i.test(style) || /font-family\s*:[^;]*mono/i.test(style)) {
+    return true
+  }
+  return false
+}
+
+/** Claude sometimes renders code in `<div class="whitespace-pre">` instead of `<pre>`. */
+function hoistPreLikeDivs(doc: Document): void {
+  for (const el of [...doc.querySelectorAll('div')]) {
+    if (!isPreLikeDiv(el)) continue
+    const text = lineText(el).trimEnd()
+    if (!text || isCopyUi(el)) continue
+
+    let language: string | null = null
+    let sib: Element | null = el.previousElementSibling
+    for (let i = 0; i < 3 && sib; i++) {
+      if (isCopyUi(sib)) {
+        sib = sib.previousElementSibling
+        continue
+      }
+      const label = sib.textContent?.trim() ?? ''
+      if (isLanguageLabel(label)) {
+        language = normalizeLanguage(label)
+        break
+      }
+      sib = sib.previousElementSibling
+    }
+
+    el.replaceWith(writePre(doc, language, text))
+  }
+}
+
+function normalizeClaudeCodeBlockWrappers(doc: Document): void {
+  for (const pre of [...doc.querySelectorAll('pre')]) {
+    let sib = pre.previousElementSibling
+    while (sib) {
+      if (isCopyUi(sib)) {
+        const next = sib.previousElementSibling
+        sib.remove()
+        sib = next
+        continue
+      }
+      break
+    }
+  }
+
+  for (const wrapper of [...doc.querySelectorAll('[class*="code-block"], [data-testid*="code-block"]')]) {
+    const pre = wrapper.querySelector('pre')
+    if (!pre || wrapper === pre) continue
+    const language = languageNearPre(pre)
+    if (language && !pre.getAttribute('data-language')) {
+      pre.setAttribute('data-language', language)
+      const code = pre.querySelector('code')
+      if (code && !code.className.includes('language-')) {
+        code.className = `language-${language}`
+      }
+    }
+  }
 }
 
 const SKIPPED_BOUNDARY_TAGS = new Set([
@@ -377,13 +482,18 @@ function hoistCodeFromContainers(doc: Document): void {
 }
 
 /**
- * Normalize rich clipboard HTML (Perplexity, ChatGPT, Docs) into clean
+ * Normalize rich clipboard HTML (Perplexity, ChatGPT, Claude, Docs) into clean
  * `<pre><code class="language-…">` blocks TipTap can parse.
  */
 export function normalizePastedHtml(html: string, plainText?: string): string {
   if (!html.trim()) return html
   try {
     const doc = new DOMParser().parseFromString(html, 'text/html')
+    if (clipboardHtmlFromClaude(html)) {
+      stripClaudeChrome(doc)
+      hoistPreLikeDivs(doc)
+      normalizeClaudeCodeBlockWrappers(doc)
+    }
     hoistCodeFromContainers(doc)
     mergeSiblingCodeRuns(doc.body)
     for (const container of doc.querySelectorAll('div, section, article, main')) {

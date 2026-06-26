@@ -13,17 +13,20 @@ export const INLINE_LATEX_PAREN_RE = new RegExp(
 export const INLINE_LATEX_DOLLAR_TEST =
   /(?<!\$)\$(?!\d)(?!\$)[^$\n]+?\$(?!\d)/
 
-/** Whether `text` contains `$...$` or `\(...\)` inline math delimiters. */
-export function textHasInlineMathDelimiters(text: string): boolean {
-  return INLINE_LATEX_DOLLAR_TEST.test(text) || INLINE_LATEX_PAREN_RE.test(text)
+/** Display math `$$...$$` on one line (non-global). */
+export const DISPLAY_LATEX_DOLLAR_TEST = /\$\$[\s\S]+?\$\$/
+
+/** Remove fenced and inline code before scanning for math delimiters. */
+export function stripMarkdownCodeForMathScan(text: string): string {
+  let out = text.replace(/\r\n/g, '\n')
+  out = out.replace(/^```[^\n]*\n[\s\S]*?^```\s*/gm, '\n')
+  out = out.replace(/`[^`\n]+`/g, ' ')
+  return out
 }
 
-/** Explicit LaTeX delimiters in pasted plain text (not heuristic unicode/backslash checks). */
-export function pasteTextHasMath(text: string): boolean {
+function proseHasMathDelimiters(text: string): boolean {
   if (!text.trim()) return false
-  // Fenced code pastes must keep the markdown/code path; math migration skips code blocks.
-  if (/```/.test(text)) return false
-  if (/\$\$[\s\S]+?\$\$/m.test(text)) return true
+  if (DISPLAY_LATEX_DOLLAR_TEST.test(text)) return true
   if (INLINE_LATEX_DOLLAR_TEST.test(text)) return true
   if (INLINE_LATEX_PAREN_RE.test(text)) return true
   if (/\\\[[\s\S]+?\\\]/m.test(text)) return true
@@ -31,6 +34,38 @@ export function pasteTextHasMath(text: string): boolean {
   if (/^\\begin\{[a-z*]+\}/m.test(text)) return true
   if (plainTextHasBareLatex(text)) return true
   return false
+}
+
+/** Whether `text` contains `$...$` or `\(...\)` inline math delimiters. */
+export function textHasInlineMathDelimiters(text: string): boolean {
+  return (
+    INLINE_LATEX_DOLLAR_TEST.test(text) ||
+    INLINE_LATEX_PAREN_RE.test(text)
+  )
+}
+
+/**
+ * Whether pasted plain text contains LaTeX math outside markdown code fences.
+ * Claude responses often mix ``` code blocks with `$...$` / `$$...$$` math.
+ */
+export function plainTextHasMathContent(text: string): boolean {
+  if (!text.trim()) return false
+  return proseHasMathDelimiters(stripMarkdownCodeForMathScan(text))
+}
+
+/** @deprecated Use {@link plainTextHasMathContent} — kept as alias for call sites. */
+export function pasteTextHasMath(text: string): boolean {
+  return plainTextHasMathContent(text)
+}
+
+/** Whether clipboard HTML contains renderable math (KaTeX, annotations, or TipTap markers). */
+export function clipboardHtmlHasMath(html: string): boolean {
+  if (!html.trim()) return false
+  return (
+    /katex|application\/x-tex|data-latex|data-type="(?:inline|block)-math"/i.test(html) ||
+    /<annotation[^>]+encoding="[^"]*tex/i.test(html) ||
+    /<math[\s>]/i.test(html)
+  )
 }
 
 function textNodeInsideCodeBlock(

@@ -17,6 +17,62 @@ const latexParenRegex = new RegExp(
   'g',
 )
 const wholeBracketBlockRegex = /^\s*\\\[\s*([\s\S]+?)\s*\\\]\s*$/
+const displayDollarInTextRegex = /\$\$([\s\S]+?)\$\$/g
+
+function migrateDisplayDollarMathInParagraphs(
+  editor: Editor,
+  tr: import('@tiptap/pm/state').Transaction,
+): import('@tiptap/pm/state').Transaction {
+  const blockMath = editor.schema.nodes.blockMath
+  const paragraph = editor.schema.nodes.paragraph
+  if (!blockMath || !paragraph) return tr
+
+  const jobs: { pos: number; nodeSize: number; nodes: PmNode[] }[] = []
+
+  tr.doc.descendants((node, pos) => {
+    if (node.type.name === 'codeBlock') return false
+    if (node.type.name !== 'paragraph') return
+
+    const text = node.textContent
+    if (!/\$\$[\s\S]+?\$\$/.test(text)) return
+
+    const nodes: PmNode[] = []
+    let last = 0
+    const regex = new RegExp(displayDollarInTextRegex.source, displayDollarInTextRegex.flags)
+    let match: RegExpExecArray | null
+
+    while ((match = regex.exec(text)) !== null) {
+      const before = text.slice(last, match.index).trim()
+      if (before) {
+        nodes.push(paragraph.create({}, inlineTextToPmNodes(editor.schema, before)))
+      }
+      const latex = match[1]?.trim()
+      if (latex) {
+        nodes.push(blockMath.create({ latex: normalizeLatexForKatex(latex) }))
+      }
+      last = match.index + match[0].length
+    }
+
+    const after = text.slice(last).trim()
+    if (after) {
+      nodes.push(paragraph.create({}, inlineTextToPmNodes(editor.schema, after)))
+    }
+
+    if (nodes.length) {
+      jobs.push({
+        pos: tr.mapping.map(pos),
+        nodeSize: node.nodeSize,
+        nodes,
+      })
+    }
+  })
+
+  for (const job of jobs.reverse()) {
+    tr.replaceWith(job.pos, tr.mapping.map(job.pos + job.nodeSize), job.nodes)
+  }
+
+  return tr
+}
 
 function replaceMathInTextNodes(
   editor: Editor,
@@ -389,6 +445,7 @@ export function migratePastedMath(editor: Editor): void {
     tr = migrateBracketParagraphRuns(editor, tr)
     tr = migrateWholeBracketParagraphs(editor, tr)
     tr = migrateSplitBracketParagraphs(editor, tr)
+    tr = migrateDisplayDollarMathInParagraphs(editor, tr)
     tr = replaceMathInTextNodes(editor, tr, blockMathRegex, (latex) =>
       blockMath.create({ latex }),
     )

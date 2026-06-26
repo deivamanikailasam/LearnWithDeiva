@@ -16,12 +16,18 @@ import {
   markdownPasteHasTable,
   parseMarkdownPaste,
   parseTsvPaste,
+  plainTextLooksLikeCodeOnly,
   plainTextLooksLikeTsv,
+  shouldPreferClaudeMarkdownPaste,
   shouldPreferMarkdownPaste,
 } from '../../lib/parse-markdown-paste'
+import { clipboardHtmlFromClaude } from '../../lib/detect-claude-clipboard'
 import { fixPastedSliceSpacing } from '../../lib/reconcile-pasted-spacing'
 import { migratePastedMath } from '../../lib/migrate-pasted-math'
-import { pasteTextHasMath } from '../../lib/paste-math'
+import {
+  clipboardHtmlHasMath,
+  plainTextHasMathContent,
+} from '../../lib/paste-math'
 
 function clipboardHtmlHasTable(html: string): boolean {
   return /<table[\s>]/i.test(html)
@@ -180,9 +186,29 @@ function blockToNode(schema: Schema, block: ReturnType<typeof parseMarkdownPaste
   }
 }
 
+function insertCodeBlockFromPlain(
+  view: import('@tiptap/pm/view').EditorView,
+  text: string,
+  language = 'text',
+): boolean {
+  const { schema } = view.state
+  const codeBlock = schema.nodes.codeBlock
+  if (!codeBlock) return false
+
+  const node = codeBlock.create(
+    { language },
+    text ? schema.text(text) : undefined,
+  )
+  view.dispatch(
+    view.state.tr.replaceSelection(new Slice(Fragment.from(node), 0, 0)).scrollIntoView(),
+  )
+  return true
+}
+
 function insertParsedMarkdown(
   view: import('@tiptap/pm/view').EditorView,
   text: string,
+  onSuccess?: () => void,
 ): boolean {
   const { schema } = view.state
   const paragraph = schema.nodes.paragraph
@@ -198,6 +224,7 @@ function insertParsedMarkdown(
   if (!nodes.length) return false
 
   view.dispatch(view.state.tr.replaceSelection(new Slice(Fragment.from(nodes), 0, 0)).scrollIntoView())
+  onSuccess?.()
   return true
 }
 
@@ -209,12 +236,22 @@ export const PasteEnhancement = Extension.create({
 
     const scheduleMathMigration = (plainText: string, html?: string) => {
       const needsMath =
-        pasteTextHasMath(plainText) || (html && clipboardHtmlHasKatex(html))
+        plainTextHasMathContent(plainText) ||
+        (html && (clipboardHtmlHasMath(html) || clipboardHtmlHasKatex(html)))
       if (!needsMath) return
       window.setTimeout(() => {
         if (editor.isDestroyed) return
         migratePastedMath(editor)
       }, 0)
+    }
+
+    const finishMarkdownPaste = (
+      view: import('@tiptap/pm/view').EditorView,
+      plainText: string,
+      html?: string,
+    ): boolean => {
+      pendingPlainText = null
+      return insertParsedMarkdown(view, plainText, () => scheduleMathMigration(plainText, html))
     }
 
     let pendingPlainText: string | null = null
@@ -264,18 +301,33 @@ export const PasteEnhancement = Extension.create({
               return false
             }
 
-            // Plain-text LaTeX from Perplexity is more faithful than rendered KaTeX HTML.
-            if (pasteTextHasMath(text)) {
-              pendingPlainText = null
-              event.preventDefault()
-              const ok = insertParsedMarkdown(view, text)
-              if (ok) {
-                scheduleMathMigration(text, html)
-                return true
+            // Claude code-block copy button: raw code without markdown fences.
+            if (plainTextLooksLikeCodeOnly(text) && !plainTextHasMathContent(text)) {
+              const normalizedHtml = html ? normalizePastedHtml(html, text) : ''
+              const usePlainCode =
+                !html?.trim() ||
+                clipboardHtmlFromClaude(html) ||
+                pastedHtmlLooksBroken(normalizedHtml || html)
+              if (usePlainCode) {
+                pendingPlainText = null
+                event.preventDefault()
+                return insertCodeBlockFromPlain(view, text.replace(/\n$/, ''))
               }
             }
 
-            if (plainTextLooksLikeTsv(text) && !pasteTextHasMath(text)) {
+            // Claude message copy: plain markdown is more faithful than chat HTML.
+            if (shouldPreferClaudeMarkdownPaste(text, html)) {
+              event.preventDefault()
+              return finishMarkdownPaste(view, text, html)
+            }
+
+            // Plain-text LaTeX is more faithful than rendered KaTeX HTML.
+            if (plainTextHasMathContent(text)) {
+              event.preventDefault()
+              if (finishMarkdownPaste(view, text, html)) return true
+            }
+
+            if (plainTextLooksLikeTsv(text) && !plainTextHasMathContent(text)) {
               pendingPlainText = null
               event.preventDefault()
               return insertTableFromRows(view, parseTsvPaste(text), true)
@@ -284,25 +336,22 @@ export const PasteEnhancement = Extension.create({
             const normalizedHtml = html ? normalizePastedHtml(html, text) : ''
 
             // Markdown tables in plain text are more reliable than Perplexity HTML tables.
-            if (markdownPasteHasTable(text) && !pasteTextHasMath(text)) {
-              pendingPlainText = null
+            if (markdownPasteHasTable(text)) {
               event.preventDefault()
-              return insertParsedMarkdown(view, text)
+              return finishMarkdownPaste(view, text, html)
             }
 
-            if (shouldPreferMarkdownPaste(text, html) && !pasteTextHasMath(text)) {
-              pendingPlainText = null
+            if (shouldPreferMarkdownPaste(text, html)) {
               event.preventDefault()
-              return insertParsedMarkdown(view, text)
+              return finishMarkdownPaste(view, text, html)
             }
 
-            // Perplexity: plain-text markdown with fences is usually more faithful than HTML.
+            // Plain-text markdown with fences is usually more faithful than HTML.
             if (markdownPasteHasStructure(text)) {
               const htmlBroken = !html || pastedHtmlLooksBroken(normalizedHtml || html)
               if (htmlBroken || /```/.test(text)) {
-                pendingPlainText = null
                 event.preventDefault()
-                return insertParsedMarkdown(view, text)
+                return finishMarkdownPaste(view, text, html)
               }
             }
 

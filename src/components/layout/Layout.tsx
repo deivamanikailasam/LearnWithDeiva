@@ -4,6 +4,7 @@ import { Footer } from './Footer'
 import { Header } from './Header'
 import { SearchProvider } from '../search/SearchProvider'
 import { SetPasswordModal } from '../auth/SetPasswordModal'
+import { ScrollToTopButton } from '../ScrollToTopButton'
 import { useAuth } from '../../lib/authContext'
 
 /**
@@ -31,6 +32,7 @@ export function Layout() {
         </main>
         <Footer />
         <ScrollRestoration getKey={scrollKey} />
+        <ScrollToTopButton />
       </div>
       {passwordRecovery && <SetPasswordModal />}
     </SearchProvider>

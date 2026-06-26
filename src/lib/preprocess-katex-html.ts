@@ -1,8 +1,9 @@
 import { normalizeLatexForKatex, looksLikeLatexFormulaLine } from './normalize-latex-for-katex'
+import { clipboardHtmlHasMath } from './paste-math'
 
-/** Clipboard HTML from Perplexity / ChatGPT with rendered KaTeX math. */
+/** @deprecated Use {@link clipboardHtmlHasMath}. */
 export function clipboardHtmlHasKatex(html: string): boolean {
-  return /katex|application\/x-tex|data-latex/i.test(html)
+  return clipboardHtmlHasMath(html)
 }
 
 function extractLatexFromKatex(el: Element): string | null {
@@ -23,25 +24,76 @@ function extractLatexFromKatex(el: Element): string | null {
   return null
 }
 
+function extractLatexFromAnnotation(el: Element): string | null {
+  const enc = el.getAttribute('encoding') ?? ''
+  if (!enc.includes('tex')) return null
+  return el.textContent?.trim() || null
+}
+
+function insertMathNode(
+  doc: Document,
+  el: Element,
+  latex: string,
+  display: boolean,
+): void {
+  const normalized = normalizeLatexForKatex(latex)
+  if (!normalized) return
+
+  if (display) {
+    const div = doc.createElement('div')
+    div.setAttribute('data-type', 'block-math')
+    div.setAttribute('data-latex', normalized)
+    el.replaceWith(div)
+    return
+  }
+
+  const span = doc.createElement('span')
+  span.setAttribute('data-type', 'inline-math')
+  span.setAttribute('data-latex', normalized)
+  el.replaceWith(span)
+}
+
+function preprocessStandaloneTexAnnotations(doc: Document): boolean {
+  let modified = false
+
+  for (const ann of doc.querySelectorAll('annotation[encoding*="tex" i]')) {
+    if (!(ann instanceof Element)) continue
+    if (ann.closest('[data-type="inline-math"], [data-type="block-math"], .katex')) continue
+
+    const latex = extractLatexFromAnnotation(ann)
+    if (!latex) continue
+
+    const host =
+      ann.closest('.katex-display, .katex, math, [class*="math-display"]') ??
+      ann.parentElement
+    if (!host) continue
+
+    const display =
+      host.matches('.katex-display, [class*="math-display"]') ||
+      looksLikeLatexFormulaLine(latex)
+    insertMathNode(doc, host, latex, display)
+    modified = true
+  }
+
+  return modified
+}
+
 /**
  * Replace KaTeX-rendered spans with TipTap-parseable math nodes before HTML paste.
- * Perplexity stores LaTeX in annotation[encoding="application/x-tex"].
+ * Also handles standalone TeX annotations (Claude / ChatGPT / Perplexity variants).
  */
 export function preprocessKatexHtml(html: string): string {
-  if (!clipboardHtmlHasKatex(html)) return html
+  if (!clipboardHtmlHasMath(html)) return html
 
   try {
     const doc = new DOMParser().parseFromString(html, 'text/html')
-    let modified = false
+    let modified = preprocessStandaloneTexAnnotations(doc)
 
     for (const el of doc.querySelectorAll('.katex-display')) {
       if (el.closest('[data-type="block-math"]')) continue
       const latex = normalizeLatexForKatex(extractLatexFromKatex(el) ?? '')
       if (!latex) continue
-      const div = doc.createElement('div')
-      div.setAttribute('data-type', 'block-math')
-      div.setAttribute('data-latex', latex)
-      el.replaceWith(div)
+      insertMathNode(doc, el, latex, true)
       modified = true
     }
 
@@ -51,17 +103,18 @@ export function preprocessKatexHtml(html: string): string {
       if (!raw) continue
       const latex = normalizeLatexForKatex(raw)
       const useBlock = looksLikeLatexFormulaLine(latex)
-      if (useBlock) {
-        const div = doc.createElement('div')
-        div.setAttribute('data-type', 'block-math')
-        div.setAttribute('data-latex', latex)
-        el.replaceWith(div)
-      } else {
-        const span = doc.createElement('span')
-        span.setAttribute('data-type', 'inline-math')
-        span.setAttribute('data-latex', latex)
-        el.replaceWith(span)
-      }
+      insertMathNode(doc, el, latex, useBlock)
+      modified = true
+    }
+
+    for (const el of doc.querySelectorAll('[data-latex]')) {
+      if (el.closest('[data-type="inline-math"], [data-type="block-math"]')) continue
+      const latex = el.getAttribute('data-latex')?.trim()
+      if (!latex) continue
+      const display =
+        el.matches('.katex-display, [class*="display"]') ||
+        looksLikeLatexFormulaLine(latex)
+      insertMathNode(doc, el, latex, display)
       modified = true
     }
 
