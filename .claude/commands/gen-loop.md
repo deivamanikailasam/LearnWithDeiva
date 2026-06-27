@@ -81,6 +81,12 @@ in order. Do not skip validation. Do not stop early on the happy path.
    inside `document.json`; there is no separate asset file). Skip this step only
    if the document has no images.
 
+5b. **Recalculate duration.** Run:
+   `node scripts/update-computed-durations.mjs --subject <subject> --topic <scope.subsubtopicId>`
+   This reads the document content and writes computed `hours` + `hoursSource: "computed"` to
+   `topic.json`. Never skip this step — without it the sub-subtopic keeps its flat level-default
+   duration instead of a content-derived estimate.
+
 6. **Rebuild app data.** Run `npm run gen:content`.
 
 7. **Verify it renders.** Confirm
@@ -89,21 +95,41 @@ in order. Do not skip validation. Do not stop early on the happy path.
    (the build silently skips invalid docs) — fix the JSON and re-run steps 5–7.
    Do NOT commit a document that failed to compile.
 
-8. **Commit and push.** Stage ONLY the source you authored and push to the
-   feature branch:
+8. **Commit and push.** Stage the document AND the updated topic metadata, then push:
    ```
    git add src/content/subjects/<subject>/topics/<scope.subsubtopicId>/document.json
+   git add src/content/subjects/<subject>/topics/<scope.subsubtopicId>/topic.json
    git commit -m "content(<subject>): <subsubtopic title>"
    git push -u origin claude/langchain-loop-content-gen-wt86f7
    ```
    - `public/data/**` is gitignored — do not try to add it.
    - If `git push` fails due to a network error, retry up to 4 times with
      exponential backoff (2s, 4s, 8s, 16s).
-   - Never commit anything outside the single `document.json` for this run.
+   - Never commit anything outside those two files for this run.
+
+8b. **Merge to main if the stage is now complete.** After a successful push, check:
+   ```
+   npm run content:pending -- --subject <subject> --stage <scope.stageId> --count
+   ```
+   Parse the leading integer from the output. If it is **0** (no remaining sub-subtopics
+   in this stage), the stage is done — merge the feature branch into `main` and push:
+   ```
+   git checkout main
+   git pull --ff-only origin main          # sync with remote main first
+   git merge --no-ff claude/langchain-loop-content-gen-wt86f7 \
+       -m "merge(<subject>): complete stage <scope.stageId>"
+   git push -u origin main
+   git checkout claude/langchain-loop-content-gen-wt86f7
+   ```
+   If the count is non-zero, skip this step silently.
+   If the merge fails (conflict or non-fast-forward), report the failure and leave
+   both branches as-is — do NOT force-merge or commit a broken state.
 
 9. **Report and STOP this step.** Print one line:
    `LOOP-STEP done: <scope.subsubtopicId> — <title> (<N> remaining)`
    where `<N>` is from `npm run content:pending -- --subject <subject-id> --count`.
+   If step 8b ran a stage merge, also print:
+   `STAGE-MERGED: <scope.stageId> merged to main`
    Do not start another sub-subtopic in the same step — the `/loop` wrapper
    handles the next interval.
 
