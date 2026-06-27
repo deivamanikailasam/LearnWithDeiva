@@ -1,0 +1,175 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "VAE as Amortised Variational Inference" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A Variational Autoencoder is, at its core, a neural-network implementation of variational inference. The encoder q_φ(z|x) approximates the intractable posterior p(z|x); the decoder p_θ(x|z) defines the generative model. Training jointly optimises φ and θ to maximise the ELBO — this is exactly amortised variational inference where a shared network predicts variational parameters for any input x."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}(\\theta, \\phi; x) = \\mathbb{E}_{q_\\phi(z|x)}[\\log p_\\theta(x|z)] - \\mathrm{KL}(q_\\phi(z|x) \\| p(z))"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reconstruction term E_q[log p(x|z)] pushes the decoder to reproduce x from samples of the approximate posterior. The KL term regularises the encoder toward the prior p(z) = N(0, I), preventing posterior collapse and enabling sampling at generation time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "KL Closed Form for Diagonal Gaussian" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When q_φ(z|x) = N(μ, diag(σ²)) and p(z) = N(0, I), the KL divergence has a closed form — no Monte Carlo estimate is needed for this term:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathrm{KL}(q \\| p) = -\\frac{1}{2} \\sum_{j=1}^{d} \\left(1 + \\log \\sigma_j^2 - \\mu_j^2 - \\sigma_j^2\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In code this is a single vectorised expression over the encoder outputs:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\ndef kl_gaussian(mu, log_var):\n    \"\"\"\n    KL( N(mu, exp(log_var)) || N(0,I) )  — closed form, per sample.\n    Returns a scalar (mean over batch and latent dims).\n    \"\"\"\n    return -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=1).mean()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Putting It Together: Full VAE Training Step" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\nclass VAE(nn.Module):\n    def __init__(self, x_dim=784, h_dim=512, z_dim=20):\n        super().__init__()\n        # Encoder: x → (μ_z, log σ²_z)\n        self.enc = nn.Sequential(nn.Linear(x_dim, h_dim), nn.ReLU())\n        self.mu_head      = nn.Linear(h_dim, z_dim)\n        self.log_var_head = nn.Linear(h_dim, z_dim)\n        # Decoder: z → x̂\n        self.dec = nn.Sequential(\n            nn.Linear(z_dim, h_dim), nn.ReLU(),\n            nn.Linear(h_dim, x_dim),\n        )\n\n    def encode(self, x):\n        h = self.enc(x)\n        return self.mu_head(h), self.log_var_head(h)\n\n    def reparameterise(self, mu, log_var):\n        std = torch.exp(0.5 * log_var)\n        return mu + std * torch.randn_like(std)   # z = μ + σε\n\n    def decode(self, z):\n        return self.dec(z)   # logits for Bernoulli or means for Gaussian output\n\n    def forward(self, x):\n        mu, log_var = self.encode(x)\n        z = self.reparameterise(mu, log_var)\n        return self.decode(z), mu, log_var\n\n\ndef vae_loss(x_recon_logits, x, mu, log_var):\n    \"\"\"\n    ELBO loss = reconstruction + KL.  (negated, since we minimise.)\n    \"\"\"\n    # Binary cross-entropy reconstruction loss (for binarised inputs)\n    recon = F.binary_cross_entropy_with_logits(x_recon_logits, x, reduction='sum') / x.size(0)\n    kl    = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=1).mean()\n    return recon + kl\n\n\n# Training loop skeleton\nvae   = VAE()\noptim = torch.optim.Adam(vae.parameters(), lr=1e-3)\n\nfor x_batch in dataloader:               # x_batch: (B, 784), values in [0,1]\n    x_flat = x_batch.view(x_batch.size(0), -1)\n    x_recon, mu, log_var = vae(x_flat)\n    loss = vae_loss(x_recon, x_flat, mu, log_var)\n    optim.zero_grad()\n    loss.backward()                      # stochastic backprop through reparameterised z\n    optim.step()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Encoder–Decoder Symmetry" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Despite the autoencoder framing, the encoder and decoder play asymmetric roles in the probabilistic model:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Network" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Probabilistic role" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Purpose" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encoder q_φ(z|x)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Approximate posterior (inference network)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Predicts latent representation of x" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Decoder p_θ(x|z)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Likelihood (generative network)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Generates data from latent code" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Prior p(z)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Usually N(0, I) — fixed" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Enables unconditional generation: sample z ~ p(z), decode" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At test time only the decoder is needed for generation: sample z ~ N(0, I) and pass it through the decoder. The encoder is discarded. This is the key difference from classical autoencoders, where the latent space has no defined distribution and cannot be sampled."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Generation and Interpolation" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "@torch.no_grad()\ndef generate(vae, n_samples=16, z_dim=20):\n    \"\"\"Sample from the prior and decode.\"\"\"\n    z = torch.randn(n_samples, z_dim)           # z ~ N(0, I)\n    x_logits = vae.decode(z)\n    return torch.sigmoid(x_logits)              # probability map for each pixel\n\n@torch.no_grad()\ndef interpolate(vae, x1, x2, steps=10):\n    \"\"\"\n    Interpolate in latent space between two images.\n    Spherical linear interpolation (slerp) preserves distance from origin.\n    \"\"\"\n    mu1, _ = vae.encode(x1)\n    mu2, _ = vae.encode(x2)\n    alphas  = torch.linspace(0, 1, steps)\n    interps = []\n    for a in alphas:\n        z = (1 - a) * mu1 + a * mu2             # linear interp (slerp is more accurate)\n        interps.append(torch.sigmoid(vae.decode(z)))\n    return torch.stack(interps)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Smooth interpolation between two inputs is possible only because the KL regularisation forces the encoder to distribute codes continuously across the prior — a property that classical autoencoders, with no such constraint, do not have."
+          }
+        ]
+      }
+    ]
+  }
+}
