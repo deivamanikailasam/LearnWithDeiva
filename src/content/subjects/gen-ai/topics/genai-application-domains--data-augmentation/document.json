@@ -1,0 +1,249 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Generative AI has become a practical tool for data augmentation: synthesising additional training examples to improve downstream model performance. Where classical augmentation (crop, flip, colour jitter) applies fixed transformations to existing samples, generative augmentation creates semantically new samples — filling in rare classes, generating hard negatives, paraphrasing text, or synthesising labelled images for tasks where real data is expensive to collect. The key question is always whether synthetic data improves model quality without introducing distribution shift or label noise."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why Generative Augmentation"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Class imbalance."},
+              {"type": "text", "text": " When one class has far fewer examples than others, classifiers underfit it. Generating synthetic minority-class samples brings class frequencies into balance without oversampling (which just duplicates noise)."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Rare or dangerous scenarios."},
+              {"type": "text", "text": " Autonomous driving needs millions of examples of pedestrians at night, adverse weather, and near-miss events. Simulation and generative synthesis create these without staging dangerous situations."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Annotation cost reduction."},
+              {"type": "text", "text": " Labelled medical images (X-rays, pathology slides) are expensive to annotate. A generative model trained on labelled data can synthesise additional labelled pairs (image, label)."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "NLP: paraphrase and back-translation."},
+              {"type": "text", "text": " For text classifiers, LLMs can paraphrase training examples (preserve label, change surface form), generate hard negatives, or translate to another language and back — increasing lexical diversity without changing semantics."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Text Augmentation with LLMs"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\n\nclient = anthropic.Anthropic()\n\n\ndef paraphrase(text: str, label: str, n: int = 5) -> list[dict]:\n    \"\"\"\n    Generate n paraphrases of a text example, preserving the label.\n    Used to diversify training examples for text classifiers.\n    \"\"\"\n    prompt = (\n        f\"Generate {n} paraphrases of the following text. \"\n        f\"Preserve the meaning exactly. Output a JSON array of strings only.\\n\\n\"\n        f\"Text: {text}\"\n    )\n    msg = client.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=512,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    paraphrases = json.loads(msg.content[0].text)\n    return [{\"text\": p, \"label\": label} for p in paraphrases]\n\n\ndef generate_hard_negatives(positive: str, label: str, n: int = 3) -> list[dict]:\n    \"\"\"\n    Generate hard negatives: examples that are superficially similar to `positive`\n    but belong to a different class. Improves classifier decision boundaries.\n    \"\"\"\n    negative_label = \"negative\" if label == \"positive\" else \"positive\"\n    prompt = (\n        f\"The following text is a {label} example: '{positive}'.\\n\\n\"\n        f\"Generate {n} examples that are {negative_label} but could be mistaken for {label}. \"\n        f\"Output a JSON array of strings.\"\n    )\n    msg = client.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=512,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    negatives = json.loads(msg.content[0].text)\n    return [{\"text\": n, \"label\": negative_label} for n in negatives]\n\n\ndef augment_dataset(\n    examples: list[dict],   # each dict has 'text' and 'label'\n    paraphrases_per_example: int = 3,\n) -> list[dict]:\n    \"\"\"Augment a labelled dataset with LLM-generated paraphrases.\"\"\"\n    augmented = list(examples)   # start with originals\n    for ex in examples:\n        augmented.extend(paraphrase(ex[\"text\"], ex[\"label\"], n=paraphrases_per_example))\n    return augmented\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Image Augmentation with Diffusion Models"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import StableDiffusionImg2ImgPipeline\nimport torch\nfrom PIL import Image\n\n\ndef img2img_augment(\n    image: Image.Image,\n    prompt: str,\n    strength: float = 0.3,    # 0.0 = original unchanged, 1.0 = completely new\n    n_variants: int = 4,\n    seed_start: int = 42,\n) -> list[Image.Image]:\n    \"\"\"\n    Generate n_variants of an image via img2img diffusion.\n    strength controls how much the original is modified:\n      - 0.2–0.4: subtle variation (lighting, texture) — good for preserving labels\n      - 0.5–0.7: moderate change (style, background)\n      - 0.8+: major change — may alter label-relevant content, use carefully\n\n    Useful for vision classifiers: augment each training image with\n    slight variations that preserve the class-relevant features.\n    \"\"\"\n    pipe = StableDiffusionImg2ImgPipeline.from_pretrained(\n        \"runwayml/stable-diffusion-v1-5\", torch_dtype=torch.float16\n    ).to(\"cuda\")\n\n    variants = []\n    for i in range(n_variants):\n        gen = torch.Generator(device=\"cuda\").manual_seed(seed_start + i)\n        result = pipe(\n            prompt=prompt,\n            image=image,\n            strength=strength,\n            guidance_scale=7.5,\n            generator=gen,\n        )\n        variants.append(result.images[0])\n    return variants\n\n\ndef synthesise_class_images(\n    class_name: str,\n    n_images: int = 50,\n    negative_prompt: str = \"blurry, low quality, watermark\",\n) -> list[Image.Image]:\n    \"\"\"\n    Synthesise training images for a class from scratch using text-to-image.\n    Useful for rare classes with few real examples.\n    Example: class_name = 'cracked concrete wall' for structural defect detection.\n    \"\"\"\n    from diffusers import StableDiffusionPipeline\n    pipe = StableDiffusionPipeline.from_pretrained(\n        \"stabilityai/stable-diffusion-2-1\", torch_dtype=torch.float16\n    ).to(\"cuda\")\n\n    images = []\n    for i in range(n_images):\n        result = pipe(\n            prompt=f\"photograph of {class_name}, high quality, realistic\",\n            negative_prompt=negative_prompt,\n            generator=torch.Generator(device=\"cuda\").manual_seed(i),\n        )\n        images.append(result.images[0])\n    return images\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Synthetic Data for Fine-Tuning LLMs"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A powerful application is using a strong LLM (teacher) to generate instruction-following data that trains a smaller LLM (student). This pipeline — called self-instruct or knowledge distillation via synthesis — underlies models like Alpaca (GPT-3 → LLaMA) and Phi-series (GPT-4 → small models)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def generate_instruction_pairs(\n    topic: str,\n    n_pairs: int = 20,\n    difficulty: str = \"intermediate\",\n) -> list[dict]:\n    \"\"\"\n    Generate (instruction, response) pairs for fine-tuning a smaller LLM.\n    The teacher model creates diverse, high-quality examples on the given topic.\n    \"\"\"\n    prompt = f\"\"\"Generate {n_pairs} diverse instruction-response pairs about: {topic}\nDifficulty: {difficulty}\n\nEach pair should test a different skill or concept.\nOutput as a JSON array of objects with keys 'instruction' and 'response'.\nMake responses accurate, concise, and educational.\"\"\"\n\n    msg = client.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=4096,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    return json.loads(msg.content[0].text)\n\n\ndef generate_qa_from_document(document: str, n_questions: int = 10) -> list[dict]:\n    \"\"\"\n    Extract (question, answer) pairs from a document for RAG evaluation or fine-tuning.\n    Useful for building domain-specific QA datasets without manual annotation.\n    \"\"\"\n    prompt = f\"\"\"Read this document and generate {n_questions} question-answer pairs.\nQuestions should test understanding of key facts, concepts, and relationships.\nOutput as a JSON array of objects with keys 'question' and 'answer'.\n\nDocument:\n{document[:3000]}\"\"\"\n\n    msg = client.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=2048,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    return json.loads(msg.content[0].text)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Risks and Quality Controls"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Label noise."},
+              {"type": "text", "text": " Generated samples may have incorrect labels — a paraphrase may subtly change sentiment; a synthesised image may lack the key visual feature of its class. Always validate a sample of synthetic data before training on it."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Distribution shift."},
+              {"type": "text", "text": " Synthetic data may not match the real deployment distribution. Diffusion-generated images look slightly different from real photos; LLM paraphrases may be more formal or less colloquial than natural text. Test OOD performance carefully."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Model collapse."},
+              {"type": "text", "text": " Training iteratively on model-generated data (model → synthetic data → retrain → repeat) degrades diversity over generations. The model's errors accumulate; rare modes collapse. Keep real data as the anchor."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Reward hacking in RLHF."},
+              {"type": "text", "text": " Synthetic preference data generated by a teacher LLM to train a reward model encodes the teacher's biases. If the teacher prefers verbose answers, the student will optimise for verbosity, not quality."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Augmentation Strategy Comparison"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strategy"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best for"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Risk"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLM paraphrase"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "NLP classifiers, low-data regimes"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Label drift if semantics change subtly"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hard negative mining"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Retrieval, NLI, ranking tasks"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hard negatives may be falsely labelled"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Img2img diffusion"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Vision classifiers, style variation"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High strength may alter class features"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Text-to-image synthesis"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Rare class balancing, medical imaging"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Domain gap; fine-tuning required"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Instruction pair synthesis"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLM fine-tuning (Alpaca pattern)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Teacher biases amplified in student"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Mental model: think of generative augmentation as hiring a smart contractor who has never seen your production system. They can produce plausible-looking work quickly, but you must review it — they might solve a slightly different problem than the one you specified, introduce subtle errors, or build in their own assumptions. The more you anchor them to real examples (few-shot prompting, fine-tuned generation) and validate their output (label review, held-out real-data evaluation), the more reliable the synthetic data becomes."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Generative augmentation creates semantically new samples (paraphrases, synthesised images, instruction pairs) rather than just transforming existing ones — enabling class balancing, rare-event coverage, and annotation-free dataset expansion."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLM paraphrase and hard negative generation are low-cost, high-value augmentations for NLP classifiers; img2img diffusion at low strength (0.2–0.4) adds visual variation without corrupting class-relevant features."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Instruction pair synthesis (teacher → student) underlies Alpaca-style fine-tuning; the key risk is amplifying the teacher model's biases into the student."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model collapse is an existential risk of iterative self-training: always anchor on real data and evaluate on a held-out real distribution to detect drift early."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Validate a random sample of synthetic data before training on it — label noise and distribution shift are the two most common failure modes."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}
