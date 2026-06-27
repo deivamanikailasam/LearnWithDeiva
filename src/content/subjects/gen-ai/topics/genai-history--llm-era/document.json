@@ -1,0 +1,384 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The LLM Era began in earnest with GPT-3 (Brown et al., 2020) — a 175-billion-parameter model that demonstrated a qualitative leap in capability: given a few examples in the prompt, it could translate, summarize, write code, and answer questions without any gradient update. This \"in-context learning\" phenomenon, combined with the observation that capability scales predictably with compute and data, launched a race to train ever-larger models and, eventually, to align them with human intent. Within three years, language models had moved from research curiosity to the backbone of deployed AI products used by hundreds of millions of people."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "In-Context Learning and the GPT-3 Paradigm"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pre-GPT-3 workflow: pretrain on unlabelled text, then fine-tune on a labelled task dataset (hundreds to thousands of examples). GPT-3 changed the paradigm: the model is never fine-tuned; instead you condition it at inference time with a natural-language description and a handful of (input, output) examples — the \"few-shot prompt\":"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef few_shot_classify(text: str, examples: list[dict]) -> str:\n    \"\"\"\n    Classify `text` using in-context learning.\n    `examples` is a list of {\"input\": ..., \"output\": ...} dicts.\n    No fine-tuning — the model adapts from examples in the prompt alone.\n    \"\"\"\n    prompt_lines = []\n    for ex in examples:\n        prompt_lines.append(f\"Text: {ex['input']}\")\n        prompt_lines.append(f\"Label: {ex['output']}\")\n        prompt_lines.append(\"\")\n    prompt_lines.append(f\"Text: {text}\")\n    prompt_lines.append(\"Label:\")\n\n    response = client.messages.create(\n        model=\"claude-opus-4-8\",\n        max_tokens=16,\n        messages=[{\"role\": \"user\", \"content\": \"\\n\".join(prompt_lines)}],\n    )\n    return response.content[0].text.strip()\n\n\nexamples = [\n    {\"input\": \"I loved this movie!\", \"output\": \"positive\"},\n    {\"input\": \"Worst film ever.\",     \"output\": \"negative\"},\n    {\"input\": \"It was okay.\",          \"output\": \"neutral\"},\n]\n\nprint(few_shot_classify(\"Absolutely fantastic experience.\", examples))\n# -> positive  (no task-specific training required)\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The three regimes GPT-3 introduced — zero-shot, one-shot, and few-shot — revealed that a sufficiently large language model develops meta-learning abilities: it learns how to learn from examples embedded in its context window, rather than needing explicit gradient steps."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Instruction Fine-Tuning"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Raw language models complete text continuations; they do not follow instructions. A GPT-3 prompted with \"Summarise this article:\" might continue by generating more instructions rather than a summary. Instruction fine-tuning (IFT) addresses this by curating a dataset of (instruction, response) pairs and supervised fine-tuning the pretrained model on them."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from datasets import load_dataset\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nfrom transformers import TrainingArguments, Trainer\nimport torch\n\n\ndef tokenise_instruction_pair(example, tokenizer, max_length: int = 512):\n    \"\"\"\n    Format an instruction-response pair as a single supervised sequence.\n    Loss is computed only on the response tokens (label = -100 on instruction).\n    \"\"\"\n    instruction = f\"### Instruction:\\n{example['instruction']}\\n\\n### Response:\\n\"\n    response    = example[\"output\"] + tokenizer.eos_token\n\n    inst_ids = tokenizer(instruction, add_special_tokens=False)[\"input_ids\"]\n    resp_ids = tokenizer(response,    add_special_tokens=False)[\"input_ids\"]\n\n    input_ids = (inst_ids + resp_ids)[:max_length]\n    # Mask instruction tokens so the model is only trained to produce the response\n    labels    = ([-100] * len(inst_ids) + resp_ids)[:max_length]\n\n    return {\"input_ids\": input_ids, \"labels\": labels}\n\n\n# Minimal training setup (real runs use DeepSpeed / FSDP for large models)\ndef fine_tune_for_instruction_following(model_name: str, dataset_name: str):\n    tokenizer = AutoTokenizer.from_pretrained(model_name)\n    model     = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)\n\n    dataset = load_dataset(dataset_name, split=\"train\")\n    dataset = dataset.map(lambda ex: tokenise_instruction_pair(ex, tokenizer))\n\n    args = TrainingArguments(\n        output_dir=\"./ift-output\",\n        per_device_train_batch_size=4,\n        gradient_accumulation_steps=8,\n        learning_rate=2e-5,\n        num_train_epochs=3,\n        bf16=True,\n        logging_steps=50,\n    )\n    Trainer(model=model, args=args, train_dataset=dataset).train()\n    return model\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "RLHF: Reinforcement Learning from Human Feedback"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Instruction fine-tuning aligns surface behaviour but cannot capture subtle human preferences (helpfulness vs. harmlessness trade-offs, preferred level of hedging, etc.). RLHF, introduced by Ziegler et al. (2019) and scaled to InstructGPT (Ouyang et al., 2022), adds three stages after pretraining:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Supervised Fine-Tuning (SFT). "},
+              {"type": "text", "text": "Fine-tune the pretrained model on high-quality demonstration data written by human labellers."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Reward Model (RM) Training. "},
+              {"type": "text", "text": "Sample K outputs for the same prompt, have humans rank them, and train a scalar reward model on the resulting preference pairs using the Bradley-Terry loss:"}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "PPO Fine-Tuning. "},
+              {"type": "text", "text": "Use the RM as the reward signal and fine-tune the SFT model with PPO, adding a KL penalty to prevent the policy from drifting too far from the SFT reference."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{RM}} = -\\mathbb{E}_{(y_w, y_l) \\sim \\mathcal{D}} \\left[ \\log \\sigma\\!\\left( r_\\phi(x, y_w) - r_\\phi(x, y_l) \\right) \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where y_w is the preferred (\"winner\") response and y_l is the rejected (\"loser\") response for prompt x."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{J}_{\\text{PPO}}(\\theta) = \\mathbb{E}_{x \\sim \\mathcal{D},\\, y \\sim \\pi_\\theta} \\!\\left[ r_\\phi(x, y) - \\beta \\, \\text{KL}\\!\\left(\\pi_\\theta(\\cdot \\mid x) \\,\\|\\, \\pi_{\\text{ref}}(\\cdot \\mid x)\\right) \\right]"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoModelForSequenceClassification, AutoTokenizer\nimport torch\nimport torch.nn as nn\n\n\nclass RewardModel(nn.Module):\n    \"\"\"\n    A reward model built on top of a pretrained language model.\n    Outputs a scalar reward for a (prompt, response) pair.\n    \"\"\"\n    def __init__(self, base_model_name: str):\n        super().__init__()\n        self.backbone = AutoModelForSequenceClassification.from_pretrained(\n            base_model_name, num_labels=1\n        )\n\n    def forward(self, input_ids, attention_mask):\n        outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)\n        return outputs.logits.squeeze(-1)   # (batch,) scalar reward\n\n\ndef preference_loss(reward_model, tokenizer, prompt: str, y_w: str, y_l: str) -> torch.Tensor:\n    \"\"\"Bradley-Terry preference loss for one (winner, loser) pair.\"\"\"\n    def encode(text):\n        return tokenizer(prompt + text, return_tensors=\"pt\", truncation=True, max_length=512)\n\n    enc_w = encode(y_w)\n    enc_l = encode(y_l)\n\n    r_w = reward_model(**enc_w)   # scalar: reward for winner\n    r_l = reward_model(**enc_l)   # scalar: reward for loser\n\n    # Log-sigmoid of the reward difference\n    loss = -torch.nn.functional.logsigmoid(r_w - r_l).mean()\n    return loss\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "InstructGPT (1.3B parameters, RLHF) was preferred over GPT-3 (175B, no RLHF) in 85% of human evaluations — demonstrating that alignment can outweigh raw model size."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Chain-of-Thought and Emergent Reasoning"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Wei et al. (2022) discovered that prompting a large model to \"think step by step\" dramatically improved performance on multi-step reasoning tasks — an ability absent in smaller models and not explicitly trained for. This emergent behaviour, called chain-of-thought (CoT), revealed that LLMs can use the generated tokens as working memory for intermediate reasoning steps."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef solve_with_cot(problem: str) -> dict:\n    \"\"\"\n    Solve a reasoning problem using chain-of-thought prompting.\n    Returns both the reasoning trace and the final answer.\n    \"\"\"\n    system = (\n        \"You are a precise reasoning assistant. \"\n        \"Work through each problem step by step before giving your final answer. \"\n        \"End your response with 'Final answer: <value>'.\"\n    )\n    response = client.messages.create(\n        model=\"claude-opus-4-8\",\n        max_tokens=1024,\n        system=system,\n        messages=[{\"role\": \"user\", \"content\": problem}],\n    )\n    full_text = response.content[0].text\n\n    # Extract reasoning and final answer\n    if \"Final answer:\" in full_text:\n        parts = full_text.rsplit(\"Final answer:\", 1)\n        return {\"reasoning\": parts[0].strip(), \"answer\": parts[1].strip()}\n    return {\"reasoning\": full_text, \"answer\": None}\n\n\n# Example: multi-step arithmetic that naive models get wrong\nproblem = (\n    \"Roger has 5 tennis balls. He buys 2 cans of tennis balls. \"\n    \"Each can has 3 balls. He gives away 4 balls to a friend. \"\n    \"How many does he have left?\"\n)\nresult = solve_with_cot(problem)\nprint(result[\"reasoning\"])\nprint(\"Answer:\", result[\"answer\"])  # 7\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Zero-shot CoT (Kojima et al., 2022) showed that simply appending \"Let's think step by step\" to any prompt elicits reasoning without task-specific examples, further cementing the emergent nature of the capability."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Foundation Model Ecosystem (2022–2024)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ChatGPT's launch in November 2022 demonstrated that RLHF-aligned LLMs could serve as general-purpose conversational assistants at scale. The period that followed saw rapid capability expansion along three axes: scale, alignment, and modality."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Year"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model / System"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Key advance"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2020"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-3 (175B)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Few-shot in-context learning at scale"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2021"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Codex / GitHub Copilot"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Code generation; fill-in-the-middle pretraining"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2022"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "InstructGPT / ChatGPT"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RLHF alignment; conversational interface for general public"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2022"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Chinchilla (70B)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Compute-optimal training: ~20 tokens per parameter"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2023"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-4 / Claude / Gemini"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multimodal input; long context (128k–1M tokens); constitutional AI"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2023"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLaMA / Mistral / Falcon"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Open-weight models; fine-tuneable on consumer GPUs"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2024"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-4o / Claude 3 / Gemini 1.5 Pro"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Omni-modal; 1M-token context; tool use and function calling"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Tool Use and Agentic LLMs"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Modern LLMs are increasingly deployed not as one-shot responders but as agents that call tools — web search, code interpreters, APIs, file systems — and reason over multi-step plans. The model produces structured tool calls; results are fed back into the context; the model continues until the task is complete."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\n\nclient = anthropic.Anthropic()\n\n# Define tools the model can invoke\ntools = [\n    {\n        \"name\": \"calculator\",\n        \"description\": \"Evaluates a Python arithmetic expression and returns the result.\",\n        \"input_schema\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"expression\": {\"type\": \"string\", \"description\": \"e.g. '(12 * 3.14159) ** 2'\"}\n            },\n            \"required\": [\"expression\"],\n        },\n    },\n    {\n        \"name\": \"web_search\",\n        \"description\": \"Searches the web and returns the top results.\",\n        \"input_schema\": {\n            \"type\": \"object\",\n            \"properties\": {\"query\": {\"type\": \"string\"}},\n            \"required\": [\"query\"],\n        },\n    },\n]\n\n\ndef run_tool(name: str, inputs: dict) -> str:\n    \"\"\"Stub that would dispatch to real tool implementations.\"\"\"\n    if name == \"calculator\":\n        result = eval(inputs[\"expression\"], {\"__builtins__\": {}})   # safe eval in practice\n        return str(result)\n    if name == \"web_search\":\n        return f\"[Search results for '{inputs['query']}' would appear here]\"\n    return \"Unknown tool\"\n\n\ndef agentic_loop(user_message: str) -> str:\n    \"\"\"\n    Run the model in a loop: generate -> execute tool calls -> feed results back.\n    Stops when the model produces a text-only response (no tool calls).\n    \"\"\"\n    messages = [{\"role\": \"user\", \"content\": user_message}]\n\n    while True:\n        response = client.messages.create(\n            model=\"claude-opus-4-8\",\n            max_tokens=1024,\n            tools=tools,\n            messages=messages,\n        )\n\n        if response.stop_reason == \"end_turn\":\n            # Final text answer\n            return next(b.text for b in response.content if b.type == \"text\")\n\n        # Execute all tool calls in this turn\n        tool_results = []\n        for block in response.content:\n            if block.type == \"tool_use\":\n                result = run_tool(block.name, block.input)\n                tool_results.append({\n                    \"type\": \"tool_result\",\n                    \"tool_use_id\": block.id,\n                    \"content\": result,\n                })\n\n        # Append model response and tool results, then continue\n        messages.append({\"role\": \"assistant\", \"content\": response.content})\n        messages.append({\"role\": \"user\", \"content\": tool_results})\n\n\nanswer = agentic_loop(\"What is 15% of 847, and what is the population of Tokyo?\")\nprint(answer)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Constitutional AI and Preference Optimisation Alternatives"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic's Constitutional AI (Bai et al., 2022) showed that a model could critique and revise its own outputs against a written constitution of principles (\"be helpful, harmless, and honest\"), reducing reliance on human labellers for the harmlessness signal. This approach — called RLAIF (RL from AI Feedback) — scales alignment without proportionally scaling human annotation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Direct Preference Optimisation (DPO, Rafailov et al., 2023) eliminated the separate reward model entirely, re-parameterising the RLHF objective directly in terms of the policy:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{DPO}}(\\theta) = -\\mathbb{E}_{(x,y_w,y_l)} \\left[ \\log \\sigma\\!\\left( \\beta \\log \\frac{\\pi_\\theta(y_w \\mid x)}{\\pi_{\\text{ref}}(y_w \\mid x)} - \\beta \\log \\frac{\\pi_\\theta(y_l \\mid x)}{\\pi_{\\text{ref}}(y_l \\mid x)} \\right) \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DPO trains with a single supervised objective on preference pairs, making it simpler to implement and more stable than PPO — at the cost of less flexibility in reward shaping."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "What Defines This Era"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Scale as a first-class design variable. "},
+              {"type": "text", "text": "Neural scaling laws (Hoffmann et al., 2022) make training budget allocation principled: given a fixed compute budget C, optimal model size N* ∝ C^0.5 and optimal token count D* ∝ C^0.5."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Alignment as an engineering discipline. "},
+              {"type": "text", "text": "RLHF, DPO, Constitutional AI, and debate are distinct techniques for the same goal: making model behaviour match human values without sacrificing capability."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Foundation model + adaptation. "},
+              {"type": "text", "text": "One large pretrained model (the \"foundation\") serves many downstream tasks via prompting, RAG, or lightweight fine-tuning (LoRA, QLoRA) — rather than training task-specific models from scratch."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Multimodal unification. "},
+              {"type": "text", "text": "Images, audio, video, and code are increasingly handled by unified architectures that project all modalities into a shared token space and process them with the same Transformer backbone."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The LLM era's defining contribution is not any single model but the discovery that a single training paradigm — predict the next token at internet scale, then align with human preferences — produces systems capable of generalist reasoning across virtually every domain humans communicate about in language."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
