@@ -1,0 +1,239 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A pretrained foundation model is a general-purpose starting point. Adaptation is the process of steering it toward a specific task, domain, or behaviour — without discarding the knowledge acquired during pretraining. The choice of adaptation method determines the trade-off between compute cost, data requirement, inference overhead, and degree of specialisation. This topic covers the four main approaches in order of increasing compute: prompting, retrieval augmentation, parameter-efficient fine-tuning (PEFT), and full fine-tuning."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Prompting"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The lightest adaptation: compose a natural-language instruction, optionally with a few input-output examples, and prepend it to the user's query. No weights change. The model is adapted purely through the information present in its context window."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef classify_sentiment(texts: list[str]) -> list[str]:\n    \"\"\"\n    Few-shot sentiment classifier — no fine-tuning, just prompting.\n    Returns 'positive', 'negative', or 'neutral' for each text.\n    \"\"\"\n    system = \"\"\"You are a sentiment classifier. Reply with exactly one word:\n'positive', 'negative', or 'neutral'. No explanation.\"\"\"\n\n    few_shot_prefix = \"\"\"Text: The product exceeded all my expectations.\nSentiment: positive\n\nText: Delivery was late and the packaging was damaged.\nSentiment: negative\n\nText: It arrived on Tuesday.\nSentiment: neutral\n\"\"\"\n\n    results = []\n    for text in texts:\n        prompt = few_shot_prefix + f\"Text: {text}\\nSentiment:\"\n        response = client.messages.create(\n            model=\"claude-opus-4-8\",\n            max_tokens=5,\n            system=system,\n            messages=[{\"role\": \"user\", \"content\": prompt}],\n        )\n        results.append(response.content[0].text.strip().lower())\n    return results\n\n\nprint(classify_sentiment([\n    \"Absolutely love it!\",\n    \"Stopped working after a week.\",\n    \"Comes in three colours.\",\n]))\n# ['positive', 'negative', 'neutral']\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompting is free (no GPU, no data curation), but it has a ceiling: if the task requires domain-specific vocabulary the model never saw, or behaviour that conflicts with its pretraining distribution, prompting alone cannot close the gap."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Retrieval-Augmented Generation (RAG)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "RAG decouples knowledge from model weights: a retriever fetches relevant documents from an external store at inference time, and those documents are injected into the prompt. This lets the model answer questions about documents it never saw during training, and makes knowledge updates cheap (update the store, not the model)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport numpy as np\nfrom dataclasses import dataclass\n\nclient = anthropic.Anthropic()\n\n\n@dataclass\nclass Document:\n    id: str\n    text: str\n    embedding: np.ndarray\n\n\ndef embed_text(text: str) -> np.ndarray:\n    \"\"\"Placeholder — in production use a real embedding model.\"\"\"\n    # e.g. text-embedding-3-small, voyage-large-2, or a local sentence-transformer\n    raise NotImplementedError(\"Replace with your embedding call\")\n\n\nclass SimpleVectorStore:\n    \"\"\"Flat cosine-similarity vector store (replace with FAISS/Pinecone for scale).\"\"\"\n\n    def __init__(self):\n        self.docs: list[Document] = []\n\n    def add(self, doc_id: str, text: str):\n        emb = embed_text(text)\n        self.docs.append(Document(id=doc_id, text=text, embedding=emb))\n\n    def search(self, query: str, k: int = 3) -> list[Document]:\n        q_emb = embed_text(query)\n        scores = [\n            np.dot(q_emb, d.embedding) /\n            (np.linalg.norm(q_emb) * np.linalg.norm(d.embedding) + 1e-9)\n            for d in self.docs\n        ]\n        top_k = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]\n        return [self.docs[i] for i in top_k]\n\n\ndef rag_answer(store: SimpleVectorStore, question: str) -> str:\n    \"\"\"Retrieve relevant docs, inject into prompt, generate answer.\"\"\"\n    retrieved = store.search(question, k=3)\n    context = \"\\n\\n\".join(f\"[{d.id}] {d.text}\" for d in retrieved)\n\n    prompt = f\"\"\"Use only the provided context to answer the question.\nIf the answer is not in the context, say so.\n\nContext:\n{context}\n\nQuestion: {question}\"\"\"\n\n    response = client.messages.create(\n        model=\"claude-opus-4-8\",\n        max_tokens=512,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    return response.content[0].text\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Parameter-Efficient Fine-Tuning (PEFT)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Full fine-tuning updates all parameters — expensive for models above a few billion parameters, and prone to catastrophic forgetting of pretraining knowledge. PEFT methods freeze most weights and introduce a small number of trainable parameters, matching or approaching full fine-tuning quality at a fraction of the cost."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "LoRA (Low-Rank Adaptation)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LoRA (Hu et al., 2022) decomposes each weight update ΔW into a product of two low-rank matrices:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "W' = W_0 + \\Delta W = W_0 + BA, \\quad B \\in \\mathbb{R}^{d \\times r},\\; A \\in \\mathbb{R}^{r \\times k},\\; r \\ll \\min(d, k)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "W₀ is frozen; only A and B are trained. With rank r = 8 on a 7B-parameter model, LoRA introduces ~0.1% extra parameters. At inference, BA can be merged into W₀ so there is zero additional latency."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\nfrom peft import get_peft_model, LoraConfig, TaskType\nfrom transformers import TrainingArguments, Trainer\nfrom datasets import Dataset\n\n\ndef lora_fine_tune(\n    base_model_name: str,\n    train_texts: list[str],\n    r: int = 8,\n    lora_alpha: int = 16,\n):\n    \"\"\"\n    Fine-tune a causal LM with LoRA.\n    Only Q and V projection matrices get adapters (common default).\n    r: adapter rank — higher r = more capacity but more parameters.\n    lora_alpha: scaling factor; effective lr scales as lora_alpha / r.\n    \"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(base_model_name)\n    tokenizer.pad_token = tokenizer.eos_token\n\n    model = AutoModelForCausalLM.from_pretrained(\n        base_model_name, torch_dtype=torch.bfloat16\n    )\n\n    config = LoraConfig(\n        task_type=TaskType.CAUSAL_LM,\n        r=r,\n        lora_alpha=lora_alpha,\n        target_modules=[\"q_proj\", \"v_proj\"],\n        lora_dropout=0.05,\n        bias=\"none\",\n    )\n    model = get_peft_model(model, config)\n    model.print_trainable_parameters()\n    # e.g. \"trainable params: 4,194,304 || all params: 6,742,609,920 || trainable%: 0.0622\"\n\n    def tokenize(examples):\n        return tokenizer(\n            examples[\"text\"], truncation=True, max_length=512, padding=\"max_length\"\n        )\n\n    dataset = Dataset.from_dict({\"text\": train_texts}).map(tokenize, batched=True)\n    dataset = dataset.map(lambda x: {\"labels\": x[\"input_ids\"]})\n\n    args = TrainingArguments(\n        output_dir=\"./lora-output\",\n        per_device_train_batch_size=4,\n        num_train_epochs=3,\n        learning_rate=3e-4,   # higher than full FT is fine for LoRA\n        bf16=True,\n        logging_steps=10,\n    )\n    Trainer(model=model, args=args, train_dataset=dataset).train()\n\n    # Merge LoRA weights into base model (zero inference overhead)\n    merged = model.merge_and_unload()\n    return merged\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "QLoRA"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "QLoRA (Dettmers et al., 2023) combines LoRA with 4-bit quantisation of the frozen base model. A 65B-parameter model fits on a single 48 GB GPU and can be fine-tuned at near full-precision quality. The key techniques: 4-bit NormalFloat (NF4) quantisation of the frozen weights, double quantisation to further compress the quantisation constants, and paged optimisers to handle memory spikes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom transformers import AutoModelForCausalLM, BitsAndBytesConfig\nfrom peft import prepare_model_for_kbit_training, get_peft_model, LoraConfig, TaskType\n\n\ndef load_qlora_model(model_name: str):\n    \"\"\"\n    Load a model in 4-bit NF4 (QLoRA setup).\n    Base weights are quantised and frozen; LoRA adapters are in bfloat16.\n    \"\"\"\n    bnb_config = BitsAndBytesConfig(\n        load_in_4bit=True,\n        bnb_4bit_quant_type=\"nf4\",         # NormalFloat4: better for normally distributed weights\n        bnb_4bit_compute_dtype=torch.bfloat16,\n        bnb_4bit_use_double_quant=True,    # quantise the quantisation constants too\n    )\n    model = AutoModelForCausalLM.from_pretrained(\n        model_name,\n        quantization_config=bnb_config,\n        device_map=\"auto\",\n    )\n    # Cast LayerNorm and lm_head back to float32 for training stability\n    model = prepare_model_for_kbit_training(model)\n\n    lora_config = LoraConfig(\n        task_type=TaskType.CAUSAL_LM,\n        r=64,          # can afford higher rank since base model is compressed\n        lora_alpha=16,\n        target_modules=[\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\"],\n        lora_dropout=0.05,\n    )\n    return get_peft_model(model, lora_config)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Full Fine-Tuning"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "All parameters are updated on task-specific data. Appropriate when: (a) the target domain differs substantially from pretraining, (b) you have enough labelled data (>100K examples), and (c) you have the compute budget. Use FSDP or DeepSpeed ZeRO to shard parameters across GPUs for models too large to fit on one device."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Choosing an Adaptation Method"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Method"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Labelled data needed"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPU cost"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Inference overhead"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best for"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompting"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "0–20 examples"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Rapid prototyping, general tasks"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RAG"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None (documents)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Embeddings only"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Retrieval latency"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Knowledge-intensive QA, live docs"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LoRA / QLoRA"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1K–100K examples"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low (1–8 GPUs)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None after merge"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Style/domain adaptation, chat fine-tuning"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Full fine-tune"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": ">100K examples"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (many GPUs)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Significant domain shift, instruction tuning"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Start with prompting. Move to RAG when the task is knowledge-intensive and the corpus changes frequently. Move to LoRA when you have a consistent style or format requirement and enough labelled examples. Reserve full fine-tuning for cases where the target distribution is genuinely out-of-distribution relative to the pretrained model."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

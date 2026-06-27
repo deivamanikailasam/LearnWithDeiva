@@ -1,0 +1,313 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Image generation is the application domain that brought generative AI into mainstream awareness. Diffusion models (Stable Diffusion, DALL-E, Midjourney, Imagen) can synthesise photorealistic images, illustrations, and artwork from a text prompt in seconds. The same underlying models support editing (inpainting, outpainting), style transfer, super-resolution, and controlled generation conditioned on depth maps, sketches, or human pose. Vision-language models extend the pipeline further, accepting both image and text inputs to answer questions, generate captions, or reason about visual content."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Image Generation Pipeline"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Modern text-to-image systems share a common three-stage pipeline:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Text encoding."},
+              {"type": "text", "text": " A frozen text encoder (CLIP, T5, or a custom language model) maps the prompt to a sequence of embeddings. These embeddings condition all subsequent steps via cross-attention."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Latent diffusion."},
+              {"type": "text", "text": " A U-Net denoises a random latent tensor z_T ~ N(0, I) over T steps in the VAE latent space. At each step the U-Net receives (z_t, t, text_embeddings) and predicts the noise to remove. Classifier-free guidance amplifies the conditional direction."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "VAE decoding."},
+              {"type": "text", "text": " The denoised latent z_0 is decoded by the VAE decoder D to produce the final pixel image. The VAE is pre-trained and frozen during diffusion training."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Text-to-Image via API"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport base64\nfrom pathlib import Path\n\nclient = anthropic.Anthropic()\n\n\ndef describe_image(image_path: str, question: str = \"What is in this image?\") -> str:\n    \"\"\"\n    Vision QA: send an image to Claude and ask a question about it.\n    Claude's vision accepts JPEG, PNG, GIF, and WEBP up to 5 MB.\n    \"\"\"\n    image_data = Path(image_path).read_bytes()\n    b64 = base64.standard_b64encode(image_data).decode(\"utf-8\")\n\n    # Detect media type from extension\n    ext = Path(image_path).suffix.lower()\n    media_type = {\"jpg\": \"image/jpeg\", \"jpeg\": \"image/jpeg\",\n                  \"png\": \"image/png\", \"gif\": \"image/gif\",\n                  \"webp\": \"image/webp\"}.get(ext.lstrip(\".\"), \"image/jpeg\")\n\n    message = client.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=512,\n        messages=[\n            {\n                \"role\": \"user\",\n                \"content\": [\n                    {\"type\": \"image\", \"source\": {\"type\": \"base64\", \"media_type\": media_type, \"data\": b64}},\n                    {\"type\": \"text\", \"text\": question},\n                ],\n            }\n        ],\n    )\n    return message.content[0].text\n\n\ndef compare_images(path_a: str, path_b: str) -> str:\n    \"\"\"Send two images and ask Claude to compare them.\"\"\"\n    def load(p):\n        data = Path(p).read_bytes()\n        return base64.standard_b64encode(data).decode()\n\n    message = client.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=512,\n        messages=[\n            {\n                \"role\": \"user\",\n                \"content\": [\n                    {\"type\": \"image\", \"source\": {\"type\": \"base64\", \"media_type\": \"image/png\", \"data\": load(path_a)}},\n                    {\"type\": \"image\", \"source\": {\"type\": \"base64\", \"media_type\": \"image/png\", \"data\": load(path_b)}},\n                    {\"type\": \"text\", \"text\": \"Compare these two images. What are the key differences?\"},\n                ],\n            }\n        ],\n    )\n    return message.content[0].text\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Stable Diffusion: Local Generation"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler\nimport torch\nfrom PIL import Image\n\n\ndef load_pipeline(model_id: str = \"stabilityai/stable-diffusion-2-1\") -> StableDiffusionPipeline:\n    \"\"\"\n    Load a Stable Diffusion pipeline with the fast DPM-Solver++ scheduler.\n    DPMSolverMultistepScheduler reaches good quality in 20 steps vs DDPM's 1000.\n    \"\"\"\n    pipe = StableDiffusionPipeline.from_pretrained(\n        model_id,\n        torch_dtype=torch.float16,   # half precision saves ~4 GB VRAM\n    )\n    # Swap the default DDPM scheduler for the faster DPM-Solver++ (20 steps)\n    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)\n    pipe = pipe.to(\"cuda\")\n    return pipe\n\n\ndef text_to_image(\n    pipe: StableDiffusionPipeline,\n    prompt: str,\n    negative_prompt: str = \"blurry, low quality, distorted\",\n    guidance_scale: float = 7.5,\n    num_inference_steps: int = 20,\n    seed: int | None = None,\n) -> Image.Image:\n    \"\"\"\n    Generate an image from a text prompt.\n    guidance_scale: classifier-free guidance weight (7–12 typical for photorealism).\n    negative_prompt: tokens to steer away from — reduces common artifacts.\n    \"\"\"\n    generator = torch.Generator(device=\"cuda\").manual_seed(seed) if seed is not None else None\n    result = pipe(\n        prompt=prompt,\n        negative_prompt=negative_prompt,\n        guidance_scale=guidance_scale,\n        num_inference_steps=num_inference_steps,\n        generator=generator,\n    )\n    return result.images[0]\n\n\ndef inpaint(\n    pipe,            # StableDiffusionInpaintPipeline\n    image: Image.Image,\n    mask: Image.Image,   # white pixels = region to regenerate\n    prompt: str,\n) -> Image.Image:\n    \"\"\"\n    Inpainting: regenerate the masked region conditioned on the prompt.\n    The unmasked region is preserved exactly; only the mask is denoised.\n    \"\"\"\n    result = pipe(prompt=prompt, image=image, mask_image=mask, num_inference_steps=20)\n    return result.images[0]\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Controlled Generation with ControlNet"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ControlNet (Zhang et al., 2023) adds spatial conditioning to a frozen diffusion U-Net by training a trainable copy of the encoder. The condition (Canny edges, depth map, human pose skeleton, normal map) is encoded and added to the U-Net's residual connections at each scale. This enables precise geometric control over the generated image while keeping the text-conditioning and visual quality of the base model."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import ControlNetModel, StableDiffusionControlNetPipeline\nimport torch\nimport cv2\nimport numpy as np\nfrom PIL import Image\n\n\ndef canny_edges(image: Image.Image, low: int = 100, high: int = 200) -> Image.Image:\n    \"\"\"Extract Canny edges as a ControlNet condition image.\"\"\"\n    gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)\n    edges = cv2.Canny(gray, low, high)\n    return Image.fromarray(np.stack([edges] * 3, axis=-1))   # RGB edge map\n\n\ndef generate_from_edges(\n    source_image: Image.Image,\n    prompt: str,\n    controlnet_id: str = \"lllyasviel/sd-controlnet-canny\",\n    base_model_id: str = \"runwayml/stable-diffusion-v1-5\",\n) -> Image.Image:\n    \"\"\"\n    Synthesise a new image that follows the edge structure of source_image.\n    Use case: sketch-to-photo, style transfer preserving composition.\n    \"\"\"\n    controlnet = ControlNetModel.from_pretrained(controlnet_id, torch_dtype=torch.float16)\n    pipe = StableDiffusionControlNetPipeline.from_pretrained(\n        base_model_id, controlnet=controlnet, torch_dtype=torch.float16\n    ).to(\"cuda\")\n\n    edge_image = canny_edges(source_image)\n    result = pipe(\n        prompt=prompt,\n        image=edge_image,\n        num_inference_steps=20,\n        guidance_scale=7.5,\n    )\n    return result.images[0]\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Image Generation Task Comparison"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Task"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Input"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Output"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Typical use case"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Text-to-image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompt"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "New image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Creative generation, concept art, stock imagery"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Inpainting"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Image + mask + prompt"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Edited image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Object removal, background replacement"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Outpainting"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Image + extended canvas + prompt"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Expanded image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Extending photo borders, widening aspect ratio"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Image-to-image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Image + prompt + strength"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Restyled image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Style transfer, sketch-to-photo"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "ControlNet"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Condition map + prompt"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Controlled image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pose-guided portraits, depth-consistent scenes"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Super-resolution"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low-res image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High-res image"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Upscaling photos, restoring compressed images"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Vision QA"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Image + text question"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Text answer"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Document understanding, chart reading, OCR"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Prompt Engineering for Images"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Image quality is heavily prompt-sensitive. Key patterns that reliably improve output:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Style qualifier first."},
+              {"type": "text", "text": " Placing the style descriptor early gives it higher attention weight: \"Oil painting of a lighthouse at sunset\" beats \"A lighthouse at sunset, oil painting style\"."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Negative prompts."},
+              {"type": "text", "text": " Steer away from common artifacts: \"blurry, low quality, watermark, text, extra fingers, deformed\" consistently improves photorealistic outputs."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Guidance scale."},
+              {"type": "text", "text": " Low (3–5): creative, painterly, loose. Medium (7–9): balanced prompt adherence. High (12–15): very literal, often over-saturated. The optimal value depends on the model and scheduler."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Seed control."},
+              {"type": "text", "text": " Fix the seed to reproduce a composition, then vary the prompt. Release the seed for maximum diversity when exploring."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Evaluation: FID and CLIP Score"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Fréchet Inception Distance (FID) measures the distributional similarity between generated and real images using Inception-v3 feature statistics:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{FID} = \\|\\mu_r - \\mu_g\\|^2 + \\operatorname{tr}\\!\\left(\\Sigma_r + \\Sigma_g - 2\\left(\\Sigma_r \\Sigma_g\\right)^{1/2}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lower FID = more realistic. CLIP Score measures prompt-image alignment: cosine similarity between the CLIP text embedding of the prompt and the CLIP image embedding of the generated image. High CLIP score means the image matches the prompt; high FID means it looks realistic — both are needed for good text-to-image quality."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Mental model: image generation is iterative sculpture in latent space. The model starts with a noise blob and gradually carves away uncertainty, guided at each step by both the text prompt (what to sculpt toward) and the noise schedule (how much to remove this step). The VAE is the lens that translates between the low-dimensional latent workspace and the high-dimensional pixel canvas. ControlNet bolts on a spatial ruler that constrains the sculpture's geometry without changing the material or style."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Text-to-image pipelines combine a text encoder, a latent diffusion U-Net, and a VAE decoder. The diffusion model never touches pixels — it operates in the VAE's compact latent space."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Classifier-free guidance (scale 7–12) amplifies the conditional (text) direction relative to unconditional generation, trading diversity for prompt fidelity."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Inpainting, outpainting, image-to-image, and ControlNet reuse the same base model with different conditioning — no retraining needed."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Vision-language models (Claude, GPT-4V) accept image inputs and perform QA, captioning, OCR, and chart reading — complementing image generation with image understanding."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "FID measures realism (distributional similarity to real images); CLIP score measures prompt alignment. Both are needed to evaluate a text-to-image system."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}

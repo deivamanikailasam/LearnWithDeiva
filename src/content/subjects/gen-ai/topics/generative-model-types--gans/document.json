@@ -1,0 +1,371 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Generative Adversarial Networks (GANs) frame image synthesis as a two-player game. A generator G maps random noise z ~ p(z) to fake samples G(z); a discriminator D tries to tell real samples x ~ p_data(x) from fakes. Both are trained simultaneously: G improves to fool D; D improves to expose G. At equilibrium, G should produce samples indistinguishable from real data. Unlike VAEs, GANs produce sharp, high-fidelity outputs with no explicit likelihood — making them dominant for image synthesis throughout 2016–2022."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Minimax Objective"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The original GAN formulation (Goodfellow et al., 2014) is a minimax game:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\min_G \\max_D \\; V(D, G) = \\mathbb{E}_{x \\sim p_{\\text{data}}}[\\log D(x)] + \\mathbb{E}_{z \\sim p(z)}[\\log(1 - D(G(z)))]"
+        }
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "D maximises: correctly label real samples as 1 and fakes as 0 (binary cross-entropy loss)."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "G minimises: make D assign high probability to G(z) — i.e. fool D into thinking G(z) is real."}]}]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice, G minimising log(1 − D(G(z))) produces vanishing gradients early in training when D easily rejects poor fakes. The non-saturating alternative maximises log D(G(z)) instead, giving much stronger gradients for G at the start."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_G^{\\text{non-sat}} = -\\mathbb{E}_{z \\sim p(z)}[\\log D(G(z))]"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Architecture: Generator and Discriminator"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom torch import Tensor\n\n\nclass DCGANGenerator(nn.Module):\n    \"\"\"\n    DCGAN generator: maps latent vector z -> image via transposed convolutions.\n    Architecture follows Radford et al. (2015): BatchNorm + ReLU everywhere,\n    Tanh at output, no fully-connected layers except the projection.\n    \"\"\"\n    def __init__(self, latent_dim: int = 100, channels: int = 64):\n        super().__init__()\n        self.net = nn.Sequential(\n            # z: (B, latent_dim) -> project & reshape to (B, 8C, 4, 4)\n            nn.ConvTranspose2d(latent_dim, channels * 8, 4, 1, 0, bias=False),\n            nn.BatchNorm2d(channels * 8), nn.ReLU(True),\n            # -> (B, 4C, 8, 8)\n            nn.ConvTranspose2d(channels * 8, channels * 4, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(channels * 4), nn.ReLU(True),\n            # -> (B, 2C, 16, 16)\n            nn.ConvTranspose2d(channels * 4, channels * 2, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(channels * 2), nn.ReLU(True),\n            # -> (B, C, 32, 32)\n            nn.ConvTranspose2d(channels * 2, channels, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(channels), nn.ReLU(True),\n            # -> (B, 3, 64, 64)\n            nn.ConvTranspose2d(channels, 3, 4, 2, 1, bias=False),\n            nn.Tanh(),  # outputs in [-1, 1]\n        )\n\n    def forward(self, z: Tensor) -> Tensor:\n        return self.net(z.unsqueeze(-1).unsqueeze(-1))  # (B, 3, 64, 64)\n\n\nclass DCGANDiscriminator(nn.Module):\n    \"\"\"\n    DCGAN discriminator: strided convolutions, no pooling, LeakyReLU.\n    Outputs a scalar logit (real vs fake); apply BCEWithLogitsLoss.\n    \"\"\"\n    def __init__(self, channels: int = 64):\n        super().__init__()\n        self.net = nn.Sequential(\n            # (B, 3, 64, 64) -> (B, C, 32, 32)\n            nn.Conv2d(3, channels, 4, 2, 1, bias=False),\n            nn.LeakyReLU(0.2, inplace=True),\n            # -> (B, 2C, 16, 16)\n            nn.Conv2d(channels, channels * 2, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(channels * 2), nn.LeakyReLU(0.2, inplace=True),\n            # -> (B, 4C, 8, 8)\n            nn.Conv2d(channels * 2, channels * 4, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(channels * 4), nn.LeakyReLU(0.2, inplace=True),\n            # -> (B, 8C, 4, 4)\n            nn.Conv2d(channels * 4, channels * 8, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(channels * 8), nn.LeakyReLU(0.2, inplace=True),\n            # -> (B, 1, 1, 1)\n            nn.Conv2d(channels * 8, 1, 4, 1, 0, bias=False),\n            nn.Flatten(),  # (B, 1)\n        )\n\n    def forward(self, x: Tensor) -> Tensor:\n        return self.net(x)  # (B, 1) logits\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Training Loop"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GAN training alternates between updating D (one or more steps) and updating G (one step). Both optimisers run on separate parameter sets."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def gan_train_step(\n    G: DCGANGenerator,\n    D: DCGANDiscriminator,\n    opt_G: torch.optim.Optimizer,\n    opt_D: torch.optim.Optimizer,\n    real: Tensor,\n    latent_dim: int = 100,\n    n_critic: int = 1,\n) -> dict:\n    B = real.size(0)\n    device = real.device\n    bce = nn.BCEWithLogitsLoss()\n\n    # ── Discriminator update ─────────────────────────────────────────────────\n    D_losses = []\n    for _ in range(n_critic):\n        z = torch.randn(B, latent_dim, device=device)\n        fake = G(z).detach()  # detach so G grads don't flow here\n\n        real_logits = D(real)          # should be high (label 1)\n        fake_logits = D(fake)          # should be low  (label 0)\n\n        d_loss = bce(real_logits, torch.ones_like(real_logits)) + \\\n                 bce(fake_logits, torch.zeros_like(fake_logits))\n\n        opt_D.zero_grad()\n        d_loss.backward()\n        opt_D.step()\n        D_losses.append(d_loss.item())\n\n    # ── Generator update (non-saturating) ───────────────────────────────────\n    z = torch.randn(B, latent_dim, device=device)\n    fake = G(z)\n    fake_logits = D(fake)  # D is updated; don't detach\n\n    # Maximise log D(G(z)) <=> minimise -log D(G(z))\n    g_loss = bce(fake_logits, torch.ones_like(fake_logits))\n\n    opt_G.zero_grad()\n    g_loss.backward()\n    opt_G.step()\n\n    return {\"d_loss\": sum(D_losses) / len(D_losses), \"g_loss\": g_loss.item()}\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Training Pathologies"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Mode collapse."},
+              {"type": "text", "text": " G finds a small set of outputs that reliably fool D and generates only those, ignoring large portions of p_data. Symptoms: all generated images look identical or cycle through a few templates."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Vanishing D gradients."},
+              {"type": "text", "text": " When D is too strong, D(G(z)) ≈ 0 and log(1 − D(G(z))) ≈ 0 — gradient to G nearly vanishes. The non-saturating loss and Wasserstein loss both address this."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Oscillation / non-convergence."},
+              {"type": "text", "text": " G and D chase each other: G improves → D catches up → G regresses. The loss curves oscillate rather than converge. Monitoring FID is more informative than watching losses."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "No explicit likelihood."},
+              {"type": "text", "text": " GANs produce no probability score for a given x, making density estimation, anomaly detection, and controlled generation harder than with VAEs or diffusion models."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Wasserstein GAN (WGAN)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "WGAN (Arjovsky et al., 2017) replaces the JS divergence with the Earth Mover (Wasserstein-1) distance. The critic (renamed from discriminator) is not constrained to [0,1]; instead it must be a 1-Lipschitz function. The objective becomes:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "W(p_{\\text{data}}, p_G) = \\max_{\\|f\\|_L \\leq 1} \\mathbb{E}_{x \\sim p_{\\text{data}}}[f(x)] - \\mathbb{E}_{z \\sim p(z)}[f(G(z))]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lipschitz constraint is enforced via gradient penalty (WGAN-GP): a penalty is added to the critic loss whenever the gradient norm at interpolated points deviates from 1."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def gradient_penalty(\n    critic: nn.Module,\n    real: Tensor,\n    fake: Tensor,\n    lambda_gp: float = 10.0,\n) -> Tensor:\n    \"\"\"\n    WGAN-GP gradient penalty (Gulrajani et al., 2017).\n    Samples uniformly between real and fake, then penalises |∇critic| ≠ 1.\n    \"\"\"\n    B = real.size(0)\n    alpha = torch.rand(B, 1, 1, 1, device=real.device)  # uniform in [0, 1]\n    interpolated = (alpha * real + (1 - alpha) * fake).requires_grad_(True)\n\n    c_interp = critic(interpolated)\n    grads = torch.autograd.grad(\n        outputs=c_interp,\n        inputs=interpolated,\n        grad_outputs=torch.ones_like(c_interp),\n        create_graph=True,\n    )[0]\n    grad_norm = grads.view(B, -1).norm(2, dim=1)        # ||∇|| per sample\n    penalty = lambda_gp * ((grad_norm - 1) ** 2).mean() # penalise deviation from 1\n    return penalty\n\n\ndef wgan_gp_critic_loss(\n    critic: nn.Module,\n    real: Tensor,\n    fake: Tensor,\n    lambda_gp: float = 10.0,\n) -> Tensor:\n    # Critic: maximise E[c(real)] - E[c(fake)]\n    c_real = critic(real).mean()\n    c_fake = critic(fake.detach()).mean()\n    gp = gradient_penalty(critic, real, fake.detach(), lambda_gp)\n    return c_fake - c_real + gp   # minimise this\n\n\ndef wgan_gp_generator_loss(critic: nn.Module, fake: Tensor) -> Tensor:\n    # Generator: maximise E[c(G(z))] <=> minimise -E[c(G(z))]\n    return -critic(fake).mean()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Conditional GANs"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A conditional GAN (cGAN) conditions both G and D on a class label or other side information y. G generates samples matching y; D must distinguish real pairs (x, y) from fake pairs (G(z, y), y)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class ConditionalGenerator(nn.Module):\n    \"\"\"\n    Conditions on a class label via embedding concatenated to the noise vector.\n    num_classes: number of class labels (e.g. 10 for MNIST digits).\n    \"\"\"\n    def __init__(self, latent_dim: int = 100, num_classes: int = 10, embed_dim: int = 50):\n        super().__init__()\n        self.embed = nn.Embedding(num_classes, embed_dim)\n        self.net = nn.Sequential(\n            nn.Linear(latent_dim + embed_dim, 256), nn.ReLU(),\n            nn.Linear(256, 512), nn.ReLU(),\n            nn.Linear(512, 784), nn.Tanh(),  # 28x28 flattened\n        )\n\n    def forward(self, z: Tensor, labels: Tensor) -> Tensor:\n        cond = self.embed(labels)              # (B, embed_dim)\n        return self.net(torch.cat([z, cond], dim=1))  # (B, 784)\n\n\nclass ConditionalDiscriminator(nn.Module):\n    \"\"\"Receives (x, label) pair; judges real vs fake conditioned on label.\"\"\"\n    def __init__(self, num_classes: int = 10, embed_dim: int = 50):\n        super().__init__()\n        self.embed = nn.Embedding(num_classes, embed_dim)\n        self.net = nn.Sequential(\n            nn.Linear(784 + embed_dim, 512), nn.LeakyReLU(0.2),\n            nn.Linear(512, 256), nn.LeakyReLU(0.2),\n            nn.Linear(256, 1),\n        )\n\n    def forward(self, x: Tensor, labels: Tensor) -> Tensor:\n        cond = self.embed(labels)\n        return self.net(torch.cat([x, cond], dim=1))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "GAN Variants at a Glance"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Variant"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Key change"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Solves"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DCGAN"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strided conv + BatchNorm + LeakyReLU"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training stability for images"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "WGAN"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Wasserstein distance + weight clipping"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Vanishing gradients, mode collapse"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "WGAN-GP"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gradient penalty instead of clipping"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Clipping pathologies, better stability"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "cGAN"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Label embedding fed to G and D"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Class-conditional control over output"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "StyleGAN"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Mapping network + AdaIN style injection"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Separation of coarse/fine style, SOTA fidelity"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "GANs vs Other Generative Models"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Property"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GAN"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "VAE"}]}]},
+              {"type": "tableHeader", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Diffusion"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sample quality"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (sharp, realistic)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Lower (blurry MSE)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Highest (SOTA 2022+)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sample speed"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Very fast (single forward pass)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Very fast"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Slow (many denoising steps)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training stability"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Difficult (adversarial)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Stable (ELBO)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Stable (denoising MSE)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Explicit likelihood"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Lower bound (ELBO)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No (score-based)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Mode coverage"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Poor (mode collapse)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Good (ELBO penalises)"}]}]},
+              {"type": "tableCell", "attrs": {"colspan": 1, "rowspan": 1}, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Good"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Mental model: the GAN discriminator is a learned loss function. Where MSE measures pixel-level distance and ELBO measures information compression, D measures perceptual realism — whatever a trained critic finds convincing. That is why GAN samples are sharp: G is optimised directly against a realism detector rather than a pixel-averaged reconstruction objective. The downside is that a discriminator that is too easily fooled (or too strict) destabilises the whole system."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GANs train a generator and discriminator adversarially: G minimises log(1 − D(G(z))); D maximises classification accuracy of real vs fake."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The non-saturating generator loss (−log D(G(z))) avoids vanishing gradients early in training and is preferred in practice."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Mode collapse and training instability are the core pathologies. WGAN-GP addresses both by replacing the JS divergence with a Lipschitz-constrained Wasserstein critic."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GANs produce sharper samples than VAEs but have no explicit likelihood and cover modes poorly. Diffusion models have largely replaced GANs as SOTA for image synthesis."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "cGANs extend the framework to conditioned generation by feeding label embeddings to both G and D, enabling class-controlled synthesis."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}
