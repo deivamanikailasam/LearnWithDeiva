@@ -1,0 +1,185 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Chat behaviour is the set of conventions that make a language model feel like a conversational partner rather than a text completion engine. It encompasses multi-turn memory (tracking what was said earlier in the conversation), turn-taking structure (user speaks, assistant responds), persona consistency (same tone and style throughout), context accumulation (each new message is understood relative to all prior ones), and graceful handling of ambiguity (asking for clarification rather than hallucinating an answer). These behaviours are not intrinsic to the Transformer architecture — they emerge from training on multi-turn dialogue data and from alignment procedures like RLHF."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Chat Message Format"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Modern chat models use a structured message list rather than a single prompt string. Each message has a role — system, user, or assistant — and the model is trained to continue the assistant role given the full message history. The Anthropic Messages API expresses this directly:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\nclass ChatSession:\n    \"\"\"\n    Maintains conversation history and sends it in full on every turn.\n    The model has no persistent memory — context is passed explicitly.\n    \"\"\"\n\n    def __init__(self, system_prompt: str = \"\"):\n        self.system  = system_prompt\n        self.history: list[dict] = []   # [{\"role\": ..., \"content\": ...}]\n\n    def chat(self, user_message: str) -> str:\n        self.history.append({\"role\": \"user\", \"content\": user_message})\n\n        response = client.messages.create(\n            model=\"claude-opus-4-8\",\n            max_tokens=1024,\n            system=self.system,\n            messages=self.history,\n        )\n        assistant_reply = response.content[0].text\n        self.history.append({\"role\": \"assistant\", \"content\": assistant_reply})\n        return assistant_reply\n\n    def reset(self):\n        self.history = []\n\n\n# Example multi-turn conversation demonstrating context accumulation\nsession = ChatSession(\n    system_prompt=\"You are a helpful Python tutor. Be concise.\"\n)\n\nprint(session.chat(\"What is a list comprehension?\"))\nprint(session.chat(\"Can you show me an example that squares even numbers?\"))\nprint(session.chat(\"Now filter it to only include results over 10.\"))\n# The third message refers to 'it' and 'results' — chat behaviour requires\n# the model to resolve these references using prior turns in the history.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "System Prompts and Persona"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The system message is processed before any user turn and sets persistent context for the entire conversation: the assistant's role, tone, constraints, output format, and domain. A well-written system prompt shapes every response without the user having to re-specify the context on each turn."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n# System prompts can constrain format, persona, scope, and output style\nSYSTEM_PROMPTS = {\n    \"customer_support\": \"\"\"You are a customer support agent for Acme Corp.\nYou help with orders, returns, and product questions.\nAlways be polite and professional.\nIf the customer asks about something outside these topics, say:\n'I can help with orders and products — for other questions, please contact our main line.'\nDo not discuss competitors or make promises about delivery times.\"\"\",\n\n    \"code_reviewer\": \"\"\"You are a senior software engineer conducting code review.\nFor each piece of code the user shares:\n1. Identify bugs or logic errors.\n2. Note style or performance issues.\n3. Suggest improvements with corrected code.\nBe direct and specific. Do not compliment correct code — just identify issues.\"\"\",\n\n    \"socratic_tutor\": \"\"\"You are a Socratic tutor.\nDo not give the student the answer directly.\nInstead, ask guiding questions that lead them to discover the answer themselves.\nIf they get stuck after three questions, provide a small hint.\"\"\",\n}\n\n\ndef persona_chat(persona: str, messages: list[dict]) -> str:\n    \"\"\"Send a multi-turn conversation with a specific persona.\"\"\"\n    response = client.messages.create(\n        model=\"claude-opus-4-8\",\n        max_tokens=512,\n        system=SYSTEM_PROMPTS[persona],\n        messages=messages,\n    )\n    return response.content[0].text\n\n\n# The same user question gets very different responses based on system prompt\nquestion = [{\"role\": \"user\", \"content\": \"How does recursion work?\"}]\nprint(\"Code reviewer:\", persona_chat(\"code_reviewer\", question))\nprint(\"Socratic tutor:\", persona_chat(\"socratic_tutor\", question))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Multi-Turn Context Management"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every turn the entire conversation history is passed to the model. This means context length grows linearly with conversation length. When the history exceeds the model's context window, earlier turns must be truncated or summarised — the model has no other memory mechanism."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\nMODEL_CONTEXT_LIMIT = 200_000   # claude-opus-4-8 has a 200k token window\nRESERVE_FOR_RESPONSE = 2_000\nMAX_HISTORY_TOKENS   = MODEL_CONTEXT_LIMIT - RESERVE_FOR_RESPONSE\n\n\ndef estimate_tokens(text: str) -> int:\n    \"\"\"Rough estimate: ~4 characters per token on average English text.\"\"\"\n    return len(text) // 4\n\n\ndef trim_history_to_fit(\n    history: list[dict],\n    max_tokens: int = MAX_HISTORY_TOKENS,\n) -> list[dict]:\n    \"\"\"\n    Drop the oldest messages until the history fits within max_tokens.\n    Always keep at least the most recent user turn.\n    In production, prefer summarising old turns rather than dropping them.\n    \"\"\"\n    while history:\n        total = sum(estimate_tokens(m[\"content\"]) for m in history)\n        if total <= max_tokens:\n            break\n        history = history[2:]   # drop oldest user+assistant pair\n    return history\n\n\ndef summarise_history(history: list[dict]) -> str:\n    \"\"\"Compress old conversation turns into a brief summary to preserve context.\"\"\"\n    transcript = \"\\n\".join(\n        f\"{m['role'].upper()}: {m['content']}\" for m in history\n    )\n    response = client.messages.create(\n        model=\"claude-opus-4-8\",\n        max_tokens=256,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": f\"Summarise this conversation in 3 sentences:\\n\\n{transcript}\"\n        }],\n    )\n    return response.content[0].text\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Desirable Chat Behaviours"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Behaviour"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "What it means"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "How it breaks"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Coreference resolution"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "\"it\", \"that\", \"the one you mentioned\" correctly refers back"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Truncated history loses the referent"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Clarification seeking"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Asks one focused question rather than guessing"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Overconfident models hallucinate an assumption"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Persona consistency"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Same tone, expertise level, and constraints throughout"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Long conversations drift from the initial persona"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Task decomposition"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Breaks a complex request into sub-steps and handles each"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Single-turn models ignore sub-tasks"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Graceful refusal"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Declines harmful requests without breaking persona"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Over-refusal refuses benign requests too"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Streaming Responses"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Chat interfaces feel responsive when tokens are displayed as they are generated, rather than waiting for the full response. The Anthropic API supports server-sent event streaming:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport sys\n\nclient = anthropic.Anthropic()\n\n\ndef stream_chat_response(messages: list[dict], system: str = \"\") -> str:\n    \"\"\"\n    Stream tokens to stdout as they arrive.\n    Returns the complete response text for history tracking.\n    \"\"\"\n    full_text = \"\"\n    with client.messages.stream(\n        model=\"claude-opus-4-8\",\n        max_tokens=1024,\n        system=system,\n        messages=messages,\n    ) as stream:\n        for text_chunk in stream.text_stream:\n            print(text_chunk, end=\"\", flush=True)\n            full_text += text_chunk\n    print()   # newline after response\n    return full_text\n\n\n# Interactive terminal chat loop\ndef terminal_chat():\n    session_messages = []\n    system = \"You are a helpful assistant.\"\n    print(\"Chat started. Type 'quit' to exit.\\n\")\n    while True:\n        user_input = input(\"You: \").strip()\n        if user_input.lower() == \"quit\":\n            break\n        session_messages.append({\"role\": \"user\", \"content\": user_input})\n        print(\"Assistant: \", end=\"\")\n        reply = stream_chat_response(session_messages, system)\n        session_messages.append({\"role\": \"assistant\", \"content\": reply})\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Chat behaviour is architecturally simple — pass the full message history on each turn — but behaviourally rich. The richness comes from training on diverse multi-turn human conversations, not from any special mechanism in the model."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
