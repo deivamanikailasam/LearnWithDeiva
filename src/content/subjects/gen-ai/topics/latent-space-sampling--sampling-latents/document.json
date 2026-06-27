@@ -1,0 +1,879 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sampling latents is the generative half of a trained VAE: draw a code z from the prior p(z) and pass it through the decoder p_θ(x|z) to obtain a new data point. The quality of those samples depends on how well the learned posterior q_φ(z|x) matches the prior during training — a perfect match means every point in latent space decodes to something realistic, while a mismatch leaves \"holes\" that produce garbled output. Understanding how, where, and when to sample from the latent space is essential for using VAEs as generative models rather than merely as reconstruction machines."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "What Sampling Latents Means" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A VAE defines a joint generative model over observed data x and latent variables z:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p_\\theta(x, z) = p_\\theta(x \\mid z)\\, p(z), \\qquad p(z) = \\mathcal{N}(\\mathbf{0}, \\mathbf{I})"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Ancestral sampling from this model has two steps: first draw z from the isotropic Gaussian prior, then draw x from the decoder distribution conditioned on z. During training, the KL term in the ELBO presses q_φ(z|x) toward p(z), so that after training the prior is a faithful description of where encoded data points live. At generation time the encoder is not used at all — it is only needed for inference."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why It Matters" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Autoencoders can reconstruct training data well but cannot generate new samples because they lack a defined prior over z. The VAE's prior is precisely what enables generation. Correctly sampling from the prior — and understanding its geometry — determines whether generated images look sharp or blurry, whether diverse modes of the data distribution are covered, and whether interpolations between points remain in-distribution."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Standard Gaussian Prior" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The isotropic Gaussian N(0, I) is the canonical choice because it is conjugate to the Gaussian encoder, yields a closed-form KL divergence, and imposes no preferred direction. The prior has several geometric properties worth knowing:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Most mass lies on a thin shell."
+                  },
+                  {
+                    "type": "text",
+                    "text": " In d dimensions the typical z satisfies ‖z‖ ≈ √d. For d = 64 that is about 8.0; for d = 512 it is about 22.6. Samples near the origin are statistically rare."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Dimensions are independent."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Each z_j ~ N(0,1) independently. The decoder must learn to handle axis-aligned structure in z-space."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "The prior is convex."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Any linear combination of two prior samples is itself a plausible prior sample, making linear interpolation a natural operation in latent space."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Sampling in Code" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The minimal generation loop is three lines: sample z from the prior, pass through the decoder, and (for images) round or sigmoid the output."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\nclass VAEGenerator(nn.Module):\n    \"\"\"Wraps a trained decoder for unconditional generation.\"\"\"\n\n    def __init__(self, decoder: nn.Module, z_dim: int):\n        super().__init__()\n        self.decoder = decoder\n        self.z_dim = z_dim\n\n    @torch.no_grad()\n    def sample(self, n: int, device: torch.device) -> torch.Tensor:\n        \"\"\"Draw n samples from p(z) and decode them.\"\"\"\n        z = torch.randn(n, self.z_dim, device=device)   # z ~ N(0, I)\n        return self.decoder(z)                          # x_hat ~ p_θ(x|z)\n\n    @torch.no_grad()\n    def sample_with_temperature(self, n: int, temperature: float,\n                                device: torch.device) -> torch.Tensor:\n        \"\"\"Scale the prior variance by temperature^2.\"\"\"\n        z = torch.randn(n, self.z_dim, device=device) * temperature\n        return self.decoder(z)\n\n\n# Usage after training\ngenerator = VAEGenerator(decoder=trained_decoder, z_dim=32)\nsamples = generator.sample(n=16, device=torch.device('cuda'))\n# samples shape: (16, C, H, W) for image decoders"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Temperature Scaling" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Temperature T scales the prior standard deviation: z ~ N(0, T²I). It controls the trade-off between sample diversity and sample quality:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Temperature T" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Effect" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Typical use" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "T < 1 (e.g. 0.7)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Samples near origin; higher quality, lower diversity" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Production, cherry-picking" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "T = 1.0" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Matches the training prior exactly" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Default; evaluation (FID, IS)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "T > 1 (e.g. 1.5)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Samples far from origin; more diverse but often lower quality" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Exploring rare modes, data augmentation" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "T → 0" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Collapses to z = 0; single deterministic output" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Debugging decoder" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Temperatures below 1 are often used in practice because the aggregated posterior — the average of all encoded posteriors, ∫ q_φ(z|x) p_data(x) dx — typically has narrower tails than N(0,I). Sampling at T=1 from the prior can therefore land in regions the decoder never saw during training."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Aggregated Posterior Problem" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The aggregated posterior (also called the marginal posterior or population posterior) is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "q_\\phi(z) = \\int q_\\phi(z \\mid x)\\, p_{\\text{data}}(x)\\, dx"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The KL term in the ELBO penalises each individual posterior q_φ(z|x) for deviating from p(z) = N(0,I). But it does not directly force the aggregate q_φ(z) to match p(z). In practice they often differ: the aggregate can be multi-modal (one cluster per class) or have smaller variance than the prior. Sampling from N(0,1) then lands in \"holes\" between training clusters, producing unrealistic samples."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Mitigations include:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Stronger KL weight (β-VAE):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " β > 1 pushes posteriors harder toward the prior, closing the gap but sometimes hurting reconstruction quality."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Two-stage VAE:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Fit a second model (e.g. a small GMM or another VAE) to the aggregated posterior learned in stage one, then sample from that second model at generation time."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Adversarial regularisation (WAE/AAE):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " A discriminator or MMD loss directly penalises the divergence between q_φ(z) and p(z) at the aggregate level."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Sample from actual encodings:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " At generation time, randomly pick a training point x_i, encode it to get μ_i, and add noise: z = μ_i + ε, ε ~ N(0, σ²I). This samples from the empirical aggregate posterior rather than the prior."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Batch Sampling and Diversity" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When generating a batch of N samples you want them to cover diverse regions of z-space rather than clustering by random chance. Standard Monte Carlo draws from N(0,I) are independent and unbiased but can produce accidental clustering, especially for small N."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\ndef sample_diverse(n: int, z_dim: int, device: torch.device,\n                   method: str = 'standard') -> torch.Tensor:\n    \"\"\"\n    Generate n latent codes with different diversity strategies.\n\n    Args:\n        method: 'standard' | 'qmc' | 'spherical'\n    \"\"\"\n    if method == 'standard':\n        # Independent i.i.d. draws — simple, unbiased\n        return torch.randn(n, z_dim, device=device)\n\n    elif method == 'qmc':\n        # Quasi-Monte Carlo: low-discrepancy sequence via scrambled Halton.\n        # torch.quasirandom.SobolEngine is available in PyTorch >= 1.11\n        from torch.quasirandom import SobolEngine\n        engine = SobolEngine(dimension=z_dim, scramble=True)\n        u = engine.draw(n).to(device)       # uniform (0,1) samples\n        # Inverse CDF transform to N(0,1)\n        from scipy.special import ndtri\n        import numpy as np\n        z_np = ndtri(u.cpu().numpy().clip(1e-6, 1 - 1e-6))\n        return torch.from_numpy(z_np).float().to(device)\n\n    elif method == 'spherical':\n        # Sample uniformly on the (d-1)-sphere then scale by chi distribution\n        # to match Gaussian shell mass. Useful for very high d.\n        z = torch.randn(n, z_dim, device=device)\n        z = z / z.norm(dim=1, keepdim=True)              # unit sphere\n        r = torch.distributions.Chi(df=torch.tensor(float(z_dim)))\n        radii = r.sample((n,)).unsqueeze(1).to(device)\n        return z * radii\n    else:\n        raise ValueError(f\"Unknown method: {method}\")"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For most practical purposes, standard i.i.d. sampling is sufficient. Quasi-Monte Carlo helps when you need N < 100 samples to be maximally spread across z-space (useful for small-batch grid-style visualisation)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Decoding Sampled Latents" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The decoder outputs parameters of a distribution over x. What you do with those parameters depends on the output modality:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n@torch.no_grad()\ndef generate(decoder, z_dim: int, n: int, output_type: str,\n             device: torch.device) -> torch.Tensor:\n    z = torch.randn(n, z_dim, device=device)\n    raw = decoder(z)  # raw logits or parameters\n\n    if output_type == 'bernoulli':\n        # For binary / grayscale images in [0,1]\n        # Option A: expected value (soft, blurry but deterministic)\n        return torch.sigmoid(raw)\n        # Option B: stochastic sample\n        # return torch.bernoulli(torch.sigmoid(raw))\n\n    elif output_type == 'gaussian':\n        # Decoder predicts (mu, log_sigma) — use mean for sharp output\n        mu, log_sigma = raw.chunk(2, dim=1)\n        return mu                                       # or mu + sigma * eps\n\n    elif output_type == 'categorical':\n        # For text / discrete tokens — argmax or top-k sampling\n        logits = raw.view(n, seq_len, vocab_size)\n        return logits.argmax(dim=-1)                   # greedy decode\n\n    else:\n        raise ValueError(output_type)\n\n\n# Example: generate 8 images from a binary-output VAE\nimgs = generate(trained_decoder, z_dim=32, n=8,\n                output_type='bernoulli',\n                device=torch.device('cuda'))\nprint(imgs.shape)   # (8, 1, 28, 28) for MNIST"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Conditional Sampling with a Learned Prior" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unconditional sampling draws from N(0,I). For class-conditional generation, replace the fixed prior with a class-specific Gaussian or a mixture:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\nclass ConditionalPrior(nn.Module):\n    \"\"\"\n    Learn a separate (mu, log_var) for each class.\n    After training, sample from the class prior to generate that class.\n    \"\"\"\n\n    def __init__(self, num_classes: int, z_dim: int):\n        super().__init__()\n        self.mu  = nn.Embedding(num_classes, z_dim)\n        self.log_var = nn.Embedding(num_classes, z_dim)\n\n    def sample(self, labels: torch.Tensor) -> torch.Tensor:\n        \"\"\"labels: (N,) integer class ids.\"\"\"\n        mu = self.mu(labels)                              # (N, z_dim)\n        std = (0.5 * self.log_var(labels)).exp()         # (N, z_dim)\n        eps = torch.randn_like(std)\n        return mu + std * eps\n\n\n# Usage: generate 4 samples of class 3\nlabels = torch.full((4,), fill_value=3, dtype=torch.long, device='cuda')\nz = conditional_prior.sample(labels)\nx_gen = decoder(z)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The CVAE (Conditional VAE) extends this by conditioning both the encoder and decoder on y, making the prior p(z|y) explicit and allowing fine-grained attribute control at generation time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "When to Sample vs When to Encode-then-Decode" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Goal" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Approach" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Why" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Generate new data unlike training set" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "z ~ p(z) then decode" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Prior covers the full space" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reconstruct a known input" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encode x → z → decode" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Posterior mean is closest code to x" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Augment a training example" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encode → sample from q_φ(z|x) → decode" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Stays near original but adds stochasticity" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Interpolate between two data points" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encode both → SLERP z → decode" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Linear path stays on prior shell" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Evaluate generative quality (FID)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "z ~ p(z) at T=1" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Matches training distribution exactly" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Measuring Sample Quality" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Quantitative evaluation of VAE samples uses metrics borrowed from the GAN literature:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "FID (Fréchet Inception Distance):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Compares the mean and covariance of Inception-v3 features between real and generated images. Lower is better. VAEs typically score higher FID than GANs but lower than plain autoencoders."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "IS (Inception Score):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Measures both sample sharpness (low entropy p(y|x)) and diversity (high entropy p(y)). Less reliable than FID for measuring VAE quality."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "ELBO on held-out data:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " A direct bound on the model log-likelihood. Does not directly measure visual quality but tracks model fit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Active units:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Count dimensions j where Var_x[μ_j(x)] > threshold (e.g. 0.01). All-zero active units indicate posterior collapse; too few active units limit sample diversity."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\ndef count_active_units(encoder, data_loader, z_dim: int,\n                       threshold: float = 0.01) -> int:\n    \"\"\"\n    Count latent dimensions whose posterior mean varies across the dataset.\n    Low count = posterior collapse; high count = well-utilised bottleneck.\n    \"\"\"\n    all_mu = []\n    with torch.no_grad():\n        for x, _ in data_loader:\n            mu, _ = encoder(x.cuda())\n            all_mu.append(mu.cpu())\n\n    all_mu = torch.cat(all_mu, dim=0)          # (N_data, z_dim)\n    variance_per_dim = all_mu.var(dim=0)       # (z_dim,)\n    return (variance_per_dim > threshold).sum().item()\n\n\n# Example: a well-trained 32-d VAE on CelebA should have ~20-28 active units\nn_active = count_active_units(encoder, test_loader, z_dim=32)\nprint(f\"Active units: {n_active} / 32\")"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Sampling from the encoder at test time."
+                  },
+                  {
+                    "type": "text",
+                    "text": " For generation, you do not need — and should not use — the encoder. Run the decoder alone. Using the encoder forces you to condition on an existing x, which is reconstruction, not generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Not calling .eval() and torch.no_grad()."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Batch norm layers use running statistics in eval mode. Generating with the model in train mode gives inconsistent results and wastes memory on gradients."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Generating from a collapsed model."
+                  },
+                  {
+                    "type": "text",
+                    "text": " If posterior collapse occurred, the decoder learned to ignore z. All samples decode to the same mean image. Check active units first — if n_active < 5 in a 32-d model, the model has collapsed and samples will be useless."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Confusing μ with a sample."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Some code paths return μ(x) from the encoder (the most likely code for x) rather than a sample from q_φ(z|x). Using μ for generation bypasses the prior entirely — μ values cluster in the posterior mean space, not the prior."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Evaluating FID with T ≠ 1."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Temperature tuning can improve visual quality but makes FID comparisons unfair. Always report FID at T=1 and note temperature if you use it."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always set the model to .eval() mode and wrap generation in torch.no_grad() to avoid storing computation graphs and get consistent batch norm behaviour."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Track active units alongside reconstruction loss and ELBO during training. A drop in active units is an early warning of posterior collapse."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Visualise a fixed grid of samples at each checkpoint with a fixed random seed, so you can see qualitative improvement across training epochs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "If FID is poor but reconstruction is good, suspect the aggregated posterior mismatch. Try β-VAE or two-stage sampling before redesigning the architecture."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "When building production generation pipelines, sample in batches rather than one at a time — the decoder is highly parallelisable on GPU and batch inference is orders of magnitude faster."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Picture the latent space as a large sphere (the Gaussian shell) where training data has been compressed. Each training point occupies a small fuzzy blob — its posterior q_φ(z|x). The KL term during training inflated or deflated each blob to match the unit-sphere radius. Sampling a new z from N(0,I) throws a dart at a random point on that sphere. If the blobs from training data collectively tile the sphere well, the dart almost always lands inside a meaningful region and decodes to a realistic sample. If large patches of the sphere were never covered during training (because the aggregated posterior is narrower or multi-modal), the dart lands in empty space and the decoder produces noise or a blurry average. Temperature scaling < 1 is the practical fix: shrink the throw radius so the dart lands closer to the centre of mass of the blobs, trading diversity for staying inside known territory."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sampling latents means drawing z ~ N(0,I) and decoding — the encoder is not involved at generation time."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The prior N(0,I) concentrates mass on a thin Gaussian shell whose radius grows as √d with latent dimensionality d."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Temperature T < 1 shrinks the sample radius and often improves visual quality at the cost of diversity; FID should always be reported at T=1."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The aggregated posterior diverges from the prior when the KL regularisation is too weak, creating holes that produce bad samples — β-VAE and two-stage models address this."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor active units during training; if the count drops near zero the model has collapsed and samples will be meaningless regardless of how you sample z."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
