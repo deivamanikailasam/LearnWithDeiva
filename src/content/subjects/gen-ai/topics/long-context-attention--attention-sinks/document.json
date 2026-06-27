@@ -1,0 +1,634 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Attention Sink Phenomenon"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When researchers at MIT visualised per-head attention weights in production LLMs (Xiao et al., 2023), they found a consistent pattern: a handful of tokens near the start of every sequence accumulated disproportionately large attention scores, far beyond what their content would justify. A token like the BOS (beginning-of-sequence) marker, a newline, or even just the first word consistently received 30–80% of total attention weight — not because the model needed information from it, but as a byproduct of how softmax forces attention scores to sum to 1."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These tokens are called attention sinks. Understanding why they exist and how to exploit them enables efficient streaming inference over sequences far longer than any model's KV cache."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Sinks Form"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Softmax attention has no \"ignore\" option. Given a query q and key matrix K, the attention weight α is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\alpha_i = \\frac{\\exp(q \\cdot k_i / \\sqrt{d_k})}{\\sum_j \\exp(q \\cdot k_j / \\sqrt{d_k})}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The weights always sum to exactly 1.0. When the query has no relevant context — for example, a mid-sentence filler token — it still must allocate all its probability mass somewhere. Initial tokens are present in every sequence and are always in the causal mask, so the model discovers during training that routing excess attention to them is a safe way to \"not attend to anything important.\" Over thousands of gradient updates, this behaviour becomes deeply entrenched: those positions accumulate massive key-value norms and come to act as dedicated probability sinks."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4MjAgMzMwIiB3aWR0aD0iODIwIiBoZWlnaHQ9IjMzMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiI+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIzMzAiIGZpbGw9IiNmOGY5ZmEiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSIyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPkF0dGVudGlvbiBTaW5rcyAmYW1wOyBTdHJlYW1pbmdMTE0gS1YgQ2FjaGUgU3RyYXRlZ3k8L3RleHQ+CgogIDwhLS0gVG9wIHJvdzogYXR0ZW50aW9uIGRpc3RyaWJ1dGlvbiBkaWFncmFtcyAtLT4KICA8IS0tIE5vcm1hbCBhdHRlbnRpb24gLS0+CiAgPHJlY3QgeD0iMTgiIHk9IjM4IiB3aWR0aD0iMzc1IiBoZWlnaHQ9IjE1MCIgcng9IjYiIGZpbGw9IndoaXRlIiBzdHJva2U9IiMyOTgwYjkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMjA1IiB5PSI1NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMyOTgwYjkiPlR5cGljYWwgQXR0ZW50aW9uIERpc3RyaWJ1dGlvbiAoaGVhZCAzLCBsYXllciAxMCk8L3RleHQ+CiAgPCEtLSBCYXJzIGZvciBhdHRlbnRpb24gc2NvcmUgYnkgcG9zaXRpb24gLS0+CiAgPCEtLSBwb3MgMCAoc2luayk6IHRhbGwgYmFyIC0tPgogIDxyZWN0IHg9IjM1IiAgeT0iOTIiIHdpZHRoPSIyMiIgaGVpZ2h0PSI4MCIgZmlsbD0iI2MwMzkyYiIgcng9IjIiLz4KICA8IS0tIHBvcyAxIChzaW5rKTogdGFsbCBiYXIgLS0+CiAgPHJlY3QgeD0iNjUiICB5PSIxMDIiIHdpZHRoPSIyMiIgaGVpZ2h0PSI3MCIgZmlsbD0iI2MwMzkyYiIgcng9IjIiLz4KICA8IS0tIHBvcyAyIChzaW5rKTogbWVkaXVtIGJhciAtLT4KICA8cmVjdCB4PSI5NSIgIHk9IjEyMCIgd2lkdGg9IjIyIiBoZWlnaHQ9IjUyIiBmaWxsPSIjYzAzOTJiIiByeD0iMiIvPgogIDwhLS0gcG9zIDMgKHNpbmspOiBzbWFsbCAtLT4KICA8cmVjdCB4PSIxMjUiIHk9IjEzOCIgd2lkdGg9IjIyIiBoZWlnaHQ9IjM0IiBmaWxsPSIjZTA3MDcwIiByeD0iMiIvPgogIDwhLS0gbWlkZGxlIHRva2VuczogbmVhciB6ZXJvIC0tPgogIDxyZWN0IHg9IjE1NSIgeT0iMTcwIiB3aWR0aD0iMjIiIGhlaWdodD0iMiIgZmlsbD0iI2JiYiIgcng9IjEiLz4KICA8cmVjdCB4PSIxODUiIHk9IjE3MCIgd2lkdGg9IjIyIiBoZWlnaHQ9IjIiIGZpbGw9IiNiYmIiIHJ4PSIxIi8+CiAgPHJlY3QgeD0iMjE1IiB5PSIxNzAiIHdpZHRoPSIyMiIgaGVpZ2h0PSIyIiBmaWxsPSIjYmJiIiByeD0iMSIvPgogIDwhLS0gcmVjZW50IHRva2VuczogbWVkaXVtIC0tPgogIDxyZWN0IHg9IjI0NSIgeT0iMTQ4IiB3aWR0aD0iMjIiIGhlaWdodD0iMjQiIGZpbGw9IiMyN2FlNjAiIHJ4PSIyIi8+CiAgPHJlY3QgeD0iMjc1IiB5PSIxMzQiIHdpZHRoPSIyMiIgaGVpZ2h0PSIzOCIgZmlsbD0iIzI3YWU2MCIgcng9IjIiLz4KICA8cmVjdCB4PSIzMDUiIHk9IjExMCIgd2lkdGg9IjIyIiBoZWlnaHQ9IjYyIiBmaWxsPSIjMjdhZTYwIiByeD0iMiIvPgogIDxyZWN0IHg9IjMzNSIgeT0iOTAiIHdpZHRoPSIyMiIgaGVpZ2h0PSI4MiIgZmlsbD0iIzI3YWU2MCIgcng9IjIiLz4KICA8IS0tIHgtYXhpcyAtLT4KICA8bGluZSB4MT0iMzAiIHkxPSIxNzIiIHgyPSIzNzAiIHkyPSIxNzIiIHN0cm9rZT0iI2NjYyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDYiIHk9IjE4NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjYzAzOTJiIj4wPC90ZXh0PgogIDx0ZXh0IHg9Ijc2IiB5PSIxODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2MwMzkyYiI+MTwvdGV4dD4KICA8dGV4dCB4PSIxMDYiIHk9IjE4NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjYzAzOTJiIj4yPC90ZXh0PgogIDx0ZXh0IHg9IjEzNiIgeT0iMTg1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiNjMDM5MmIiPjM8L3RleHQ+CiAgPHRleHQgeD0iMjAwIiB5PSIxODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+bWlkZGxlIOKApjwvdGV4dD4KICA8dGV4dCB4PSIzNTAiIHk9IjE4NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMjdhZTYwIj5yZWNlbnQ8L3RleHQ+CgogIDwhLS0gTGVnZW5kIGZvciBub3JtYWwgYXR0ZW50aW9uIC0tPgogIDxyZWN0IHg9IjM1IiAgeT0iNzgiIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCIgZmlsbD0iI2MwMzkyYiIgcng9IjIiLz4KICA8dGV4dCB4PSI0OCIgeT0iODciIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2MwMzkyYiI+c2luayB0b2tlbnM8L3RleHQ+CiAgPHJlY3QgeD0iMTIwIiB5PSI3OCIgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSIjMjdhZTYwIiByeD0iMiIvPgogIDx0ZXh0IHg9IjEzMyIgeT0iODciIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzI3YWU2MCI+cmVjZW50IHRva2VuczwvdGV4dD4KCiAgPCEtLSBTdHJlYW1pbmdMTE0gc3RyYXRlZ3kgLS0+CiAgPHJlY3QgeD0iNDMwIiB5PSIzOCIgd2lkdGg9IjM3NSIgaGVpZ2h0PSIxNTAiIHJ4PSI2IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjMjdhZTYwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjYxNyIgeT0iNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMjdhZTYwIj5TdHJlYW1pbmdMTE06IEJvdW5kZWQgS1YgQ2FjaGU8L3RleHQ+CgogIDwhLS0gQ2FjaGUgbGF5b3V0IGRpYWdyYW0gLS0+CiAgPHRleHQgeD0iNDQ1IiB5PSI3NSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzU1NSI+S1YgY2FjaGUgY29udGVudCBhdCBhbnkgcG9pbnQgZHVyaW5nIHN0cmVhbWluZzo8L3RleHQ+CgogIDwhLS0gU2luayB0b2tlbnMgYmxvY2sgLS0+CiAgPHJlY3QgeD0iNDQ1IiB5PSI4MiIgd2lkdGg9IjgwIiBoZWlnaHQ9IjM2IiByeD0iNCIgZmlsbD0iI2ZkZThlOCIgc3Ryb2tlPSIjYzAzOTJiIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ4NSIgeT0iOTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjYzAzOTJiIj5TaW5rIFRva2VuczwvdGV4dD4KICA8dGV4dCB4PSI0ODUiIHk9IjExMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjYzAzOTJiIj5wb3MgMC4uMzwvdGV4dD4KCiAgPCEtLSBHYXAgaW5kaWNhdG9yIC0tPgogIDx0ZXh0IHg9IjU0MCIgeT0iMTA0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE1IiBmaWxsPSIjODg4Ij7igKY8L3RleHQ+CgogIDwhLS0gU2xpZGluZyB3aW5kb3cgYmxvY2sgLS0+CiAgPHJlY3QgeD0iNTU4IiB5PSI4MiIgd2lkdGg9IjIzMCIgaGVpZ2h0PSIzNiIgcng9IjQiIGZpbGw9IiNkNWY1ZTMiIHN0cm9rZT0iIzI3YWU2MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI2NzMiIHk9Ijk3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzI3YWU2MCI+U2xpZGluZyBXaW5kb3cgKHJlY2VudCBXIHRva2Vucyk8L3RleHQ+CiAgPHRleHQgeD0iNjczIiB5PSIxMTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzI3YWU2MCI+cG9zIChULVcpIC4uIFQ8L3RleHQ+CgogIDx0ZXh0IHg9IjYxNyIgeT0iMTQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj5jYWNoZV9zaXplID0gbl9zaW5rcyArIFcgIChlLmcuIDQgKyAxIDAyNCA9IDEgMDI4IGVudHJpZXMpPC90ZXh0PgogIDx0ZXh0IHg9IjYxNyIgeT0iMTU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj5NaWRkbGUgdG9rZW5zIGFyZSBFVklDVEVEIOKAlCB0aGVpciBLViBwYWlycyBhcmUgZGlzY2FyZGVkLjwvdGV4dD4KICA8dGV4dCB4PSI2MTciIHk9IjE3MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij5TaW5rIHRva2VucyBhbHdheXMga2VwdCBiZWNhdXNlIGV2aWN0aW5nIHRoZW0gY2F1c2VzIGNhdGFzdHJvcGhpYyBhdHRlbnRpb24gY29sbGFwc2UuPC90ZXh0PgoKICA8IS0tIEJvdHRvbSBzZWN0aW9uOiB3aHkgc2lua3MgZXhpc3QgKyBjb21wYXJpc29uIC0tPgogIDxyZWN0IHg9IjE4IiB5PSIxOTgiIHdpZHRoPSI3ODQiIGhlaWdodD0iMTIyIiByeD0iNiIgZmlsbD0id2hpdGUiIHN0cm9rZT0iI2NjYyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIyMTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5XaHkgQXR0ZW50aW9uIFNpbmtzIEV4aXN0ICZhbXA7IFdoYXQgSGFwcGVucyBXaXRob3V0IFRoZW08L3RleHQ+CgogIDwhLS0gTGVmdDogd2h5IC0tPgogIDx0ZXh0IHg9IjMwIiB5PSIyMzYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPldoeSBpbml0aWFsIHRva2VucyBiZWNvbWUgc2lua3M6PC90ZXh0PgogIDx0ZXh0IHg9IjMwIiB5PSIyNTMiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPuKAoiBTb2Z0bWF4IGZvcmNlcyDOoyBhdHRuID0gMS4wIHBlciBxdWVyeTwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMjcwIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij7igKIgV2hlbiBubyB0b2tlbiBpcyByZWxldmFudCwgbW9kZWwgbXVzdCBwdXQ8L3RleHQ+CiAgPHRleHQgeD0iMzAiIHk9IjI4NyIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+ICBwcm9iYWJpbGl0eSBtYXNzIHNvbWV3aGVyZSAic2FmZSI8L3RleHQ+CiAgPHRleHQgeD0iMzAiIHk9IjMwNCIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+4oCiIEluaXRpYWwgdG9rZW5zIGFyZSBhbHdheXMgYXZhaWxhYmxlIOKGkiBtb2RlbDwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMzE1IiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4gIGxlYXJucyB0byByb3V0ZSBleGNlc3MgYXR0ZW50aW9uIHRoZXJlPC90ZXh0PgoKICA8IS0tIENlbnRlcjogZGl2aWRlciAtLT4KICA8bGluZSB4MT0iNDAwIiB5MT0iMjA2IiB4Mj0iNDAwIiB5Mj0iMzE1IiBzdHJva2U9IiNlZWUiIHN0cm9rZS13aWR0aD0iMSIvPgoKICA8IS0tIFJpZ2h0OiB3aGF0IGhhcHBlbnMgLS0+CiAgPHRleHQgeD0iNDE1IiB5PSIyMzYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPldpdGhvdXQga2VlcGluZyBzaW5rIHRva2VucyAobmFpdmUgd2luZG93KTo8L3RleHQ+CiAgPHRleHQgeD0iNDE1IiB5PSIyNTMiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNjMDM5MmIiPuKAoiBSZW1vdmluZyB0b2stMCBjYXVzZXMgcGVycGxleGl0eSB0byBleHBsb2RlPC90ZXh0PgogIDx0ZXh0IHg9IjQxNSIgeT0iMjcwIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij7igKIgRXZlbiBhIHdpbmRvdyBvZiAyIDA0OCBmYWlscyBpZiBwb3MtMCBLViBpcyBnb25lPC90ZXh0PgogIDx0ZXh0IHg9IjQxNSIgeT0iMjg3IiBmb250LXNpemU9IjExIiBmaWxsPSIjMjdhZTYwIj5XaXRoIHNpbmsgdG9rZW5zIHJldGFpbmVkIChTdHJlYW1pbmdMTE0pOjwvdGV4dD4KICA8dGV4dCB4PSI0MTUiIHk9IjMwNCIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+4oCiIFF1YWxpdHkgbWF0Y2hlcyBhIGZ1bGwgS1YgY2FjaGUgd2luZG93PC90ZXh0PgogIDx0ZXh0IHg9IjQxNSIgeT0iMzE1IiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij7igKIgU3VwcG9ydHMgdGhlb3JldGljYWxseSBpbmZpbml0ZSBzdHJlYW1pbmcgaW5mZXJlbmNlPC90ZXh0Pgo8L3N2Zz4K",
+          "alt": "Attention sinks at initial tokens and the StreamingLLM strategy of keeping sink + sliding window KV pairs"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Removing Sinks Causes Collapse"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A naive approach to long-context inference is to maintain a sliding window KV cache: keep only the most recent W token positions and evict everything else. This saves memory and runs in O(W) space. But it fails catastrophically as soon as the sink tokens scroll out of the window — even if W is 2048 and the evicted sinks were position 0..3."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reason is distribution shift: the model was trained in a world where positions 0..3 were always present in the KV cache. When they disappear, every layer that relied on routing excess softmax weight to them is suddenly forced to distribute that weight over contextually irrelevant recent tokens. The resulting attention patterns are out-of-distribution, causing a quality collapse similar to removing position 0 from a trained RoPE model."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "StreamingLLM: Sinks + Sliding Window"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StreamingLLM (Xiao et al., 2023) fixes the sliding-window failure mode with a minimal insight: always retain the KV entries for the first few sink tokens, regardless of how many tokens have been generated. The cache then holds:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sink KV entries: the first n_sinks positions (typically 4) — always retained, never evicted."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sliding window KV entries: the most recent W positions (e.g. 1024) — evicted FIFO as new tokens arrive."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Total cache size is fixed at n_sinks + W regardless of sequence length. This enables theoretically infinite streaming inference with bounded memory — the model never runs out of cache space."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Implementation"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from collections import deque\nfrom dataclasses import dataclass, field\nfrom typing import Optional\nimport torch\n\n\n@dataclass\nclass StreamingKVCache:\n    \"\"\"Fixed-size KV cache: sink tokens + sliding window of recent tokens.\"\"\"\n    n_sinks: int = 4\n    window: int = 1020        # recent slots (total = n_sinks + window)\n    n_layers: int = 32\n    n_heads: int = 32\n    head_dim: int = 128\n\n    # Internal state: sinks (fixed) + recent (FIFO deque)\n    sink_keys:   Optional[torch.Tensor] = field(default=None, repr=False)\n    sink_values: Optional[torch.Tensor] = field(default=None, repr=False)\n    recent_keys:   deque = field(default_factory=deque, repr=False)\n    recent_values: deque = field(default_factory=deque, repr=False)\n    n_seen: int = 0\n\n    def update(self, new_k: torch.Tensor, new_v: torch.Tensor):\n        \"\"\"\n        new_k / new_v: (n_layers, n_heads, 1, head_dim) — one new token.\n        Returns (k_ctx, v_ctx) of shape (n_layers, n_heads, ctx_len, head_dim).\n        \"\"\"\n        if self.n_seen < self.n_sinks:\n            # Still collecting sink tokens — just append to sinks.\n            if self.sink_keys is None:\n                self.sink_keys   = new_k\n                self.sink_values = new_v\n            else:\n                self.sink_keys   = torch.cat([self.sink_keys,   new_k], dim=2)\n                self.sink_values = torch.cat([self.sink_values, new_v], dim=2)\n        else:\n            # Push into sliding window, evict if full.\n            self.recent_keys.append(new_k)\n            self.recent_values.append(new_v)\n            if len(self.recent_keys) > self.window:\n                self.recent_keys.popleft()\n                self.recent_values.popleft()\n\n        self.n_seen += 1\n\n        # Concatenate sinks + recent for this forward pass.\n        recent_k = torch.cat(list(self.recent_keys),   dim=2) if self.recent_keys else None\n        recent_v = torch.cat(list(self.recent_values), dim=2) if self.recent_values else None\n\n        if recent_k is None:\n            return self.sink_keys, self.sink_values\n        if self.sink_keys is None:\n            return recent_k, recent_v\n        return (torch.cat([self.sink_keys,   recent_k], dim=2),\n                torch.cat([self.sink_values, recent_v], dim=2))\n\n\n# Usage sketch (model-agnostic):\ncache = StreamingKVCache(n_sinks=4, window=1020, n_layers=32, n_heads=32, head_dim=128)\n\nfor token_id in token_stream():          # infinite token stream\n    logits, new_k, new_v = model_step(token_id, past_k=None, past_v=None)\n    k_ctx, v_ctx = cache.update(new_k, new_v)\n    # next step: pass k_ctx, v_ctx as the KV context\n    next_token = sample(logits)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Position ID Reuse"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StreamingLLM retains sink KV entries but the recent tokens slide — their original absolute positions get evicted. When assembling the context for attention, positions must be re-assigned consistently. The standard approach is to keep sink tokens at their original positions (0..3) and assign the remaining positions sequentially from 4 onward for the sliding window content. This avoids positional gaps that would confuse RoPE."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def build_position_ids(n_sinks: int, n_recent: int) -> torch.Tensor:\n    \"\"\"Assign position IDs: sinks get 0..n_sinks-1, recent get n_sinks..\"\"\"\n    sink_pos   = torch.arange(n_sinks)\n    recent_pos = torch.arange(n_sinks, n_sinks + n_recent)\n    return torch.cat([sink_pos, recent_pos])"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Training for Streaming: Learnable Sink Tokens"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a model trained from scratch with streaming in mind, Xiao et al. propose prepending four learnable \"lambda\" sink tokens to every sequence during training, rather than relying on the accidental sink behaviour of BOS and initial content tokens. This has two advantages:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The model is explicitly trained to use dedicated sink positions, so the sink behaviour is more reliable and less contingent on specific corpus patterns."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Content tokens are freed from sink duty, allowing every non-sink position to carry purely semantic information."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice, most current deployments retrofit StreamingLLM onto pre-trained models without any fine-tuning. Retaining the first 4 content tokens as sinks works well across GPT-2, LLaMA, Falcon, and MPT families with no modification."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Limits and Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StreamingLLM enables infinite-length generation but does not give the model infinite memory. Tokens that fall outside the sliding window are permanently lost — the model cannot retrieve information from them. This is appropriate for chat interfaces where only recent context matters, but not for tasks that require reasoning over the entire document (e.g. summarisation of a 100-page paper where early pages must be remembered at the end)."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cache size"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Infinite streaming?"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Whole-doc recall?"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Full KV cache"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(T)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No — OOM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Naive sliding window"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(W)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes — but quality collapses"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "StreamingLLM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(n_sinks + W)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes — stable quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No — middle tokens evicted"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Retrieval-augmented (RAG)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(retrieved)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Partial — index-limited"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For applications that need whole-document recall over very long sequences, the right tool is full context extension via YaRN/NTK (expensive but lossless) or retrieval augmentation. StreamingLLM is the right tool for dialogue, code completion, and other tasks where only the recent context window is necessary."
+          }
+        ]
+      }
+    ]
+  }
+}
