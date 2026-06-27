@@ -1,0 +1,367 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Energy-based models and score-based generative models look like distinct formalisms, but they rest on the same mathematical object: the score function ∇_x log p(x). An EBM defines E_θ(x) and gets the score for free as −∇_x E_θ(x). Score-based models skip the energy and parameterise the score directly, bypassing the partition function entirely. Understanding this connection explains why Langevin dynamics works for both, why denoising score matching is the right training objective, and how modern diffusion models are a form of score-based learning."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Score Function"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The score function of a distribution p(x) is the gradient of its log-density with respect to x:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "s(x) = \\nabla_x \\log p(x)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For an EBM p_θ(x) = exp(−E_θ(x)) / Z_θ, the score is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "s_\\theta(x) = \\nabla_x \\log p_\\theta(x) = -\\nabla_x E_\\theta(x) - \\underbrace{\\nabla_x \\log Z_\\theta}_{= 0}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because Z_θ does not depend on x, its gradient is zero. The EBM score is just −∇_x E_θ(x) — computable with one backward pass through the energy network, Z_θ not needed."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\n\ndef score_from_ebm(energy_net: nn.Module, x: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Compute score s_theta(x) = -grad_x E_theta(x) from an EBM.\n    Z_theta cancels exactly; this is the exact score of the EBM distribution.\n\n    x: (B, *) — requires grad to be computed\n    returns: (B, *) score vectors\n    \"\"\"\n    x = x.detach().requires_grad_(True)\n    e = energy_net(x).sum()                      # scalar\n    grad_e = torch.autograd.grad(e, x)[0]        # (B, *) = d E / d x\n    return -grad_e                                # score = -grad E\n\n\ndef langevin_from_score(\n    score_fn,\n    x_init: torch.Tensor,\n    n_steps: int = 100,\n    step_size: float = 0.01,\n    noise_scale: float = None,\n) -> torch.Tensor:\n    \"\"\"\n    Langevin dynamics written in terms of the score function.\n    Works for EBMs (score_fn = score_from_ebm) and score-based models alike.\n    \"\"\"\n    if noise_scale is None:\n        noise_scale = step_size ** 0.5\n    x = x_init.clone().detach()\n    for _ in range(n_steps):\n        s = score_fn(x)                           # (B, *)\n        x = x + step_size / 2 * s + noise_scale * torch.randn_like(x)\n        x = x.clamp(-1.0, 1.0)\n    return x\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Score Matching: Bypassing the Partition Function"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If we parameterise the score directly — s_θ(x) ≈ ∇_x log p_data(x) — we can train without Z_θ. The natural objective is the Fisher divergence between the data score and the model score:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "D_F = \\mathbb{E}_{x \\sim p_{\\text{data}}}\\!\\left[\\|\\nabla_x \\log p_{\\text{data}}(x) - s_\\theta(x)\\|^2\\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The data score ∇_x log p_data(x) is unknown — but Hyvärinen (2005) showed that integration by parts eliminates it. The equivalent objective, computable purely from data, is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{SM}} = \\mathbb{E}_{x \\sim p_{\\text{data}}}\\!\\left[\\operatorname{tr}(\\nabla_x s_\\theta(x)) + \\tfrac{1}{2}\\|s_\\theta(x)\\|^2\\right] + \\text{const}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The trace term tr(∇_x s_θ(x)) is the divergence of the score — the sum of diagonal Jacobian entries. Computing this exactly costs O(d) backward passes, which is expensive in high dimensions."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def explicit_score_matching_loss(\n    score_net: nn.Module,\n    x: torch.Tensor,\n) -> torch.Tensor:\n    \"\"\"\n    Hyvärinen score matching loss: L = E[tr(J_s(x)) + 0.5 * ||s(x)||^2]\n    where J_s = Jacobian of score w.r.t. x.\n\n    Exact trace requires d backward passes — only feasible for small d.\n    Use denoising_score_matching_loss for images.\n    \"\"\"\n    x = x.detach().requires_grad_(True)\n    s = score_net(x)            # (B, d)\n    d = x.shape[-1]\n\n    # trace of Jacobian: sum d/dx_i s_i(x) for all i\n    trace_J = 0.0\n    for i in range(d):\n        grad_si = torch.autograd.grad(\n            s[:, i].sum(), x, create_graph=True\n        )[0]                    # (B, d)\n        trace_J = trace_J + grad_si[:, i]   # diagonal: d s_i / d x_i\n\n    loss = trace_J + 0.5 * s.pow(2).sum(-1)  # (B,)\n    return loss.mean()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Denoising Score Matching (DSM)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DSM (Vincent, 2011) avoids the expensive trace term by perturbing the data with Gaussian noise and training the score network to undo the perturbation. Add noise x̃ = x + σε, ε ~ N(0, I). The score of the noisy distribution q_σ(x̃ | x) = N(x̃; x, σ²I) with respect to x̃ is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\nabla_{\\tilde{x}} \\log q_\\sigma(\\tilde{x} \\mid x) = -\\frac{\\tilde{x} - x}{\\sigma^2} = -\\frac{\\varepsilon}{\\sigma}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DSM trains s_θ(x̃) to match this known target, making the trace-of-Jacobian term unnecessary:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{DSM}} = \\mathbb{E}_{x \\sim p_{\\text{data}},\\, \\varepsilon \\sim \\mathcal{N}(0,I)}\\!\\left[\\left\\|s_\\theta(x + \\sigma\\varepsilon) + \\frac{\\varepsilon}{\\sigma}\\right\\|^2\\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is equivalent to the explicit score matching objective (same minimiser), but costs a single forward-backward pass. The score network learns to point from a noisy x̃ back toward the clean data."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def denoising_score_matching_loss(\n    score_net: nn.Module,\n    x: torch.Tensor,\n    sigma: float = 0.1,\n) -> torch.Tensor:\n    \"\"\"\n    DSM loss: train score_net to predict -epsilon/sigma given noisy input.\n    Same minimiser as explicit score matching; costs one forward+backward pass.\n\n    score_net: maps (B, *) -> (B, *), same shape as x\n    x:         clean data (B, *)\n    sigma:     noise standard deviation\n    \"\"\"\n    eps = torch.randn_like(x)           # (B, *)\n    x_noisy = x + sigma * eps           # (B, *)\n\n    s_pred = score_net(x_noisy)         # (B, *) — predicted score of q_sigma\n    target = -eps / sigma               # (B, *) — ground-truth score\n\n    loss = (s_pred - target).pow(2).mean()\n    return loss\n\n\ndef sliced_score_matching_loss(\n    score_net: nn.Module,\n    x: torch.Tensor,\n    n_projections: int = 1,\n) -> torch.Tensor:\n    \"\"\"\n    Sliced score matching (Song et al., 2019): replace the full Jacobian trace\n    with random-projection estimates, reducing cost from O(d) to O(1) passes.\n\n    L_SSM = E_v[v^T (J_s v) + 0.5 * (v^T s)^2]  for v ~ Uniform on unit sphere\n    \"\"\"\n    x = x.detach().requires_grad_(True)\n    s = score_net(x)                           # (B, *)\n    s_flat = s.flatten(1)                      # (B, d)\n\n    losses = []\n    for _ in range(n_projections):\n        v = torch.randn_like(s_flat)           # (B, d) random direction\n        v = v / v.norm(dim=-1, keepdim=True)   # unit vector\n\n        # directional derivative: v^T J_s v\n        vs = (s_flat * v).sum(-1)              # (B,)\n        jv = torch.autograd.grad(vs.sum(), x, create_graph=True)[0].flatten(1)  # (B, d)\n        vjv = (v * jv).sum(-1)                # (B,) = v^T (J_s v)\n\n        losses.append(vjv + 0.5 * vs.pow(2))  # (B,)\n\n    return torch.stack(losses).mean()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Multi-Scale Score Matching (NCSN)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single noise level σ is insufficient for high-dimensional data: a small σ gives a good score near the data manifold but the Langevin chain cannot traverse from noise to data. Song & Ermon (2019) introduced Noise Conditional Score Networks (NCSN): train one network conditioned on σ across a geometric schedule σ_1 > σ_2 > … > σ_L → 0. Langevin sampling then anneals from large σ (global structure) to small σ (fine detail)."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{NCSN}} = \\frac{1}{L} \\sum_{i=1}^{L} \\sigma_i^2 \\, \\mathbb{E}\\!\\left[\\|s_\\theta(\\tilde{x}, \\sigma_i) - \\nabla_{\\tilde{x}} \\log q_{\\sigma_i}(\\tilde{x} \\mid x)\\|^2\\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The σ² weighting ensures that each noise level contributes roughly equally to the total loss — without it, small σ levels dominate because the score magnitudes scale as 1/σ."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class NoiseConditionalScoreNet(nn.Module):\n    \"\"\"\n    Score network conditioned on noise level sigma.\n    For images: U-Net or ResNet with sigma embedded via sinusoidal encoding.\n    Here: minimal MLP for illustration.\n    \"\"\"\n    def __init__(self, d: int = 784, n_sigmas: int = 10):\n        super().__init__()\n        self.sigma_embed = nn.Embedding(n_sigmas, 64)\n        self.net = nn.Sequential(\n            nn.Linear(d + 64, 512), nn.SiLU(),\n            nn.Linear(512, 512), nn.SiLU(),\n            nn.Linear(512, d),\n        )\n\n    def forward(self, x: torch.Tensor, sigma_idx: torch.Tensor) -> torch.Tensor:\n        \"\"\"\n        x:          (B, d)\n        sigma_idx:  (B,) integer index into sigma schedule\n        returns:    (B, d) score estimate\n        \"\"\"\n        emb = self.sigma_embed(sigma_idx)       # (B, 64)\n        return self.net(torch.cat([x, emb], dim=-1))\n\n\ndef ncsn_loss(\n    score_net: NoiseConditionalScoreNet,\n    x: torch.Tensor,\n    sigmas: list[float],\n) -> torch.Tensor:\n    \"\"\"NCSN DSM loss averaged over randomly sampled noise levels.\"\"\"\n    B = x.shape[0]\n    # sample a random sigma for each item in batch\n    idx = torch.randint(0, len(sigmas), (B,), device=x.device)  # (B,)\n    sigma = torch.tensor([sigmas[i] for i in idx.tolist()], device=x.device).float()  # (B,)\n    sigma_v = sigma.view(-1, *([1] * (x.dim() - 1)))  # broadcast over spatial dims\n\n    eps = torch.randn_like(x)\n    x_noisy = x + sigma_v * eps\n\n    # score prediction\n    s_pred = score_net(x_noisy.flatten(1), idx)           # (B, d)\n    target = -(eps / sigma_v).flatten(1)                  # (B, d)\n\n    # weight by sigma^2 for equal contribution across scales\n    loss = (sigma ** 2).unsqueeze(1) * (s_pred - target).pow(2)  # (B, d)\n    return loss.mean()\n\n\ndef annealed_langevin_sampling(\n    score_net: NoiseConditionalScoreNet,\n    x_init: torch.Tensor,\n    sigmas: list[float],\n    n_steps_per_sigma: int = 100,\n    alpha: float = 0.01,\n) -> torch.Tensor:\n    \"\"\"Anneal Langevin from coarse (large sigma) to fine (small sigma).\"\"\"\n    x = x_init.clone().detach()\n    for i, sigma in enumerate(sigmas):                    # coarse -> fine\n        idx = torch.full((x.shape[0],), i, dtype=torch.long, device=x.device)\n        step = alpha * (sigma / sigmas[-1]) ** 2          # scale step by sigma\n        for _ in range(n_steps_per_sigma):\n            s = score_net(x.flatten(1), idx).view_as(x)\n            noise = torch.randn_like(x) * (2 * step) ** 0.5\n            x = x + step * s + noise\n    return x\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Connection to Diffusion Models"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DDPM (Ho et al., 2020) trains a noise-prediction network ε_θ(x_t, t) to predict the noise ε added to create x_t from x_0. This is exactly DSM: predicting −σ·s_θ(x_t, σ_t) is the same as predicting ε when σ_t is the noise schedule standard deviation."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\varepsilon_\\theta(x_t, t) = -\\sigma_t \\, s_\\theta(x_t, t) \\quad \\Longleftrightarrow \\quad s_\\theta = -\\frac{\\varepsilon_\\theta}{\\sigma_t}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "From the EBM perspective: diffusion models implicitly define a time-indexed EBM E_θ(x_t, t) = −log p_θ(x_t), and the denoising network is computing −∇_{x_t} E_θ(x_t, t). The reverse diffusion process (DDPM reverse chain, DDIM, DPM-solver) is just different integrators for the Langevin SDE dx = s_θ(x, t)dt + dW."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def ddpm_loss_as_dsm(\n    noise_net: nn.Module,\n    x0: torch.Tensor,\n    t: torch.Tensor,\n    alpha_bar: torch.Tensor,   # (T,) cumulative product of (1 - beta_t)\n) -> torch.Tensor:\n    \"\"\"\n    DDPM training loss, written explicitly as DSM.\n    noise_net predicts epsilon; loss is MSE(epsilon_pred, epsilon).\n    This is DSM with sigma_t = sqrt(1 - alpha_bar_t).\n\n    x0:        (B, *) clean images\n    t:         (B,) timestep indices\n    alpha_bar: precomputed, shape (T,)\n    \"\"\"\n    eps = torch.randn_like(x0)                                     # (B, *)\n    alpha_t = alpha_bar[t].view(-1, *([1] * (x0.dim() - 1)))      # (B, 1, ...)\n\n    # forward process: x_t = sqrt(alpha_t) * x0 + sqrt(1 - alpha_t) * eps\n    x_t = alpha_t.sqrt() * x0 + (1 - alpha_t).sqrt() * eps\n\n    eps_pred = noise_net(x_t, t)   # (B, *)\n\n    # MSE on epsilon = DSM with sigma_t = sqrt(1 - alpha_t)\n    return (eps_pred - eps).pow(2).mean()\n\n\ndef score_from_noise_pred(\n    eps_pred: torch.Tensor,\n    x_t: torch.Tensor,\n    alpha_bar_t: torch.Tensor,\n) -> torch.Tensor:\n    \"\"\"\n    Convert noise prediction to score estimate.\n    s_theta(x_t) = -eps_pred / sqrt(1 - alpha_bar_t)\n    \"\"\"\n    sigma_t = (1 - alpha_bar_t).sqrt()\n    return -eps_pred / sigma_t\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "EBM vs Score-Based: Side by Side"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Property"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "EBM"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Score-based model"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "What is parameterised"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "E_θ(x): scalar energy"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "s_θ(x): vector score field"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Score from the model"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "-∇_x E_θ (one backward pass)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "s_θ(x) directly (one forward pass)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training objective"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Contrastive divergence (needs MCMC samples)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DSM (no MCMC, closed-form target)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sampling"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Langevin / SGLD / HMC"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Same Langevin / DDPM / DDIM"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Partition function Z"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Implicit (intractable, not needed for sampling)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Absent (score-based models define no normalised density)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Compositionality"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "E₁(x) + E₂(x) gives product of experts"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "s₁(x) + s₂(x) gives same product of experts"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Mental model: EBMs and score-based models are two representations of the same object — the energy landscape of the data distribution. The EBM writes the landscape as a scalar height map E(x); the score model writes it as an arrow field ∇_x log p(x) = −∇_x E(x) pointing uphill in probability. Sampling via Langevin is the same in both views: follow the arrows (score) downhill (negative energy gradient) while adding noise for exploration. The practical difference is training: CD-k for EBMs requires MCMC to compute the negative phase, while DSM for score models only needs the known score of a Gaussian — making score-based training significantly more stable and scalable."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The score s(x) = ∇_x log p(x) = −∇_x E(x) is the same object in both EBMs and score-based models. Z_θ cancels when differentiating with respect to x, so the score is Z-free."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Explicit score matching (Hyvärinen, 2005) enables training s_θ without knowing ∇_x log p_data, but requires computing the Jacobian trace — O(d) backward passes."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Denoising score matching (Vincent, 2011) replaces the trace with a single backward pass by using the known score of the Gaussian noise kernel as the training target. This is the foundation of DDPM."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "NCSN trains a noise-conditional score network over a geometric noise schedule σ₁ > … > σ_L, then uses annealed Langevin to progressively refine samples from coarse to fine."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DDPM's noise-prediction objective is DSM in disguise: ε_θ = −σ_t · s_θ. Modern diffusion models are score-based models with specific noise schedules and fast ODE samplers."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}
