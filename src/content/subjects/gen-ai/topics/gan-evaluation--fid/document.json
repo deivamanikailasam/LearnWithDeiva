@@ -1,0 +1,735 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Fréchet Inception Distance (FID) is the standard evaluation metric for generative image models and has been so since Heusel et al. introduced it in 2017. Unlike the Inception Score, FID directly compares the generated distribution to the real data distribution by measuring how far apart they are in InceptionV3 feature space. The core idea is that two image sets that look similar should produce similar distributions of internal neural network activations in a well-trained classifier. FID approximates both distributions as multivariate Gaussians in the 2048-dimensional pool_3 feature space of InceptionV3, then computes the Fréchet distance (also called the Wasserstein-2 distance between Gaussians) between them. Lower FID means the generated distribution is closer to the real one — covering the same modes, matching the same feature statistics. FID detects mode collapse (missing modes in the real distribution inflate FID), overly noisy outputs (wrong mean), and distributional shifts (wrong covariance). Its main weaknesses are the Gaussian approximation, the requirement for many samples, and the dependence on InceptionV3 as the feature extractor."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The FID Formula" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FID computes the Fréchet distance between two multivariate Gaussians fitted to the InceptionV3 pool_3 features of real and generated images:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{FID}(r, g) = \\|\\mu_r - \\mu_g\\|_2^2 + \\text{Tr}\\left(\\Sigma_r + \\Sigma_g - 2\\left(\\Sigma_r \\Sigma_g\\right)^{1/2}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "(μ_r, Σ_r)", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": mean and covariance of InceptionV3 features for real images." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "(μ_g, Σ_g)", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": mean and covariance of InceptionV3 features for generated images." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Tr(·)", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": matrix trace (sum of diagonal elements)." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "(Σ_r Σ_g)^{1/2}", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": matrix square root of the product of the two covariances, computed via eigendecomposition." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first term ||μ_r - μ_g||² measures the distance between the means — how much the \"average\" generated feature vector differs from the average real feature vector. The second term measures the difference in shape (covariance) between the two distributions. Both must be small for a low FID."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why InceptionV3 pool_3 Features" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FID uses the 2048-dimensional activations from the pool_3 layer of InceptionV3, not the final classification logits. This layer's features capture rich semantic content (object parts, textures, shapes, scene context) learned from 1.2M ImageNet images. Using features rather than class probabilities avoids the discretisation that limits IS — the feature space is continuous and captures within-class variation that the 1000-class softmax would discard. The pool_3 layer sits just before the final global average pooling and fully connected classifier, providing 2048 spatial features that have been through 48 convolutional layers of increasingly abstract feature extraction."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Step-by-Step FID Computation" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torchvision.models as models\nimport numpy as np\nfrom scipy import linalg\n\nclass InceptionFeatureExtractor(nn.Module):\n    \"\"\"Extracts 2048-dim pool_3 features from InceptionV3.\"\"\"\n    def __init__(self):\n        super().__init__()\n        inception = models.inception_v3(\n            weights=models.Inception_V3_Weights.IMAGENET1K_V1,\n            transform_input=False\n        )\n        # Remove final avg_pool, dropout, fc — we want pool_3\n        self.layers = nn.Sequential(\n            inception.Conv2d_1a_3x3,\n            inception.Conv2d_2a_3x3,\n            inception.Conv2d_2b_3x3,\n            nn.MaxPool2d(3, stride=2),\n            inception.Conv2d_3b_1x1,\n            inception.Conv2d_4a_3x3,\n            nn.MaxPool2d(3, stride=2),\n            inception.Mixed_5b,\n            inception.Mixed_5c,\n            inception.Mixed_5d,\n            inception.Mixed_6a,\n            inception.Mixed_6b,\n            inception.Mixed_6c,\n            inception.Mixed_6d,\n            inception.Mixed_6e,\n            inception.Mixed_7a,\n            inception.Mixed_7b,\n            inception.Mixed_7c,\n            nn.AdaptiveAvgPool2d((1, 1))  # pool_3\n        )\n        for p in self.parameters():\n            p.requires_grad_(False)\n\n    def forward(self, x):\n        # x: (B, 3, 299, 299) in [-1, 1] — normalise to InceptionV3 range\n        x = (x + 1) / 2.0  # [-1,1] → [0,1]\n        # InceptionV3 expects approximately [-1, 1] after its own transform\n        # but torchvision's transform_input=False means we handle it here\n        x = x * 2 - 1      # back to [-1,1] as per tf.keras inception convention\n        features = self.layers(x)   # (B, 2048, 1, 1)\n        return features.view(features.size(0), -1)  # (B, 2048)\n\n\ndef get_inception_features(images, model, device='cuda', batch_size=64):\n    \"\"\"\n    images: (N, 3, H, W) tensor in [-1, 1] or list of such tensors\n    Returns: numpy array of shape (N, 2048)\n    \"\"\"\n    import torchvision.transforms.functional as TF\n    model.eval()\n    all_features = []\n\n    for i in range(0, len(images), batch_size):\n        batch = images[i:i+batch_size].to(device)\n        # Resize to 299x299 for InceptionV3\n        if batch.shape[-1] != 299:\n            batch = torch.nn.functional.interpolate(\n                batch, size=(299, 299), mode='bilinear', align_corners=False\n            )\n        with torch.no_grad():\n            feats = model(batch)\n        all_features.append(feats.cpu().numpy())\n\n    return np.concatenate(all_features, axis=0)  # (N, 2048)\n\n\ndef compute_fid_from_features(real_feats, gen_feats, eps=1e-6):\n    \"\"\"\n    Compute FID from two sets of InceptionV3 features.\n    real_feats, gen_feats: (N, 2048) numpy arrays\n    \"\"\"\n    mu_r = real_feats.mean(axis=0)\n    mu_g = gen_feats.mean(axis=0)\n    sigma_r = np.cov(real_feats, rowvar=False)\n    sigma_g = np.cov(gen_feats, rowvar=False)\n\n    # Mean difference\n    diff = mu_r - mu_g\n    mean_term = diff @ diff\n\n    # Matrix square root via eigendecomposition\n    # scipy.linalg.sqrtm can return complex values due to numerical errors\n    sqrt_sigma, _ = linalg.sqrtm(sigma_r @ sigma_g, disp=False)\n    if np.iscomplexobj(sqrt_sigma):\n        # Small imaginary parts are numerical artifacts — discard them\n        sqrt_sigma = sqrt_sigma.real\n\n    cov_term = np.trace(sigma_r + sigma_g - 2.0 * sqrt_sigma)\n\n    fid = mean_term + cov_term\n    return float(fid)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Computing FID with torchmetrics" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice, use the torchmetrics implementation rather than re-implementing the matrix square root, which has subtle numerical issues:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "from torchmetrics.image.fid import FrechetInceptionDistance\nimport torch\n\ndef compute_fid(\n    G, real_loader, z_dim=100,\n    n_gen=50000, device='cuda'\n):\n    \"\"\"\n    Compute FID between real data and G's generated distribution.\n    Requires: pip install torchmetrics[image]\n    \"\"\"\n    fid = FrechetInceptionDistance(\n        feature=2048,    # pool_3 layer, 2048-dim\n        normalize=True   # expect float [0, 1] input\n    ).to(device)\n\n    # Accumulate real image features\n    for real_batch, _ in real_loader:\n        real_batch = real_batch.to(device)\n        real_01 = (real_batch * 0.5 + 0.5).clamp(0, 1)  # [-1,1] → [0,1]\n        fid.update(real_01, real=True)\n\n    # Generate and accumulate fake features\n    G.eval()\n    n_generated = 0\n    batch_size = 64\n    with torch.no_grad():\n        while n_generated < n_gen:\n            this_batch = min(batch_size, n_gen - n_generated)\n            z = torch.randn(this_batch, z_dim, device=device)\n            fake = G(z)\n            fake_01 = (fake * 0.5 + 0.5).clamp(0, 1)\n            fid.update(fake_01, real=False)\n            n_generated += this_batch\n\n    score = fid.compute().item()\n    print(f\"FID: {score:.2f}\")\n    return score\n\n\n# Benchmark: evaluate every N epochs during training\ndef fid_checkpoint_callback(G, real_loader, z_dim, epoch, n_eval=10000, device='cuda'):\n    if epoch % 10 == 0:\n        fid_score = compute_fid(G, real_loader, z_dim, n_gen=n_eval, device=device)\n        print(f\"[Epoch {epoch}] FID={fid_score:.2f}\")\n        return fid_score\n    return None"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How Many Samples Does FID Need?" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FID is biased with finite samples — it systematically overestimates distance when computed with few samples. The bias is approximately:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Bias}(N) \\approx \\frac{d}{N}(\\sigma_r^2 + \\sigma_g^2)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where d=2048 (feature dimension) and N is the sample count. With N=1000, bias can be 10–50 FID points. Practical recommendations:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "N (samples)" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Typical FID bias" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Use case" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1,000" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "±20–50 FID" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Do not use — too noisy" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "5,000" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "±5–10 FID" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quick training monitoring only" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "10,000" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "±2–4 FID" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Acceptable for ablations" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "50,000", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "< 1 FID" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Standard for paper results" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The real image features should also use 50,000 samples (or the full training set if smaller). Using different sample counts for real and generated features introduces asymmetric bias. Fix both N_real and N_gen at 50,000 for paper-quality comparisons."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Caching Real Image Features" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Real image features do not change during training. Computing them once and caching them to disk saves significant computation across evaluation checkpoints:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import numpy as np\nimport os\n\ndef get_or_compute_real_features(\n    real_loader, model, cache_path, device='cuda'\n):\n    \"\"\"\n    Compute InceptionV3 features for real images, or load from cache.\n    cache_path: e.g. 'data/cifar10_inception_features.npz'\n    \"\"\"\n    if os.path.exists(cache_path):\n        data = np.load(cache_path)\n        print(f\"Loaded real features from {cache_path}\")\n        return data['mu'], data['sigma']\n\n    print(\"Computing real image features (first time only)...\")\n    all_feats = []\n    for batch, _ in real_loader:\n        batch = batch.to(device)\n        batch_01 = (batch * 0.5 + 0.5).clamp(0, 1)\n        # Resize to 299x299\n        batch_299 = torch.nn.functional.interpolate(\n            batch_01, size=299, mode='bilinear', align_corners=False\n        )\n        with torch.no_grad():\n            feats = model(batch_299 * 2 - 1)  # back to [-1,1] for InceptionV3\n        all_feats.append(feats.cpu().numpy())\n\n    real_feats = np.concatenate(all_feats, axis=0)\n    mu    = real_feats.mean(axis=0)\n    sigma = np.cov(real_feats, rowvar=False)\n\n    np.savez(cache_path, mu=mu, sigma=sigma)\n    print(f\"Saved real features to {cache_path}\")\n    return mu, sigma\n\n\ndef compute_fid_from_generator(G, mu_real, sigma_real, z_dim, n_gen=50000, device='cuda'):\n    \"\"\"Compute FID given pre-cached real statistics.\"\"\"\n    model = InceptionFeatureExtractor().to(device)\n\n    # Generate samples\n    all_feats = []\n    G.eval()\n    with torch.no_grad():\n        for _ in range(0, n_gen, 64):\n            z = torch.randn(min(64, n_gen - len(all_feats)*64), z_dim, device=device)\n            fake = G(z)\n            fake_299 = torch.nn.functional.interpolate(\n                fake, size=299, mode='bilinear', align_corners=False\n            )\n            feats = model(fake_299)\n            all_feats.append(feats.cpu().numpy())\n\n    gen_feats  = np.concatenate(all_feats, axis=0)\n    mu_g   = gen_feats.mean(axis=0)\n    sigma_g = np.cov(gen_feats, rowvar=False)\n\n    return compute_fid_from_features_stats(mu_real, sigma_real, mu_g, sigma_g)\n\n\ndef compute_fid_from_features_stats(mu_r, sigma_r, mu_g, sigma_g):\n    from scipy import linalg\n    diff = mu_r - mu_g\n    sqrt_cov, _ = linalg.sqrtm(sigma_r @ sigma_g, disp=False)\n    if np.iscomplexobj(sqrt_cov):\n        sqrt_cov = sqrt_cov.real\n    return float(diff @ diff + np.trace(sigma_r + sigma_g - 2 * sqrt_cov))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "What Changes FID" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Understanding what affects FID helps interpret training logs and diagnose problems:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Problem" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Effect on FID" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Diagnosis" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Mode collapse" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Large increase (missing modes → wrong covariance)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "σ_g much smaller than σ_r; FID dominated by cov term" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Blurry outputs" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Moderate increase (blurring changes features)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "μ_g shifted; high-frequency features differ" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Colour shift" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Increase (mean feature shift)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "μ_g far from μ_r; mean term dominates" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Memorisation (overfitting)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Decrease (near-perfect match) — misleading" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Check nearest-neighbour similarity to training set" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Correct training" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Decreases steadily" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Both mean and cov terms converge" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "FID Reference Values" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Model" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Dataset" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "FID" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "DCGAN" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "CIFAR-10" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "~37" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "WGAN-GP" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "CIFAR-10" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "~29" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "SN-GAN" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "CIFAR-10" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "~21" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "BigGAN" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ImageNet 256×256" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "7.4" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "StyleGAN2" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "FFHQ 1024×1024" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "2.84" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "StyleGAN3" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "FFHQ 1024×1024" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "2.79" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Limitations of FID" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Gaussian approximation", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": FID assumes both distributions are Gaussian in InceptionV3 feature space. Real image feature distributions are not Gaussian — they have complex multimodal structure. The approximation works well in practice but is theoretically imperfect." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Does not detect memorisation", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": a generator that memorises all training images would achieve near-zero FID while completely failing at generalisation. Use nearest-neighbour distances to training images to detect memorisation." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Domain sensitivity", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": like IS, FID depends on InceptionV3 features. For non-ImageNet domains, consider using a domain-specific feature extractor (CLIP, ResNet pretrained on the target domain) instead." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Resolution bias", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": resizing images to 299×299 (required for InceptionV3) uses bilinear interpolation that can introduce artifacts. FID at low resolution (e.g., 32×32 upsampled) is less reliable than at native high resolution." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Not differentiable", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": FID cannot be used as a training loss. The matrix square root and covariance estimation require the full batch of generated images, not per-sample gradients. It is an evaluation-only metric." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Precision and Recall: Decomposing FID" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FID aggregates quality and diversity into one number. Precision and Recall (Kynkäänniemi et al. 2019) decompose them:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Precision", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": fraction of generated images that fall within the support of the real distribution (measured by nearest-neighbour in feature space). High precision = each generated image looks realistic." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Recall", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ": fraction of real images that fall within the support of the generated distribution. High recall = the generator covers all real distribution modes." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def compute_precision_recall(real_feats, gen_feats, k=3):\n    \"\"\"\n    Compute precision and recall using k-nearest-neighbour manifold estimation.\n    real_feats, gen_feats: (N, 2048) numpy arrays\n    k: number of nearest neighbours for manifold estimation\n    \"\"\"\n    from sklearn.metrics import pairwise_distances\n\n    # Compute pairwise distances within each set and across sets\n    real_real = pairwise_distances(real_feats, metric='euclidean')\n    gen_gen   = pairwise_distances(gen_feats,  metric='euclidean')\n    real_gen  = pairwise_distances(real_feats, gen_feats, metric='euclidean')\n\n    # Radius for each point = distance to its k-th nearest neighbour\n    # (k+1 because the 1st neighbour is the point itself in self-distance matrix)\n    real_radii = np.sort(real_real, axis=1)[:, k]\n    gen_radii  = np.sort(gen_gen,   axis=1)[:, k]\n\n    # Precision: fraction of generated points within k-NN radius of some real point\n    # A gen point is \"in real manifold\" if it is within real_radii[j] of some real j\n    precision = (real_gen.min(axis=0) <= real_radii.reshape(-1, 1).min(axis=0)).mean()\n\n    # Recall: fraction of real points within k-NN radius of some generated point\n    recall = (real_gen.min(axis=1) <= gen_radii.reshape(-1, 1).min(axis=0)).mean()\n\n    return float(precision), float(recall)\n\n# Note: this is a simplified version. The full implementation from the paper\n# uses a per-neighbour threshold check for each (real_j, gen_i) pair."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Computing FID with fewer than 10,000 samples.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " With N=1000, FID is unreliable due to covariance estimation error (2048×2048 covariance from 1000 samples is rank-deficient). Use at least 10,000 and prefer 50,000 for final results." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Recomputing real image features each run.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Real image features are fixed throughout training. Compute them once, save (μ_r, Σ_r) to disk, and load them for every FID evaluation. This is the standard practice in all GAN codebases." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Comparing FID across different real reference sets.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " FID values are only comparable when computed against the same real image features. An FID computed against CelebA is not comparable to one computed against FFHQ, even if both are face datasets." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Using different image preprocessing than the real image features.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " If real features were computed with bilinear resize to 299×299, generated images must use the same resize method. Mixing bicubic and bilinear resize introduces a systematic FID offset." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use 50,000 samples for both real and generated, bilinear resize to 299×299.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " This is the protocol used in most GAN papers (BigGAN, StyleGAN, etc.) and enables apples-to-apples comparison." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Cache real image features once at training start.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Save (μ_r, Σ_r) as a .npz file. Computing FID during training then only requires generating samples and computing their features — no real data needed." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use EMA generator weights for FID evaluation.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Instantaneous generator weights oscillate; EMA weights are smoother and consistently produce lower FID. Always evaluate the EMA model, not the training model." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Report FID alongside IS and, if using conditional generation, class-conditional FID.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " For class-conditional generators, per-class FID reveals which classes the generator handles poorly — a global FID can mask collapse on specific classes." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "For non-ImageNet datasets, use CLIP-FID or a domain-specific feature extractor.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " CLIP features generalise better across domains than InceptionV3 and produce more meaningful FID values for medical, satellite, or artistic image generators." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of FID as the distance between two clouds of points in feature space. Each image — real or generated — becomes a point in the 2048-dimensional InceptionV3 feature space. A perfect generator would create a cloud of generated points that is indistinguishable from the cloud of real points: same center (μ), same shape (Σ). FID measures exactly that: how different are the two clouds? A collapsed generator produces a tiny cloud (all generated images similar) while the real cloud is large and diffuse — FID catches this via the covariance term. A quality-degraded generator produces a cloud that is centred in the wrong region — FID catches this via the mean term. The Fréchet distance is the right measure because, unlike simple Euclidean distance between means, it accounts for the full shape (covariance) of both distributions."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2(Σ_r Σ_g)^{1/2}). It measures the Fréchet distance between Gaussian approximations of real and generated InceptionV3 pool_3 features. Lower is better." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "FID compares generated to real data, unlike IS. This makes it far more reliable: a generator that produces beautiful but wrong images scores high IS but high (bad) FID." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "50,000 samples each (real and generated) are needed for stable FID estimates. With fewer samples, covariance estimation error makes FID unreliable for comparing methods." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Cache real image features (μ_r, Σ_r) — they never change. Only the generated features need recomputing each evaluation. This makes FID fast to track during training." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "FID does not detect memorisation. A generator reproducing training images exactly would score near-zero FID. Use nearest-neighbour distances to detect this separately." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Precision/Recall decomposes FID: precision = quality (are generated images realistic?), recall = coverage (are all real modes covered?). Use them when you need to understand whether a FID change is driven by quality or diversity." }]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
