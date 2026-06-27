@@ -1,0 +1,177 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A base model — also called a pretrained model or foundation model — is the raw output of the pretraining phase: a neural network trained to predict the next token on a massive text corpus, with no further modification. It is not an assistant and does not follow instructions. Given the prompt \"What is the capital of France?\", a base model might respond \"What is the capital of Germany? What is the capital of Spain?\" — completing the pattern of a geography quiz rather than answering the question. This is expected: the model learned to continue text, not to respond to queries. Understanding base models is essential for knowing what fine-tuning actually changes — and what it cannot."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "What a Base Model Is and Isn't"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "It is a probability distribution over token sequences. "},
+              {"type": "text", "text": "Given a prefix x₁…x_{t-1}, the model outputs a distribution over the vocabulary for position t. Sampling from this distribution autoregressively generates text."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "It is not an agent. "},
+              {"type": "text", "text": "It has no goal, no concept of helpfulness, and no preference for true over false statements. It generates high-probability continuations of its input."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "It knows a great deal. "},
+              {"type": "text", "text": "The weights encode statistical patterns from hundreds of billions of tokens of human text — grammar, facts, code, reasoning traces, and stylistic conventions."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "It is the raw material for everything else. "},
+              {"type": "text", "text": "Instruction-tuned models, chat models, domain-specific fine-tunes, and RLHF-aligned assistants all start from a base model. The base model's quality sets the ceiling for all downstream variants."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Using a Base Model Directly"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Base models are useful when you want the model to continue a prompt in a predictable way rather than respond to it as an assistant. This is most common for few-shot prompting — where you give the model examples of the task formatted as completed text, and it continues the pattern:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer, AutoModelForCausalLM\nimport torch\n\n\ndef load_base_model(model_name: str):\n    \"\"\"Load a causal LM base model and tokenizer.\"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(model_name)\n    model = AutoModelForCausalLM.from_pretrained(\n        model_name,\n        torch_dtype=torch.bfloat16,\n        device_map=\"auto\",\n    )\n    return model, tokenizer\n\n\ndef few_shot_complete(\n    model,\n    tokenizer,\n    examples: list[tuple[str, str]],\n    query: str,\n    max_new_tokens: int = 64,\n) -> str:\n    \"\"\"\n    Prompt a base model with few-shot examples and the query.\n    The model continues the text rather than responding to it.\n\n    examples: list of (input, output) pairs in plain text\n    \"\"\"\n    # Build a text block the model will continue\n    prompt = \"\"\n    for inp, out in examples:\n        prompt += f\"Input: {inp}\\nOutput: {out}\\n\\n\"\n    prompt += f\"Input: {query}\\nOutput:\"\n\n    inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)\n    with torch.no_grad():\n        output_ids = model.generate(\n            **inputs,\n            max_new_tokens=max_new_tokens,\n            do_sample=False,   # greedy decode — base model continuations are deterministic\n            pad_token_id=tokenizer.eos_token_id,\n            eos_token_id=tokenizer.encode(\"\\n\")[0],  # stop at newline\n        )\n    new_tokens = output_ids[0, inputs[\"input_ids\"].shape[1]:]\n    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()\n\n\n# Example: sentiment classification via text continuation\nexamples = [\n    (\"I loved the product.\", \"Positive\"),\n    (\"Terrible experience, would not recommend.\", \"Negative\"),\n    (\"It was okay, nothing special.\", \"Neutral\"),\n]\nresult = few_shot_complete(\n    model=None,   # substitute your loaded model\n    tokenizer=None,\n    examples=examples,\n    query=\"The delivery was fast and the item was exactly as described.\",\n)\nprint(result)  # -> 'Positive'\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Probing What a Base Model Knows"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "One principled way to study base model knowledge is to measure the log-probability the model assigns to correct versus incorrect completions. This is sometimes called zero-shot evaluation by scoring:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\n\ndef log_prob_of_completion(\n    model,\n    tokenizer,\n    prefix: str,\n    completion: str,\n) -> float:\n    \"\"\"\n    Return the log-probability the base model assigns to `completion`\n    given `prefix`. Used to compare candidate answers without sampling.\n    \"\"\"\n    full_text = prefix + completion\n    full_ids  = tokenizer(full_text, return_tensors=\"pt\")[\"input_ids\"].to(model.device)\n    pre_ids   = tokenizer(prefix,    return_tensors=\"pt\")[\"input_ids\"].to(model.device)\n    n_prefix  = pre_ids.shape[1]\n\n    with torch.no_grad():\n        logits = model(full_ids).logits   # (1, T, V)\n\n    # Only score the completion tokens\n    log_probs = torch.nn.functional.log_softmax(logits[0], dim=-1)  # (T, V)\n    completion_log_prob = 0.0\n    for t in range(n_prefix, full_ids.shape[1]):\n        token_id = full_ids[0, t].item()\n        completion_log_prob += log_probs[t - 1, token_id].item()\n    return completion_log_prob\n\n\ndef classify_by_scoring(model, tokenizer, prefix: str, candidates: list[str]) -> str:\n    \"\"\"Pick the candidate the model assigns highest log-prob to.\"\"\"\n    scores = [\n        log_prob_of_completion(model, tokenizer, prefix, c)\n        for c in candidates\n    ]\n    return candidates[scores.index(max(scores))]\n\n\n# Example: probe factual knowledge without instruction tuning\nprefix = \"The capital of Japan is \"\nanswer = classify_by_scoring(\n    model=None, tokenizer=None,\n    prefix=prefix,\n    candidates=[\"Tokyo\", \"Osaka\", \"Kyoto\", \"Hiroshima\"]\n)\nprint(answer)  # -> 'Tokyo'\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Prominent Open-Weight Base Models"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Params"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training tokens"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Context"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Licence"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLaMA 3 8B / 70B / 405B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "8B–405B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "15T+"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "128k"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Meta Community"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Mistral 7B v0.3"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "7B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Not disclosed"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "32k"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Apache 2.0"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gemma 2 9B / 27B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "9B / 27B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2T / 13T"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "8k"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gemma ToU"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Falcon 180B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "180B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "3.5T"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2k"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Apache 2.0"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The base model is both the most powerful and the least usable form of an LLM. It contains nearly everything the downstream model will know, but without any of the scaffolding that makes it safe or useful to deploy. Think of it as a library of all human writing, with no librarian — you can access anything, but you have to know exactly how to ask."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
