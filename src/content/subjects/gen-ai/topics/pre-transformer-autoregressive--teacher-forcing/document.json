@@ -1,0 +1,416 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Teacher forcing is the training strategy for autoregressive sequence models where ground-truth tokens are fed as decoder inputs instead of the model's own predictions from the previous step. It makes training fast and stable, but creates a systematic mismatch with inference — a problem called exposure bias. Understanding teacher forcing, its failure modes, and the scheduled-sampling and professor-forcing mitigations is essential for building seq2seq models that generalise beyond the training distribution."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Core Training Loop"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In an autoregressive language model, each token xₜ is predicted from the prefix x₁…xₜ₋₁. During training, two choices exist for what to pass as input at step t:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Teacher forcing:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " feed the ground-truth token xₜ₋₁. The hidden state is always conditioned on correct history. Loss converges quickly because gradients are not corrupted by earlier prediction errors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Free running (BPTT without teacher forcing):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " feed the model's own prediction x̂ₜ₋₁ = argmax p(·|x₁…x̂ₜ₋₂). Trains under realistic conditions but gradients through the argmax are zero, requiring REINFORCE or straight-through estimators."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\ndef teacher_forcing_loss(\n    model: nn.Module,\n    tokens: torch.Tensor,   # (B, T) integer ids including BOS\n    hidden=None,\n) -> torch.Tensor:\n    \"\"\"\n    Standard teacher forcing: input is x[0..T-2], target is x[1..T-1].\n    All T-1 steps are processed in a single forward pass — O(T) for RNN,\n    O(1) for transformer (parallel across positions).\n    \"\"\"\n    inp    = tokens[:, :-1]   # (B, T-1): shifted-right inputs\n    target = tokens[:, 1:]    # (B, T-1): labels\n\n    logits, _ = model(inp, hidden)   # (B, T-1, V)\n    loss = F.cross_entropy(\n        logits.reshape(-1, logits.size(-1)),\n        target.reshape(-1),\n        ignore_index=0,  # padding index\n    )\n    return loss\n\n\ndef free_running_loss(\n    model: nn.Module,\n    tokens: torch.Tensor,   # (B, T)\n    hidden=None,\n) -> torch.Tensor:\n    \"\"\"\n    Free-running: each step feeds the previous argmax prediction.\n    Cannot vectorise across time — requires a Python loop.\n    Gradients through argmax are zero; use only for evaluation or\n    combine with REINFORCE / straight-through for training.\n    \"\"\"\n    B, T = tokens.shape\n    device = tokens.device\n    inp_t = tokens[:, 0:1]   # (B, 1): BOS token\n    total_loss = torch.tensor(0.0, device=device)\n\n    for t in range(1, T):\n        logits, hidden = model(inp_t, hidden)   # (B, 1, V)\n        target_t = tokens[:, t]                 # (B,)\n        total_loss = total_loss + F.cross_entropy(logits[:, 0], target_t)\n        # feed argmax as next input (grad blocked here)\n        inp_t = logits[:, 0].argmax(dim=-1, keepdim=True)  # (B, 1)\n\n    return total_loss / (T - 1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Exposure Bias"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because teacher forcing always provides perfect prefixes during training, the model never learns to recover from its own prediction errors. At inference, any mistake at step t propagates: the wrong token becomes the input at step t+1, shifting the hidden state into a region the model was never trained on. Errors compound, causing the output to drift further from the target distribution with each step — especially pronounced in long-form generation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Formally, let p* be the data distribution and p_θ the model. During training the distribution of inputs at each step is p*, but at inference it is p_θ. The total variation between the two input distributions grows as O(T·ε) where ε is the per-step error rate — linear in sequence length. Scheduled sampling and professor forcing are two principled fixes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Scheduled Sampling"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Bengio et al. (2015) proposed a curriculum that gradually shifts the input distribution from p* toward p_θ during training. A mixing probability ε_i controls what fraction of steps use ground-truth vs. model tokens at training iteration i. As i increases, ε_i decays towards 0 (fully free-running):"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Schedule"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Formula for εᵢ"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hyperparameters"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Linear"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "italic"}], "text": "max(ε_min, k − c·i)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "slope c, floor ε_min"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Exponential"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "italic"}], "text": "kⁱ, k ∈ (0,1)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "decay rate k"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Inverse sigmoid"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "italic"}], "text": "k / (k + exp(i/k))"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "control k"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\nimport random\n\ndef scheduled_sampling_prob(step: int, schedule: str = \"inverse_sigmoid\", k: float = 2000.0) -> float:\n    \"\"\"Returns probability of using ground-truth token at training `step`.\"\"\"\n    if schedule == \"linear\":\n        return max(0.0, 1.0 - step / k)\n    elif schedule == \"exponential\":\n        return max(0.01, k ** step)   # k < 1, e.g. 0.9999\n    elif schedule == \"inverse_sigmoid\":\n        return k / (k + math.exp(step / k))\n    raise ValueError(schedule)\n\n\ndef scheduled_sampling_step(\n    model: nn.Module,\n    inp_t: torch.Tensor,       # (B, 1) ground-truth token at t\n    prev_logits: torch.Tensor | None,  # (B, 1, V) from previous step, or None\n    use_gt_prob: float,\n) -> torch.Tensor:\n    \"\"\"Mix ground-truth and model prediction according to use_gt_prob.\"\"\"\n    if prev_logits is None or random.random() < use_gt_prob:\n        return inp_t   # use ground-truth\n    return prev_logits[:, 0].argmax(dim=-1, keepdim=True)  # use model output\n\n\ndef train_step_scheduled(\n    model: nn.Module,\n    tokens: torch.Tensor,   # (B, T)\n    global_step: int,\n    optimizer: torch.optim.Optimizer,\n) -> float:\n    B, T = tokens.shape\n    eps = scheduled_sampling_prob(global_step)\n    hidden = None\n    total_loss = torch.tensor(0.0, device=tokens.device)\n    prev_logits = None\n\n    for t in range(T - 1):\n        inp_t = scheduled_sampling_step(model, tokens[:, t:t+1], prev_logits, eps)\n        logits, hidden = model(inp_t, hidden)       # (B, 1, V)\n        hidden = (hidden[0].detach(), hidden[1].detach())\n        loss_t = F.cross_entropy(logits[:, 0], tokens[:, t + 1])\n        total_loss = total_loss + loss_t\n        prev_logits = logits\n\n    loss = total_loss / (T - 1)\n    optimizer.zero_grad()\n    loss.backward()\n    nn.utils.clip_grad_norm_(model.parameters(), 0.25)\n    optimizer.step()\n    return loss.item()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Professor Forcing"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lamb et al. (2016) observed that scheduled sampling is still a heuristic that doesn't match the free-running hidden state distribution at inference. Professor forcing adds an adversarial loss that forces the hidden state trajectory under teacher forcing (hTF) to be indistinguishable from the trajectory under free running (hFR). A discriminator D is trained to tell them apart; the generative model is trained to fool D:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{PF}} = \\mathcal{L}_{\\text{MLE}} + \\lambda\\,\\mathbb{E}\\bigl[\\log D(h^{\\text{TF}}) + \\log(1 - D(h^{\\text{FR}}))\\bigr]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When the discriminator cannot distinguish hTF from hFR, the hidden state dynamics at training time match those at inference — eliminating exposure bias at the level of recurrent state rather than just token inputs."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class HiddenStateDiscriminator(nn.Module):\n    \"\"\"Binary classifier: teacher-forced (1) vs free-running (0) trajectory.\"\"\"\n    def __init__(self, hidden_size: int):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(hidden_size, hidden_size // 2),\n            nn.ReLU(),\n            nn.Linear(hidden_size // 2, 1),\n        )\n\n    def forward(self, h: torch.Tensor) -> torch.Tensor:\n        # h: (B, T, H) — sequence of hidden states\n        return self.net(h).squeeze(-1)   # (B, T)\n\n\ndef professor_forcing_loss(\n    model: nn.Module,\n    discriminator: HiddenStateDiscriminator,\n    tokens: torch.Tensor,   # (B, T)\n    lam: float = 0.5,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    \"\"\"\n    Returns (gen_loss, disc_loss) — optimise with separate optimisers.\n    \"\"\"\n    B, T = tokens.shape\n    inp_tf = tokens[:, :-1]   # teacher-forced inputs\n    target = tokens[:, 1:]\n\n    # Teacher-forced forward\n    logits_tf, _ = model(inp_tf)\n    mle_loss = F.cross_entropy(logits_tf.reshape(-1, logits_tf.size(-1)), target.reshape(-1))\n\n    # Collect hidden states (assume model returns them when asked)\n    with torch.no_grad():\n        _, h_tf = model(inp_tf, return_hidden=True)     # (B, T-1, H)\n\n    # Free-running forward — no gradient through argmax\n    inp_fr = tokens[:, 0:1]\n    h_fr_list, hidden = [], None\n    for t in range(T - 1):\n        logits_t, hidden = model(inp_fr, hidden)\n        h_fr_list.append(hidden[0][-1])  # last-layer hidden (B, H)\n        inp_fr = logits_t[:, 0].argmax(-1, keepdim=True).detach()\n    h_fr = torch.stack(h_fr_list, dim=1)   # (B, T-1, H)\n\n    # Discriminator loss\n    real_logits = discriminator(h_tf.detach())   # TF = real\n    fake_logits = discriminator(h_fr.detach())   # FR = fake\n    disc_loss = (\n        F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits))\n        + F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))\n    ) / 2\n\n    # Generator (model) loss: fool discriminator on FR trajectory\n    fool_logits = discriminator(h_fr)\n    gen_fool = F.binary_cross_entropy_with_logits(fool_logits, torch.ones_like(fool_logits))\n    gen_loss = mle_loss + lam * gen_fool\n\n    return gen_loss, disc_loss"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Teacher Forcing in Seq2Seq Models"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In encoder–decoder architectures (translation, summarisation), teacher forcing applies to the decoder. The encoder processes the entire source in parallel (no autoregressive constraint); the decoder is autoregressive and uses teacher forcing during training. This means the decoder cross-attends to encoder outputs with ground-truth target prefixes, but at inference must generate left-to-right from its own predictions."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class Seq2SeqRNN(nn.Module):\n    def __init__(self, src_vocab: int, tgt_vocab: int, emb_dim: int, hidden_size: int):\n        super().__init__()\n        self.src_emb = nn.Embedding(src_vocab, emb_dim)\n        self.tgt_emb = nn.Embedding(tgt_vocab, emb_dim)\n        self.encoder = nn.GRU(emb_dim, hidden_size, batch_first=True)\n        self.decoder = nn.GRU(emb_dim, hidden_size, batch_first=True)\n        self.proj    = nn.Linear(hidden_size, tgt_vocab)\n\n    def forward(\n        self,\n        src: torch.Tensor,   # (B, S)\n        tgt: torch.Tensor,   # (B, T) — includes BOS, excludes EOS\n    ) -> torch.Tensor:       # (B, T, tgt_vocab)\n        _, enc_h = self.encoder(self.src_emb(src))  # enc_h: (1, B, H)\n        dec_out, _ = self.decoder(self.tgt_emb(tgt), enc_h)  # teacher forced\n        return self.proj(dec_out)\n\n    @torch.no_grad()\n    def generate(\n        self,\n        src: torch.Tensor,\n        bos_id: int,\n        eos_id: int,\n        max_len: int = 50,\n    ) -> list[int]:\n        _, enc_h = self.encoder(self.src_emb(src))\n        inp = torch.tensor([[bos_id]], device=src.device)\n        hidden, result = enc_h, []\n        for _ in range(max_len):\n            out, hidden = self.decoder(self.tgt_emb(inp), hidden)\n            tok = self.proj(out[:, 0]).argmax(-1).item()\n            if tok == eos_id:\n                break\n            result.append(tok)\n            inp = torch.tensor([[tok]], device=src.device)\n        return result"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Practical Recommendations"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Use pure teacher forcing to start."
+                  },
+                  {
+                    "type": "text",
+                    "text": " For tasks where error compounding is mild (short sequences, high-diversity outputs with top-p sampling), pure teacher forcing generalises well and is far simpler."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Add scheduled sampling for long-sequence tasks."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Machine translation of long sentences, code generation, and story generation benefit from slowly increasing the free-running fraction. Start with ε=1 and decay using the inverse sigmoid schedule."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Transformers largely sidestep the RNN-specific problem."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Because transformer training is already massively parallel (all positions attend simultaneously), teacher forcing is implicit and highly efficient. The exposure bias issue still exists, but the fixed-size hidden state bottleneck does not."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "RLHF and DPO are modern alternatives."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Reinforcement learning from human feedback (RLHF) and direct preference optimisation (DPO) train language models under their own output distribution — inherently solving exposure bias for the ultimate task-level objective, at the cost of much higher training complexity."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [{"type": "bold"}],
+                "text": "Mental model."
+              },
+              {
+                "type": "text",
+                "text": " Teacher forcing is like teaching a student to play piano with sheet music always visible: they learn the notes accurately but struggle when performing from memory. Scheduled sampling is giving them the sheet music for the first half of the piece and making them memorise the second half. Professor forcing is training a second listener to evaluate whether their in-head representation during practice matches the one during performance, and giving the student feedback until the two are indistinguishable."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Teacher forcing feeds ground-truth tokens as decoder inputs during training, enabling fully parallel (for transformers) or chunk-parallel (for RNNs) computation and fast convergence."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exposure bias arises because the model never sees its own prediction errors during training; at inference, errors from step t shift the hidden state into unvisited regions, compounding over O(T·ε) steps."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scheduled sampling decays a mixing probability ε from 1 (pure teacher) to 0 (pure free-running); the inverse sigmoid schedule provides a smooth, slow-start curriculum."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Professor forcing adds an adversarial discriminator on hidden state trajectories, forcing the teacher-forced and free-running hidden state distributions to match — addressing exposure bias at the state rather than token level."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For transformers, teacher forcing is implicit and parallelised; exposure bias is less severe but not absent — RLHF and DPO are the contemporary approaches to training under the model's own generation distribution."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
