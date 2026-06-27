@@ -1,0 +1,317 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The change-of-variables formula is the mathematical foundation of every normalising flow. It tells you exactly how probability density transforms when you apply an invertible function to a random variable — no approximations, no sampling, exact likelihoods. Mastering this formula, its derivation, its numerical pitfalls, and its connection to the Jacobian determinant is the prerequisite for understanding why specific flow architectures are designed the way they are."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Scalar Case: Intuition First"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In 1D: if Z ~ p_Z and X = f(Z) for a strictly monotone differentiable f, the density of X is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p_X(x) = p_Z(f^{-1}(x))\\,\\left|\\frac{df^{-1}}{dx}\\right| = p_Z(z)\\,\\left|\\frac{dz}{dx}\\right|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The absolute value handles both increasing and decreasing f. Intuitively: if f stretches the probability mass over a larger region (|df/dz| > 1), the density must decrease proportionally so the total probability remains 1. If f compresses mass into a smaller region (|df/dz| < 1), density increases."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.distributions as D\nimport matplotlib.pyplot as plt\nimport numpy as np\n\ndef change_of_variables_1d_demo():\n    \"\"\"\n    Verify the change-of-variables formula numerically:\n    Z ~ N(0,1), X = exp(Z) -> X ~ LogNormal(0,1).\n    \"\"\"\n    z_base = D.Normal(0, 1)\n\n    def f(z):    return torch.exp(z)           # Z -> X\n    def f_inv(x): return torch.log(x)          # X -> Z\n    def log_abs_df_inv_dx(x): return -torch.log(x)  # log|d(log x)/dx| = -log(x)\n\n    # Exact log-density of X via change of variables\n    def log_p_X(x):\n        z = f_inv(x)\n        return z_base.log_prob(z) + log_abs_df_inv_dx(x)\n\n    # Verify against scipy LogNormal\n    x_vals = torch.linspace(0.01, 5.0, 500)\n    log_p_flow = log_p_X(x_vals)\n    log_p_true = D.LogNormal(0, 1).log_prob(x_vals)\n\n    max_err = (log_p_flow - log_p_true).abs().max().item()\n    print(f\"Max absolute log-density error: {max_err:.2e}\")  # should be ~1e-6\n    return x_vals, log_p_flow.exp(), log_p_true.exp()\n\n# change_of_variables_1d_demo()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Multivariate Case: The Jacobian Determinant"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In d dimensions, the stretch factor generalises from a scalar derivative to a matrix of partial derivatives — the Jacobian:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "J_f(z) = \\frac{\\partial f(z)}{\\partial z} = \\begin{pmatrix} \\partial f_1/\\partial z_1 & \\cdots & \\partial f_1/\\partial z_d \\\\ \\vdots & & \\vdots \\\\ \\partial f_d/\\partial z_1 & \\cdots & \\partial f_d/\\partial z_d \\end{pmatrix}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The absolute value of the determinant |det Jf(z)| is the volume scaling factor: if a small cube dV around z is mapped to a region around x, that region has volume |det Jf| · dV. The change-of-variables formula is then:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p_X(x) = p_Z(f^{-1}(x))\\,\\left|\\det \\frac{\\partial f^{-1}(x)}{\\partial x}\\right| = \\frac{p_Z(z)}{\\left|\\det J_f(z)\\right|}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In log-space (used for numerical stability):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log p_X(x) = \\log p_Z(z) - \\log \\left|\\det J_f(z)\\right|"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\ndef exact_log_det_jacobian(\n    f,             # callable: z (B, D) -> x (B, D)\n    z: torch.Tensor,   # (B, D)\n) -> torch.Tensor:    # (B,) log|det J_f(z)|\n    \"\"\"\n    Compute exact log|det J_f(z)| via torch.autograd.functional.jacobian.\n    O(d^2) — only feasible for small d.\n    \"\"\"\n    B, D = z.shape\n    log_dets = []\n    for i in range(B):\n        zi = z[i:i+1].requires_grad_(True)    # (1, D)\n        xi = f(zi)                             # (1, D)\n        # Full Jacobian: (1, D, 1, D) -> squeeze to (D, D)\n        J = torch.autograd.functional.jacobian(lambda z_: f(z_).squeeze(0), zi.squeeze(0))\n        log_dets.append(torch.linalg.slogdet(J)[1])   # log|det|\n    return torch.stack(log_dets)   # (B,)\n\n\ndef log_prob_flow(\n    f,                      # invertible transform z -> x\n    f_inv,                  # inverse: x -> z\n    log_det_fn,             # log|det J_f(z)| at z: fast O(d) version\n    prior: torch.distributions.Distribution,\n    x: torch.Tensor,        # (B, D) data points\n) -> torch.Tensor:          # (B,) exact log-likelihoods\n    z = f_inv(x)\n    log_p_z   = prior.log_prob(z)   # (B,)\n    log_det   = log_det_fn(z)       # (B,)\n    return log_p_z - log_det        # subtract because we divide by |det J_f|"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why |det J| Must Be Computed in Log-Space"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For deep flows with K layers, the log-likelihood involves a product of K determinants. In raw space: |det J_total| = ∏ₖ |det Jₖ|. For K = 30 layers with |det Jₖ| ≈ 0.9, this product is 0.9³⁰ ≈ 0.04 — already small. For even slight deviation from 1, products either underflow to zero or overflow to infinity. Always work in log-space:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log|\\det J_{\\text{total}}| = \\sum_{k=1}^{K} \\log|\\det J_k|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PyTorch provides `torch.linalg.slogdet` which returns (sign, log|det|) without overflow:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def stable_log_det(A: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Numerically stable log|det A|.\n    Returns (B,) log|det| for a batch of matrices A: (B, D, D).\n    \"\"\"\n    sign, logabsdet = torch.linalg.slogdet(A)   # both (B,)\n    # sign == 0 means A is singular: det = 0, log-det = -inf\n    # For a flow, this should never happen if the layers are properly initialised\n    assert (sign.abs() > 0.5).all(), \"Singular Jacobian detected\"\n    return logabsdet   # log|det|, not log(det) — handles negative det\n\n\n# For triangular matrices (coupling/autoregressive layers), log-det is O(d):\ndef triangular_log_det(L: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    For triangular L (B, D, D), det = product of diagonal entries.\n    log|det| = sum of log|diag|.\n    \"\"\"\n    return L.diagonal(dim1=-2, dim2=-1).abs().log().sum(-1)  # (B,)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Matrix Determinant Lemma and Rank-1 Updates"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The matrix determinant lemma enables O(d) log-det computation for rank-1 update transforms — useful for planar flows and certain invertible layers:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\det(A + uv^\\top) = \\det(A)\\,(1 + v^\\top A^{-1} u)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For planar flow f(z) = z + u·h(wᵀz + b) with h scalar, the Jacobian is J = I + u·(h'(wᵀz + b)·wᵀ) — a rank-1 update of the identity. Applying the lemma: det(J) = 1 + h'(wᵀz + b)·uᵀw. Computing this is O(d) — just two dot products."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def planar_flow_log_det(\n    u: torch.Tensor,   # (d,)\n    w: torch.Tensor,   # (d,)\n    h_prime: torch.Tensor,  # (B,) derivative of activation at w^T z + b\n) -> torch.Tensor:    # (B,)\n    \"\"\"\n    O(d) log|det J| for planar flow via the matrix determinant lemma.\n    J = I + u * h'(w^T z + b) * w^T\n    det(J) = 1 + h'(w^T z + b) * (u^T w)\n    \"\"\"\n    u_dot_w = (u * w).sum()                             # scalar\n    det_J   = 1 + h_prime * u_dot_w                   # (B,)\n    return torch.log(det_J.abs() + 1e-8)               # (B,)\n\n\n# The Sylvester determinant identity extends this to rank-M updates:\n# det(I + UV^T) = det(I_M + V^T U)  where U,V in R^{d x M}\n# This is O(M^3 + dM) instead of O(d^3) — useful for Sylvester flows\ndef sylvester_log_det(\n    U: torch.Tensor,   # (B, d, M)\n    V: torch.Tensor,   # (B, d, M)\n) -> torch.Tensor:    # (B,)\n    \"\"\"\n    Sylvester determinant identity: log|det(I_d + U V^T)| = log|det(I_M + V^T U)|.\n    O(M^3) when M << d.\n    \"\"\"\n    B, d, M = U.shape\n    inner = torch.eye(M, device=U.device).unsqueeze(0) + torch.bmm(V.transpose(1, 2), U)  # (B, M, M)\n    return torch.linalg.slogdet(inner)[1]  # (B,)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Verification: Sampling vs Change of Variables"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A correct implementation must satisfy: ∫ p_X(x) dx = 1. You can verify this numerically by checking that samples from the flow (x = f(z), z ~ p_Z) have log-densities whose exponential sums to 1 over a grid, or that the KL divergence between the empirical distribution of samples and the log-prob evaluations is near zero. A simpler sanity check is the bits-per-dimension (BPD) comparison with a reference model."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def verify_change_of_variables(\n    flow: torch.nn.Module,     # NormalizingFlow with .log_prob and .forward methods\n    prior: torch.distributions.Distribution,\n    n_samples: int = 10000,\n    d: int = 2,\n) -> dict:\n    \"\"\"\n    Sanity checks for a normalising flow:\n    1. Mean log-prob on samples should be roughly log Z ~ prior entropy.\n    2. Generated samples should look like data.\n    3. Encoding data should produce approximately N(0,I) latents.\n    \"\"\"\n    with torch.no_grad():\n        # Generate samples\n        z = prior.sample((n_samples,))    # (N, D)\n        x, log_det = flow(z)              # (N, D), (N,)\n        log_p_x = prior.log_prob(z) - log_det  # log p_X(x) (B,)\n\n        # Encode back to latent\n        x_dummy = x.detach()\n        log_p_x2 = flow.log_prob(x_dummy)  # should match log_p_x\n\n        # Check: mean log-likelihood (should be finite, not nan/inf)\n        mean_ll = log_p_x.mean().item()\n        reconstruction_err = (log_p_x - log_p_x2).abs().max().item()\n\n        # Check: latent code approximately N(0, I)\n        # (after encoding real data, not generated samples)\n        z_mean = z.mean(0)\n        z_std  = z.std(0)\n\n    return {\n        \"mean_log_likelihood\": mean_ll,\n        \"bpd\": -mean_ll / (d * 0.693),   # bits per dim (log2 = log / log(2))\n        \"reconstruction_err\": reconstruction_err,\n        \"latent_mean_max\": z_mean.abs().max().item(),\n        \"latent_std_max\": (z_std - 1).abs().max().item(),\n    }"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [{"type": "bold"}],
+                "text": "Mental model."
+              },
+              {
+                "type": "text",
+                "text": " Think of probability density as paint poured uniformly in the z-space. The transform f deforms the canvas. Where the canvas is stretched (large |det J|), the paint density decreases. Where the canvas is compressed (small |det J|), the density increases. The change-of-variables formula tracks exactly how much each region was stretched or compressed, ensuring that after the deformation the paint still sums to 1 everywhere — conservation of total probability. The log-determinant is the log of the local stretch factor."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The change-of-variables formula transforms density under an invertible f: log p_X(x) = log p_Z(z) − log|det J_f(z)|. The log-det measures how much the transform locally stretches probability mass."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always compute in log-space: ∑ₖ log|det Jₖ| avoids overflow/underflow from multiplying K determinants. Use torch.linalg.slogdet which handles negative determinants correctly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Triangular Jacobians (coupling, autoregressive layers) give O(d) log-det as the sum of log absolute diagonal entries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The matrix determinant lemma det(I + uvᵀ) = 1 + vᵀu enables O(d) log-det for rank-1 update flows (planar); the Sylvester identity extends to rank-M updates in O(M³ + dM)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sanity checks — reconstruction error, mean log-likelihood, bits-per-dimension, and latent code statistics — verify that the change-of-variables computation is consistent across the forward and inverse paths."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
