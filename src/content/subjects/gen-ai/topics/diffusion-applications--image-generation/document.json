@@ -1,0 +1,431 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Text-to-image generation is the flagship application of diffusion models: given a natural language prompt, produce a photorealistic or artistic image matching the description. The core pipeline — encode text, start from random latent noise, iteratively denoise with the U-Net guided by the text embedding, decode to pixels — is simple in principle but contains several practical techniques that make the difference between usable and state-of-the-art quality. The most important is Classifier-Free Guidance (CFG), which dramatically improves prompt adherence by running the denoising network twice per step — once conditional on the text and once unconditional — and amplifying the difference. Getting CFG scale, sampling steps, and negative prompts right is what separates generic outputs from images that closely match the intent of a prompt."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Classifier-Free Guidance (CFG)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without guidance, a diffusion model trained on (image, text) pairs will generate plausible images on average — but average means blurry, diverse, and weakly correlated with any specific prompt. CFG (Ho & Salimans 2022) amplifies the direction from unconditional to conditional noise prediction, sharpening the relationship between prompt and output at the cost of some diversity."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{\\varepsilon}_\\theta(x_t, t, c) = \\varepsilon_\\theta(x_t, t, \\varnothing) + w \\cdot \\left[\\varepsilon_\\theta(x_t, t, c) - \\varepsilon_\\theta(x_t, t, \\varnothing)\\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Here c is the text conditioning, ∅ is the null conditioning (empty string or zeros), and w is the guidance scale. At w=1 there is no amplification (standard conditional prediction). At w=7.5 (the SD v1 default), the conditional direction is amplified 7.5× — strong prompt adherence, typical diversity. At w>20 the images become oversaturated and cartoonish. The unconditional prediction ε(x_t, t, ∅) must be computed every step, which doubles the compute cost."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n\ndef classifier_free_guidance(\n    model,                     # U-Net: forward(x_t, t, context) -> eps\n    x_t: torch.Tensor,        # current noisy latent (B, C, H, W)\n    t:   torch.Tensor,        # timestep (B,)\n    cond_emb:   torch.Tensor, # conditional text embedding (B, L, D)\n    uncond_emb: torch.Tensor, # unconditional text embedding (B, L, D)\n    guidance_scale: float = 7.5,\n) -> torch.Tensor:\n    \"\"\"\n    CFG: run U-Net twice and extrapolate conditional from unconditional.\n    Batching trick: stack cond and uncond into batch dim to halve kernel calls.\n    \"\"\"\n    B = x_t.shape[0]\n\n    # Stack: [uncond_batch, cond_batch] along batch dim\n    x_t_doubled    = torch.cat([x_t,        x_t],        dim=0)    # (2B, C, H, W)\n    t_doubled      = torch.cat([t,          t],          dim=0)    # (2B,)\n    context_doubled = torch.cat([uncond_emb, cond_emb],  dim=0)    # (2B, L, D)\n\n    # Single forward pass gives both predictions\n    eps_doubled = model(x_t_doubled, t_doubled, encoder_hidden_states=context_doubled)\n    eps_uncond, eps_cond = eps_doubled[:B], eps_doubled[B:]\n\n    # CFG formula\n    eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)\n    return eps_guided\n\n\n# CFG rescaling: fix saturation at high guidance scales (Linart et al. 2023)\ndef cfg_rescale(eps_guided: torch.Tensor, eps_cond: torch.Tensor,\n               rescale_factor: float = 0.7) -> torch.Tensor:\n    \"\"\"\n    Rescale guided eps toward cond eps to prevent oversaturation.\n    Mixes guided and conditional predictions: 0=no rescaling, 1=full rescaling.\n    \"\"\"\n    # Match the standard deviation of eps_cond (the 'true' conditional)\n    # to the guided prediction's std — preserves magnitude, not just direction\n    std_cond   = eps_cond.std(dim=[1,2,3], keepdim=True)\n    std_guided = eps_guided.std(dim=[1,2,3], keepdim=True)\n    eps_rescaled = eps_guided * (std_cond / (std_guided + 1e-8))\n    return rescale_factor * eps_rescaled + (1 - rescale_factor) * eps_guided"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Negative Prompts" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In standard CFG, the unconditional prediction uses the empty string. Negative prompts replace the empty string with a specific description of what you want to avoid — blurry, bad anatomy, low quality, etc. The CFG formula then steers away from the negative description rather than just away from the null:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{\\varepsilon} = \\varepsilon_\\theta(x_t, t, c_{\\text{neg}}) + w \\cdot \\left[\\varepsilon_\\theta(x_t, t, c_{\\text{pos}}) - \\varepsilon_\\theta(x_t, t, c_{\\text{neg}})\\right]"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def encode_prompts(\n    tokenizer,\n    text_encoder,\n    positive_prompt: str,\n    negative_prompt: str = \"\",\n    device: str = \"cuda\",\n) -> tuple:\n    \"\"\"\n    Encode positive and negative prompts into CLIP embeddings.\n    Returns (cond_emb, uncond_emb) both (1, 77, 768).\n    \"\"\"\n    def encode(text: str):\n        tokens = tokenizer(\n            text,\n            padding=\"max_length\", max_length=77,\n            truncation=True, return_tensors=\"pt\"\n        ).input_ids.to(device)\n        return text_encoder(tokens).last_hidden_state     # (1, 77, 768)\n\n    cond_emb   = encode(positive_prompt)\n    uncond_emb = encode(negative_prompt)    # empty string = null conditioning\n    return cond_emb, uncond_emb\n\n\n# Common negative prompt for photorealism\nDEFAULT_NEGATIVE = (\n    \"blurry, low quality, low resolution, bad anatomy, disfigured, \"\n    \"watermark, signature, text, jpeg artifacts, oversaturated\"\n)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Prompt Weighting" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "CLIP tokenizes up to 77 tokens and assigns equal weight to each. For long prompts or to emphasize specific concepts, weighted text embeddings can be constructed by scaling the token embeddings:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def weighted_prompt_embedding(\n    tokenizer,\n    text_encoder,\n    weighted_prompts: list,   # list of (text, weight) tuples\n    device: str = \"cuda\",\n) -> torch.Tensor:\n    \"\"\"\n    Create a weighted combination of multiple prompt embeddings.\n    Example: [(\"a red cat\", 1.0), (\"wearing a hat\", 1.5)]\n    The result steers toward all prompts simultaneously, with stronger pull\n    toward higher-weight concepts.\n    \"\"\"\n    import torch\n    embs, weights = [], []\n    for text, w in weighted_prompts:\n        tokens = tokenizer(text, padding=\"max_length\", max_length=77,\n                           truncation=True, return_tensors=\"pt\").input_ids.to(device)\n        emb = text_encoder(tokens).last_hidden_state   # (1, 77, 768)\n        embs.append(emb)\n        weights.append(w)\n\n    # Weighted sum of embeddings\n    w_tensor = torch.tensor(weights, device=device).view(-1, 1, 1)\n    stacked  = torch.cat(embs, dim=0)                  # (N, 77, 768)\n    combined = (stacked * w_tensor).sum(dim=0, keepdim=True) / w_tensor.sum()\n    return combined                                     # (1, 77, 768)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Sampling: DDIM vs DDPM" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For image generation, DDIM with 20–50 steps is the standard: it is deterministic for a given seed, faster than DDPM, and produces comparable quality. DDPM requires 1000 steps for full quality. Beyond DDIM, fast samplers like DPM-Solver++ and UniPC can produce high-quality images in 15–20 steps."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sampler" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Steps for quality" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Stochastic?" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Notes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "DDPM" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1000" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Original DDPM baseline, impractical for production" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "DDIM (η=0)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "20–50" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reproducible from same seed; same model as DDPM" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "DPM-Solver++" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "15–25" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Optional (2M-SDE)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Multistep ODE solver; better FID at low step counts" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "UniPC" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "10–20" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Predictor-corrector; best quality at ≤15 steps" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Euler (Karras)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "20–30" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes (ancestral)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Popular in A1111; slight stochasticity at same step count" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Seed Control and Latent Interpolation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With DDIM (deterministic), the same seed + prompt + model always produces the same image. This enables controlled variation: interpolate between two starting noise tensors to create smooth transitions, or fix the noise and vary the prompt to explore prompt semantics."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\n\ndef sample_latent(seed: int, shape: tuple, device: str = \"cuda\") -> torch.Tensor:\n    \"\"\"Reproducible latent noise from a seed.\"\"\"\n    generator = torch.Generator(device=device).manual_seed(seed)\n    return torch.randn(*shape, generator=generator, device=device)\n\n\ndef slerp(a: torch.Tensor, b: torch.Tensor, t: float) -> torch.Tensor:\n    \"\"\"\n    Spherical linear interpolation between two latent noise vectors.\n    Preferred over linear interpolation for Gaussian noise because it\n    preserves the expected magnitude: ||slerp(a,b,t)||² = 1 for unit vectors.\n    \"\"\"\n    a_norm = a / a.norm()\n    b_norm = b / b.norm()\n    dot    = (a_norm * b_norm).sum().clamp(-1, 1)\n    theta  = dot.arccos()\n    if theta.abs() < 1e-6:\n        return (1 - t) * a + t * b    # nearly parallel: linear fallback\n    return (\n        torch.sin((1 - t) * theta) / torch.sin(theta) * a\n        + torch.sin(t * theta) / torch.sin(theta) * b\n    )\n\n\ndef generate_interpolation_grid(\n    pipeline,\n    seed_a: int,\n    seed_b: int,\n    prompts: list,             # same prompt for all, or list\n    n_steps: int = 7,\n    image_size: tuple = (512, 512),\n) -> list:\n    \"\"\"\n    Generate a row of images interpolating between two seed latents.\n    n_steps=7: endpoints + 5 intermediate images.\n    \"\"\"\n    latent_shape = (1, 4, image_size[0] // 8, image_size[1] // 8)\n    z_a = sample_latent(seed_a, latent_shape)\n    z_b = sample_latent(seed_b, latent_shape)\n\n    images = []\n    for i in range(n_steps):\n        t = i / (n_steps - 1)\n        z = slerp(z_a, z_b, t)\n        prompt = prompts[i] if isinstance(prompts, list) else prompts\n        img = pipeline(prompt=prompt, latents=z, num_inference_steps=30).images[0]\n        images.append(img)\n\n    return images"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Resolution and Aspect Ratio" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Diffusion models are sensitive to resolution: SD v1.5 was trained at 512×512 and degrades at other resolutions (tiling artifacts, multiple heads/faces at 768×768). SDXL was trained at 1024×1024 with multi-aspect training (bucketed to maintain training resolution area). Resolution is injected as a conditioning signal so the model learns resolution-specific behavior."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "SD v1.5:" },
+                  { "type": "text", "text": " Best quality at 512×512. Use upscalers (RealESRGAN, CodeFormer) or img2img at higher resolution." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "SDXL:" },
+                  { "type": "text", "text": " Native 1024×1024. Supports arbitrary aspect ratios via height/width conditioning; use buckets like 832×1216, 1216×832 for portrait/landscape." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Tiled upscaling:" },
+                  { "type": "text", "text": " For very high resolution (4K+), run diffusion on overlapping tiles with blending. Requires careful seam handling to avoid tile boundaries in the output." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Guidance Scale vs Quality Tradeoff" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def sweep_guidance_scales(\n    pipeline,\n    prompt: str,\n    seed: int = 42,\n    scales: list = [1.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0],\n    n_steps: int = 30,\n) -> dict:\n    \"\"\"\n    Generate images at different CFG scales from the same seed.\n    Useful for finding the right guidance scale for a given prompt.\n\n    Typical observations:\n      w=1.0  → ignores prompt, diverse random images\n      w=3-5  → loose adherence, varied outputs, some drift\n      w=7.5  → good adherence, reasonable diversity (SD default)\n      w=10-15 → strong adherence, slightly oversaturated\n      w>20   → very literal, often oversaturated or distorted\n    \"\"\"\n    latent_shape = (1, 4, 64, 64)  # 512×512 / 8\n    latents = sample_latent(seed, latent_shape)\n    results = {}\n\n    for scale in scales:\n        out = pipeline(\n            prompt=prompt,\n            latents=latents.clone(),\n            guidance_scale=scale,\n            num_inference_steps=n_steps,\n        )\n        results[scale] = out.images[0]\n    return results"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Failure Modes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Prompt too long." },
+                  { "type": "text", "text": " CLIP truncates at 77 tokens (~50-60 words). Concepts beyond the 77th token are ignored entirely. Use short, high-signal prompts or split into multiple embeddings." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Conflicting attributes." },
+                  { "type": "text", "text": " 'Red blue ball' confuses the model because CLIP representations of conflicting colors interfere. Use only one color per object." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Wrong resolution." },
+                  { "type": "text", "text": " Using non-training resolution without support causes artifacts. Use only the recommended resolution or size-conditioned models." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "CFG scale too high." },
+                  { "type": "text", "text": " w>15 causes oversaturation (colors become neon-vivid) and distortion. Apply CFG rescaling or reduce guidance scale. The sweet spot for most models is 7–10." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Too few sampling steps." },
+                  { "type": "text", "text": " At <10 steps with DDIM, fine details and faces are under-denoised. Use DPM-Solver++ for quality at low step counts; DDIM benefits from ≥20 steps." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of CFG as a hiker navigating a fog-covered map (the space of possible images) with a compass (the text prompt). Without guidance (w=1), the hiker just walks wherever the terrain naturally goes — generating average-looking images from the training distribution. With guidance, the compass reading (text) is amplified: the hiker moves in a direction that is increasingly aligned with the compass. At w=7.5 the hiker stays on reasonable terrain while following the compass closely. At w=20 the hiker ignores terrain entirely and charges straight at the compass bearing — often walking off a cliff (oversaturation, distortion). The negative prompt changes the compass's zero-point: instead of 'away from nothing,' the hiker walks 'away from blurry, low-quality images.' Sampling steps determine how carefully the hiker navigates: fewer steps means larger strides, sometimes stepping past the good terrain; more steps means finer navigation but slower arrival."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "CFG doubles compute per step but is essential for usable text-to-image quality. The guided prediction is ε_uncond + w*(ε_cond - ε_uncond) where w=7.5 is the SD default." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Negative prompts replace the null conditioning in CFG, steering away from described bad attributes rather than just away from nothing." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "DDIM (20–50 steps, deterministic) is the standard production sampler. DPM-Solver++ achieves similar quality in 15–25 steps." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Slerp (spherical interpolation) is the correct way to interpolate between seed latents — linear interpolation changes the noise magnitude, causing visible midpoint artifacts." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use the model's training resolution. Off-resolution artifacts (repeated faces, tiling) are not fixable without resolution conditioning or aspect-ratio-aware training." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

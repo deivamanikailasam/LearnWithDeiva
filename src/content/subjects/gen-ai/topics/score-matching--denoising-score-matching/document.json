@@ -1,0 +1,395 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Denoising score matching (DSM) is the practical algorithm that made learning score functions tractable at image scale. The key insight from Vincent (2011) is that instead of regressing against the intractable true score ∇_x log p(x), we can corrupt data with known noise x̃ = x + σε and train the network to recover the noise direction (x - x̃)/σ² — the score of the known Gaussian noising kernel. This converts an unknown-target regression problem into a supervised one where the label is simply the noise we added ourselves. DSM with multiple noise levels (NCSN, Song & Ermon 2019) connects directly to diffusion models: the forward process of DDPM is exactly a continuous-time generalization of the discrete σ schedule used in NCSN, and the DDPM ε-prediction objective is exactly DSM with σ² = 1 - ᾱ_t."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The DSM Objective Derivation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Start from the explicit score matching (ESM) objective — the Fisher divergence between model score and true score:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "J_{\\text{ESM}}(\\theta) = \\mathbb{E}_{p(x)}\\!\\left[\\tfrac{1}{2}\\left\\| s_\\theta(x) - \\nabla_x \\log p(x) \\right\\|^2 \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "We cannot minimize this directly because ∇_x log p(x) is unknown. DSM replaces p(x) with the marginal of a noising kernel: define q_σ(x̃) = ∫ q_σ(x̃|x) p(x) dx where q_σ(x̃|x) = N(x̃; x, σ²I). The score of the marginal is approximated by the score of the kernel at each specific x:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\nabla_{\\tilde{x}} \\log q_\\sigma(\\tilde{x} \\mid x) = -\\frac{\\tilde{x} - x}{\\sigma^2}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Vincent (2011) proved that minimizing the joint expectation over (x, x̃) of the squared distance to this kernel score is equivalent to minimizing the Fisher divergence to the marginal q_σ. The DSM objective is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "J_{\\text{DSM}}(\\theta) = \\mathbb{E}_{p(x),\\, q_\\sigma(\\tilde{x}|x)}\\!\\left[\\left\\| s_\\theta(\\tilde{x}) + \\frac{\\tilde{x} - x}{\\sigma^2} \\right\\|^2 \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Substituting x̃ = x + σε with ε ~ N(0, I):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "J_{\\text{DSM}}(\\theta) = \\mathbb{E}_{p(x),\\, \\varepsilon \\sim \\mathcal{N}(0,I)}\\!\\left[\\left\\| s_\\theta(x + \\sigma\\varepsilon) + \\frac{\\varepsilon}{\\sigma} \\right\\|^2 \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In this form, the label -ε/σ is the score of the kernel q(x̃|x): it tells the network to predict -ε/σ given the noisy input. Equivalently, training σ s_θ(x̃) to predict -ε is the same as DDPM's ε-prediction objective. The network never sees ∇_x log p(x) — it only sees the noisy input and the injected noise."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "DSM with a Single Noise Level" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\n\ndef dsm_loss_single_sigma(\n    score_model: nn.Module,\n    x: torch.Tensor,\n    sigma: float,\n) -> torch.Tensor:\n    \"\"\"\n    DSM loss at a fixed noise level σ.\n    score_model: maps (B, *data_shape) -> (B, *data_shape), output = s_θ(x̃)\n    Minimizing this trains s_θ(x̃) ≈ ∇ log q_σ(x̃) = -ε/σ at scale σ.\n    \"\"\"\n    eps    = torch.randn_like(x)\n    x_tild = x + sigma * eps                    # corrupt: x̃ = x + σε\n\n    score  = score_model(x_tild)               # s_θ(x̃)\n    target = -eps / sigma                       # ∇ log q_σ(x̃|x)\n\n    # ||s_θ(x̃) - target||² summed over data dims, averaged over batch\n    diff   = score - target\n    return (diff ** 2).sum(dim=list(range(1, x.ndim))).mean()\n\n\n# Equivalent formulation: predict ε directly (DDPM-style)\ndef dsm_loss_predict_eps(\n    eps_model: nn.Module,   # predicts ε from (x̃, σ)\n    x: torch.Tensor,\n    sigma: float,\n) -> torch.Tensor:\n    eps     = torch.randn_like(x)\n    x_tild  = x + sigma * eps\n    eps_hat = eps_model(x_tild, sigma)         # predict the injected noise\n    return ((eps_hat - eps) ** 2).mean()        # standard MSE loss\n    # Note: identical to DSM because ε_hat = -σ s_θ → ||s_θ + ε/σ||² ∝ ||ε_hat - ε||²"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Multi-Scale DSM: The NCSN Objective" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A score model trained at a single σ gives a good score estimate only near the noise scale σ. It fails in low-density regions between modes (σ too small) and loses fine detail (σ too large). Song & Ermon (2019) proposed training a Noise Conditional Score Network (NCSN) on a geometric sequence of L noise levels σ_1 > σ_2 > ... > σ_L:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "J_{\\text{NCSN}}(\\theta) = \\sum_{i=1}^{L} \\lambda(\\sigma_i)\\, \\mathbb{E}_{p(x), q_{\\sigma_i}(\\tilde{x}|x)}\\!\\left[\\left\\| s_\\theta(\\tilde{x}, \\sigma_i) + \\frac{\\tilde{x} - x}{\\sigma_i^2} \\right\\|^2 \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The weighting λ(σ) = σ² ensures each noise level contributes comparable gradient magnitudes (otherwise large-σ levels dominate because ||∇ log q_σ||² = d/σ² — large σ gives small score magnitudes but is weighed more in the loss). With λ(σ) = σ², the objective becomes:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "J_{\\text{NCSN}}(\\theta) = \\sum_{i=1}^{L} \\mathbb{E}\\!\\left[\\left\\| \\sigma_i s_\\theta(\\tilde{x}, \\sigma_i) + \\varepsilon \\right\\|^2 \\right]"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\n\ndef make_sigma_sequence(sigma_min: float = 0.01,\n                         sigma_max: float = 1.0,\n                         L: int = 10,\n                         device: str = \"cuda\") -> torch.Tensor:\n    \"\"\"Geometric sequence of noise levels σ_1 > ... > σ_L.\"\"\"\n    return torch.exp(\n        torch.linspace(sigma_max.log() if isinstance(sigma_max, torch.Tensor)\n                       else torch.tensor(sigma_max).log(),\n                       torch.tensor(sigma_min).log(), L)\n    ).to(device)\n\n\ndef ncsn_loss(\n    score_model: nn.Module,   # forward(x_noisy, sigma) -> score\n    x: torch.Tensor,\n    sigmas: torch.Tensor,     # (L,) geometric sequence of sigma values\n) -> torch.Tensor:\n    \"\"\"\n    Multi-scale DSM loss (NCSN objective).\n    Samples a random σ_i per batch element, computes σ²-weighted DSM.\n    \"\"\"\n    B = x.shape[0]\n    L = len(sigmas)\n\n    # Randomly pick one noise level per sample\n    idx    = torch.randint(0, L, (B,), device=x.device)\n    sigma  = sigmas[idx]                                  # (B,)\n    s      = sigma.view((-1,) + (1,) * (x.ndim - 1))    # broadcast: (B,1,1,1)\n\n    eps    = torch.randn_like(x)\n    x_tild = x + s * eps\n\n    score  = score_model(x_tild, sigma)    # s_θ(x̃, σ_i)\n\n    # σ²-weighted DSM: ||σ s_θ + ε||²\n    loss_per_sample = (s * score + eps).pow(2).sum(dim=list(range(1, x.ndim)))\n    return loss_per_sample.mean()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "NCSN Architecture" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The NCSN score network takes both the noisy image x̃ and the noise level σ as inputs. The noise level conditions the network's normalization layers — InstanceNorm in NCSNv1, GroupNorm with conditional scale/shift in NCSNv2. A key design requirement: s_θ(x̃, σ) must have the same spatial shape as x̃ (it is a vector field), and its magnitude should scale inversely with σ (higher noise → smaller score magnitudes)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\nimport torch\nimport torch.nn as nn\n\n\nclass ConditionalGroupNorm(nn.Module):\n    \"\"\"GroupNorm with scale/shift conditioned on scalar embedding (σ).\"\"\"\n\n    def __init__(self, num_groups: int, num_channels: int, emb_dim: int):\n        super().__init__()\n        self.norm  = nn.GroupNorm(num_groups, num_channels, affine=False)\n        self.proj  = nn.Linear(emb_dim, num_channels * 2)  # scale + shift\n\n    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:\n        h          = self.norm(x)               # (B, C, H, W)\n        scale, shift = self.proj(emb).chunk(2, dim=-1)     # each (B, C)\n        scale = scale.unsqueeze(-1).unsqueeze(-1)\n        shift = shift.unsqueeze(-1).unsqueeze(-1)\n        return h * (1 + scale) + shift\n\n\nclass NCSNResBlock(nn.Module):\n    \"\"\"Residual block conditioned on σ via ConditionalGroupNorm.\"\"\"\n\n    def __init__(self, in_ch: int, out_ch: int, emb_dim: int, n_groups: int = 8):\n        super().__init__()\n        self.norm1 = ConditionalGroupNorm(n_groups, in_ch, emb_dim)\n        self.conv1 = nn.Sequential(nn.SiLU(), nn.Conv2d(in_ch, out_ch, 3, padding=1))\n        self.norm2 = ConditionalGroupNorm(n_groups, out_ch, emb_dim)\n        self.conv2 = nn.Sequential(nn.SiLU(), nn.Conv2d(out_ch, out_ch, 3, padding=1))\n        self.skip  = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()\n\n    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:\n        h = self.conv1(self.norm1(x, emb))\n        h = self.conv2(self.norm2(h, emb))\n        return h + self.skip(x)\n\n\nclass SimpleNCSN(nn.Module):\n    \"\"\"\n    Simplified NCSN score network.\n    Input:  x_noisy (B, C, H, W)  +  sigma (B,)\n    Output: score s_θ(x̃, σ)  (B, C, H, W)  — same shape as input\n    \"\"\"\n\n    def __init__(self, in_ch: int = 3, base_ch: int = 64, emb_dim: int = 128):\n        super().__init__()\n        # Sigma embedding: log(σ) -> sinusoidal -> MLP\n        self.sigma_emb = nn.Sequential(\n            nn.Linear(emb_dim, emb_dim * 2), nn.SiLU(),\n            nn.Linear(emb_dim * 2, emb_dim),\n        )\n        self.down1  = NCSNResBlock(in_ch,     base_ch,     emb_dim)\n        self.down2  = NCSNResBlock(base_ch,   base_ch * 2, emb_dim)\n        self.mid    = NCSNResBlock(base_ch*2, base_ch * 2, emb_dim)\n        self.up1    = NCSNResBlock(base_ch*4, base_ch,     emb_dim)   # cat skip\n        self.out    = nn.Conv2d(base_ch + in_ch, in_ch, 1)            # final 1x1\n        self.pool   = nn.AvgPool2d(2)\n        self.up     = nn.Upsample(scale_factor=2, mode=\"bilinear\", align_corners=False)\n\n    def _sigma_embedding(self, sigma: torch.Tensor, dim: int) -> torch.Tensor:\n        \"\"\"Sinusoidal embedding of log(σ).\"\"\"\n        log_sigma = sigma.log()                # (B,)\n        half = dim // 2\n        freqs = torch.exp(-math.log(10000) * torch.arange(half, device=sigma.device) / (half - 1))\n        args  = log_sigma[:, None] * freqs[None, :]\n        emb   = torch.cat([args.sin(), args.cos()], dim=-1)\n        return self.sigma_emb(emb)\n\n    def forward(self, x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:\n        emb = self._sigma_embedding(sigma, 128)      # (B, emb_dim)\n\n        h1 = self.down1(x, emb)                     # (B, C,   H,   W)\n        h2 = self.down2(self.pool(h1), emb)          # (B, 2C,  H/2, W/2)\n        h  = self.mid(h2, emb)                       # (B, 2C,  H/2, W/2)\n        h  = self.up1(torch.cat([self.up(h), h1], 1), emb)   # (B, C, H, W)\n        score = self.out(torch.cat([h, x], 1))       # (B, in_ch, H, W)\n\n        # Scale output by 1/σ so the score magnitude is σ-independent at init\n        return score / sigma.view(-1, 1, 1, 1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Annealed Langevin Sampling" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sampling from NCSN uses annealed Langevin dynamics: start from Gaussian noise and run Langevin at σ_1 (largest noise), then anneal to σ_2, ..., σ_L (smallest noise). At each σ_i, the score network provides a useful gradient because the noised distribution smears out the data, filling in low-density regions. As σ decreases, the samples converge from coarse structure to fine detail."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "@torch.no_grad()\ndef ncsn_annealed_langevin(\n    score_model: nn.Module,\n    sigmas: torch.Tensor,        # (L,) descending noise levels\n    shape: tuple,                # (B, C, H, W)\n    n_steps_per_sigma: int = 100,\n    eps: float = 2e-5,           # base step size\n    device: str = \"cuda\",\n) -> torch.Tensor:\n    \"\"\"\n    NCSN sampling via annealed Langevin dynamics.\n    Step size α_i = eps * (σ_i / σ_L)²  (proportional to σ², as in the paper).\n    \"\"\"\n    sigma_last = sigmas[-1]             # smallest noise level\n    x = torch.randn(*shape, device=device)\n\n    for sigma in sigmas:\n        # Step size proportional to σ²\n        alpha = eps * (sigma / sigma_last) ** 2\n        sigma_tensor = torch.full((shape[0],), sigma.item(), device=device)\n\n        for _ in range(n_steps_per_sigma):\n            score = score_model(x, sigma_tensor)           # s_θ(x, σ)\n            noise = torch.randn_like(x)\n            x = x + alpha * score + (2 * alpha).sqrt() * noise\n\n    return x\n\n\n# Predictor-Corrector sampling (NCSNv2 / Song et al. 2021)\n@torch.no_grad()\ndef predictor_corrector_sample(\n    score_model: nn.Module,\n    sigmas: torch.Tensor,\n    shape: tuple,\n    n_corrector_steps: int = 1,\n    snr: float = 0.16,            # signal-to-noise ratio for corrector step size\n    device: str = \"cuda\",\n) -> torch.Tensor:\n    \"\"\"\n    PC sampling: predictor shrinks σ, corrector (Langevin) refines at each level.\n    snr controls the Langevin step size relative to the score magnitude.\n    \"\"\"\n    x = torch.randn(*shape, device=device) * sigmas[0]\n\n    for i, sigma in enumerate(sigmas):\n        sigma_tensor = torch.full((shape[0],), sigma.item(), device=device)\n\n        # --- Corrector (Langevin steps at current σ) ---\n        for _ in range(n_corrector_steps):\n            score = score_model(x, sigma_tensor)\n            score_norm = score.flatten(1).norm(dim=1).mean()\n            noise_norm = (shape[1] * shape[2] * shape[3]) ** 0.5\n            # Adaptive step size (Algorithm 2 from NCSNv2)\n            step = 2 * (snr * noise_norm / (score_norm + 1e-8)) ** 2\n            x = x + step * score + (2 * step).sqrt() * torch.randn_like(x)\n\n        # --- Predictor (transition σ_i -> σ_{i+1}) ---\n        if i < len(sigmas) - 1:\n            sigma_next = sigmas[i + 1]\n            x = x + (sigma_next ** 2 - sigma ** 2).sqrt() * torch.randn_like(x)\n\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Tweedie's Formula" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Tweedie's formula gives a closed-form expression for the posterior mean E[x_0|x̃] in terms of the score:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathbb{E}[x_0 \\mid \\tilde{x}] = \\tilde{x} + \\sigma^2 \\nabla_{\\tilde{x}} \\log q_\\sigma(\\tilde{x})"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This follows directly from Bayes' theorem applied to the Gaussian kernel. Plugging in the DDPM parameterization where σ² = 1 - ᾱ_t and s_θ(x_t, t) = -ε_θ(x_t, t)/√(1-ᾱ_t):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{x}_0 = \\frac{x_t - \\sqrt{1-\\bar{\\alpha}_t}\\,\\varepsilon_\\theta(x_t,t)}{\\sqrt{\\bar{\\alpha}_t}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is exactly the DDPM formula for estimating x_0 from x_t and the predicted noise — Tweedie's formula and DDPM's x_0 estimate are the same equation, confirming that DDPM's reverse process is a Tweedie denoiser applied iteratively."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def tweedie_denoise(\n    score_model: nn.Module,\n    x_noisy: torch.Tensor,\n    sigma: float,\n) -> torch.Tensor:\n    \"\"\"\n    Tweedie denoiser: x̂_0 = x̃ + σ² s_θ(x̃, σ)\n    Single-step denoising (not iterative — just Tweedie formula).\n    Quality increases with lower σ and a better-trained score model.\n    \"\"\"\n    sigma_tensor = torch.full((x_noisy.shape[0],), sigma, device=x_noisy.device)\n    with torch.no_grad():\n        score = score_model(x_noisy, sigma_tensor)   # s_θ(x̃, σ)\n    return x_noisy + sigma ** 2 * score\n\n\n# Verify Tweedie matches DDPM x0 estimate under the DDPM parameterization\ndef verify_tweedie_ddpm(\n    eps_model: nn.Module,\n    x_t: torch.Tensor,\n    t: torch.Tensor,\n    alpha_bars: torch.Tensor,\n):\n    \"\"\"Both formulas should return the same x0 estimate.\"\"\"\n    ab = alpha_bars[t].view(-1, 1, 1, 1)\n    sigma_sq = 1 - ab\n    sigma    = sigma_sq.sqrt()\n\n    # DDPM formula\n    eps_pred = eps_model(x_t, t)\n    x0_ddpm  = (x_t - sigma * eps_pred) / ab.sqrt()\n\n    # Tweedie formula: x0 = x_t + σ² s_θ  where s_θ = -eps_pred/σ\n    score    = -eps_pred / sigma\n    x0_tweedie = x_t + sigma_sq * score     # = x_t - sigma * eps_pred\n    x0_tweedie = x0_tweedie / ab.sqrt()\n\n    # x0_ddpm ≈ x0_tweedie (identical up to floating point)\n    assert torch.allclose(x0_ddpm, x0_tweedie, atol=1e-6)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "DSM vs ISM: Practical Comparison" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Property" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ISM (Implicit)" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "DSM (Denoising)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Requires true p(x)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Training cost per step" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "O(d) autograd calls (trace of Jacobian)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1 forward pass" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Scalable to images" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No (d ≈ 196k for 256×256)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Approximation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Exact (if Hutchinson trace is exact)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Score of noised distribution, not original p(x)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Practical use" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low-dimensional data, tabular models" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Images, audio, video (all SOTA models)" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of DSM as a guided sand-art restoration. You have a pristine painting (x_0) and you smear it with a known amount of sand (σε). Your apprentice (the network) looks at the smeared painting and tries to name the exact amount and direction of each sand grain — that is, predict -ε/σ. This is a well-posed supervised task because you applied the sand yourself and know exactly what was added. After enough training, the apprentice learns to reliably reverse any such smearing at scale σ. To generate new paintings, you start with a pile of pure sand and ask the apprentice to gradually brush away the sand: first coarse strokes at σ large (removing big clumps, revealing composition), then fine strokes at σ small (revealing brush details). Each stroke uses the score (direction to brush) that was learned at that exact sand scale. Tweedie's formula is the mathematical guarantee that 'predict the score' and 'estimate the original painting from the smeared one' are the same operation."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "DSM trains s_θ(x̃) ≈ -(x̃-x)/σ² = -ε/σ by adding known noise σε and regressing against the noise direction. The true score ∇ log p(x) is never needed." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "DSM scales to images with a single forward pass per step; ISM requires O(d) autograd calls and is impractical for d > 1000." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "NCSN uses L noise levels with σ²-weighted DSM, enabling annealed Langevin sampling that navigates from pure noise to sharp images." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Tweedie's formula x̂_0 = x̃ + σ² s_θ(x̃) connects score matching to Bayesian denoising. The DDPM x_0 estimate (x_t - √(1-ᾱ_t) ε_θ) / √ᾱ_t is exactly Tweedie under DDPM noise scaling." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Every modern diffusion model (DDPM, DDIM, EDM, Stable Diffusion) trains its denoising network via DSM at heart — the differences are in noise schedule, network architecture, and sampler, not the core learning objective." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

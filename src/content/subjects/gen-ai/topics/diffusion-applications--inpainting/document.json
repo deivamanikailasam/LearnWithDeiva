@@ -1,0 +1,421 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Inpainting with diffusion models fills masked regions of an image with semantically plausible, context-consistent content. Unlike traditional inpainting (which copies or patches from surrounding pixels), diffusion inpainting generates new content that matches the scene — adding a person to a crowd, removing an object and replacing it with background, or completely reimagining a region under a text prompt. There are two main approaches: the training-free Repaint algorithm that enforces mask consistency at every denoising step by recompositing with the noised original image, and the trained inpainting model (Stable Diffusion Inpainting) that processes the mask and masked image as additional input channels, allowing the model to explicitly condition on context during generation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Inpainting Task" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Given a reference image x ∈ ℝ^{H×W×3} and a binary mask M ∈ {0,1}^{H×W} where M_i = 1 indicates the region to be filled, the goal is to produce an image y such that:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "y_i = x_i for all i where M_i = 0 (unmasked regions are preserved exactly)" }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "y_i is plausible and consistent with the surrounding context for all i where M_i = 1" }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key challenge is the boundary: generated content must blend seamlessly with the unmasked pixels at the mask edge. Standard diffusion models generate the entire image jointly, so they cannot enforce hard pixel constraints. Inpainting methods address this via recomposition (during denoising, force unmasked pixels to match the original) or via conditioning (the model sees the masked image and learns to generate consistent completions)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Repaint: Training-Free Inpainting" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lugmayr et al. (2022) proposed Repaint, which uses a standard unconditional diffusion model and enforces mask consistency during sampling. At each reverse step t, after predicting x̂_{t-1} with the diffusion model, the unmasked region is replaced with the correctly-noised original image:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "x_{t-1} = M \\odot x_{t-1}^{\\text{known}} + (1-M) \\odot x_{t-1}^{\\text{generated}}"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "x_{t-1}^{\\text{known}} = \\sqrt{\\bar{\\alpha}_{t-1}}\\, x_0 + \\sqrt{1 - \\bar{\\alpha}_{t-1}}\\, \\varepsilon"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To improve boundary coherence, Repaint also periodically repeats the denoising several times at each noise level (resampling), allowing the generated region to better harmonize with the known region. Without resampling, mask edges can appear as seams because the generated and known regions were processed with independent noise."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\n\n@torch.no_grad()\ndef repaint_inpainting(\n    model,                         # DDPM U-Net\n    forward_process,               # DiffusionForwardProcess\n    x0: torch.Tensor,              # (B, C, H, W) original image in [-1,1]\n    mask: torch.Tensor,            # (B, 1, H, W) binary: 1=inpaint, 0=keep\n    n_resamplings: int = 10,       # resampling rounds at each noise level\n    device: str = \"cuda\",\n) -> torch.Tensor:\n    \"\"\"\n    Repaint inpainting: recompose known/generated at each reverse step.\n    n_resamplings: higher = better boundary, slower inference.\n    \"\"\"\n    T = len(forward_process.betas)\n    x  = torch.randn_like(x0, device=device)\n\n    for t in reversed(range(T)):\n        t_tensor = torch.full((x.shape[0],), t, device=device, dtype=torch.long)\n\n        for _ in range(n_resamplings):\n            # --- Generated region: one standard DDPM reverse step ---\n            eps_pred = model(x, t_tensor)\n            # Compute posterior mean for generated region\n            coef_eps = forward_process.betas[t] / forward_process.sqrt_one_minus_alpha_bar[t]\n            mean_gen = (1 / forward_process.alphas[t].sqrt()) * (\n                x - coef_eps.view(-1,1,1,1) * eps_pred\n            )\n            if t > 0:\n                std  = forward_process.posterior_variance[t].sqrt()\n                x_gen = mean_gen + std * torch.randn_like(x)\n            else:\n                x_gen = mean_gen\n\n            # --- Known region: noise the original to level t-1 ---\n            if t > 0:\n                x_known = forward_process.q_sample(\n                    x0, t_tensor - 1,\n                    noise=torch.randn_like(x0)\n                )[0]\n            else:\n                x_known = x0\n\n            # --- Recompose ---\n            x = mask * x_gen + (1 - mask) * x_known\n\n            # Re-noise for next resampling round (go back up to t)\n            if _ < n_resamplings - 1 and t > 0:\n                x = forward_process.q_sample(x, t_tensor)[0]\n\n    return x.clamp(-1, 1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Stable Diffusion Inpainting: Trained Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Rather than applying the recomposition trick to a standard model, Stable Diffusion Inpainting (Rombach et al.) trains a specialized U-Net that receives additional input channels for the masked image and the mask itself. The model can explicitly condition on the context around the mask and generate text-guided completions. The U-Net input is modified from 4 to 9 channels:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Channels" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Source" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Purpose" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "4" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Noisy latent z_t" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Normal diffusion input (whole image, noised)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Downsampled mask" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Tells model where to fill (1) vs preserve (0)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "4" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Masked image latent E(x * (1-M))" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Shows existing context (masked region is zeroed)" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n\ndef prepare_inpainting_inputs(\n    image: torch.Tensor,     # (B, 3, H, W) in [-1, 1]\n    mask: torch.Tensor,      # (B, 1, H, W) binary: 1=inpaint region\n    vae_encoder,\n    scaling_factor: float = 0.18215,\n    latent_channels: int = 4,\n    device: str = \"cuda\",\n) -> tuple:\n    \"\"\"\n    Prepare 9-channel U-Net inputs for SD inpainting.\n    Returns (masked_image_latent, mask_downsampled) for concatenation with noisy latent.\n    \"\"\"\n    # Zero out the masked region in the image\n    masked_image = image * (1 - mask)    # unmasked pixels keep values, masked → 0\n\n    # Encode masked image to latent space\n    with torch.no_grad():\n        z_masked, _, _ = vae_encoder.encode(masked_image.to(device))\n    z_masked = z_masked * scaling_factor  # (B, 4, H/8, W/8)\n\n    # Downsample mask to latent resolution\n    H_lat, W_lat = z_masked.shape[2], z_masked.shape[3]\n    mask_lat = F.interpolate(\n        mask.float().to(device),\n        size=(H_lat, W_lat),\n        mode=\"nearest\",\n    )  # (B, 1, H/8, W/8)\n\n    return z_masked, mask_lat\n\n\n@torch.no_grad()\ndef sd_inpainting_step(\n    unet,\n    z_t: torch.Tensor,          # (B, 4, H/8, W/8) current noisy latent\n    z_masked: torch.Tensor,      # (B, 4, H/8, W/8) masked image latent\n    mask_lat: torch.Tensor,      # (B, 1, H/8, W/8) downsampled mask\n    t: torch.Tensor,             # (B,) timestep\n    context: torch.Tensor,       # (B, L, D) text conditioning\n) -> torch.Tensor:\n    \"\"\"\n    Single denoising step with 9-channel inpainting U-Net.\n    The U-Net receives [z_t, mask_lat, z_masked] concatenated along channel dim.\n    \"\"\"\n    # Concatenate along channel dim: 4 + 1 + 4 = 9 channels\n    unet_input = torch.cat([z_t, mask_lat, z_masked], dim=1)   # (B, 9, H/8, W/8)\n    return unet(unet_input, t, encoder_hidden_states=context)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mask Preprocessing" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The quality of inpainting depends heavily on the mask. Hard binary masks create sharp discontinuities at boundaries; soft feathered masks help the model blend at edges. Dilating the mask slightly erases context near the boundary, preventing the model from 'peeking' at nearby pixels and generating inconsistently."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n\ndef preprocess_mask(\n    mask: torch.Tensor,          # (B, 1, H, W) binary: 1=inpaint\n    dilation_px: int = 8,        # expand mask by this many pixels\n    feather_sigma: float = 4.0,  # Gaussian blur kernel sigma for soft edges\n) -> torch.Tensor:\n    \"\"\"\n    Dilate and feather an inpainting mask.\n    Returns mask in [0, 1] with soft edges at the boundary.\n    \"\"\"\n    # Dilation: max-pool to expand mask region\n    kernel_size = 2 * dilation_px + 1\n    dilated = F.max_pool2d(\n        mask.float(),\n        kernel_size=kernel_size,\n        stride=1,\n        padding=dilation_px,\n    )\n\n    # Feathering: Gaussian blur of the dilated mask\n    if feather_sigma > 0:\n        k = int(4 * feather_sigma + 1)\n        if k % 2 == 0:\n            k += 1\n        # Simple box blur approximation (3 passes)\n        pad = k // 2\n        kernel = torch.ones(1, 1, k, 1, device=mask.device) / k\n        feathered = F.conv2d(dilated, kernel, padding=(pad, 0), groups=1)\n        feathered = F.conv2d(feathered, kernel.transpose(2, 3), padding=(0, pad), groups=1)\n    else:\n        feathered = dilated\n\n    return feathered.clamp(0, 1)\n\n\ndef create_bounding_box_mask(\n    image_shape: tuple,\n    x1: int, y1: int, x2: int, y2: int,\n    device: str = \"cpu\",\n) -> torch.Tensor:\n    \"\"\"Create a rectangular mask for a bounding box region.\"\"\"\n    _, _, H, W = image_shape\n    mask = torch.zeros(1, 1, H, W, device=device)\n    mask[:, :, y1:y2, x1:x2] = 1.0\n    return mask"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Outpainting (Extension Beyond Image Borders)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Outpainting extends an image beyond its borders by treating the new empty region as the mask. The original image is padded with zeros (or reflected content) and a mask covering the padding area is passed to the inpainting model. The model generates content consistent with the visible image edges and the text prompt. This requires the model to see enough context: for very wide outpainting (>50% new area), quality degrades because the new region is barely constrained by context."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def prepare_outpainting(\n    image: torch.Tensor,     # (B, 3, H, W) in [-1, 1]\n    extend_right: int = 256, # pixels to extend (must be multiple of 8)\n    extend_bottom: int = 0,\n    fill_value: float = -1.0,  # fill new region with this value (neutral gray = 0)\n) -> tuple:\n    \"\"\"\n    Pad image and create outpainting mask for the new region.\n    Returns (padded_image, mask) where mask=1 in the new area.\n    \"\"\"\n    B, C, H, W = image.shape\n    new_W = W + extend_right\n    new_H = H + extend_bottom\n\n    # Pad image\n    padded = torch.full((B, C, new_H, new_W), fill_value, device=image.device)\n    padded[:, :, :H, :W] = image\n\n    # Create mask: 1 in the new (extended) region\n    mask = torch.zeros(B, 1, new_H, new_W, device=image.device)\n    if extend_right > 0:\n        mask[:, :, :H, W:] = 1.0\n    if extend_bottom > 0:\n        mask[:, :, H:, :] = 1.0\n\n    return padded, mask"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Repaint vs Trained Inpainting" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Property" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Repaint" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "SD Inpainting" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Requires training" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes (inpainting-specific model)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Text conditioning" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No (uses unconditional model)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes (prompt guides fill)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Inference speed" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Slow (resampling × T steps)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fast (standard DDIM)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Boundary quality" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Can be seamy without enough resampling" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Smoother (model sees context)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Pixel-exact preservation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes (recomposition enforces it)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Not guaranteed (VAE encode/decode cycle)" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Failure Modes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Seam at mask boundary." },
+                  { "type": "text", "text": " Color/texture discontinuity at the edge. Fix: feather the mask with 8–16px Gaussian blur so the model has a gradual transition region to work with." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Context ignored." },
+                  { "type": "text", "text": " Generated content doesn't match surrounding lighting, perspective, or color palette. Fix: increase mask dilation so the model sees less of the hard boundary; use negative prompt to exclude wrong styles." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "VAE reconstruction blur." },
+                  { "type": "text", "text": " SD inpainting encodes the whole image through the VAE, so unmasked regions are slightly altered by the VAE encode/decode cycle. For applications requiring pixel-perfect preservation, post-process by replacing unmasked pixels with the originals using a feathered composite." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Mask too small." },
+                  { "type": "text", "text": " Very small masked regions (<32px) may not be well handled. The latent at f=8 would cover fewer than 4×4 pixels in latent space. Pad small masks to at least 64×64 pixels." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of diffusion inpainting as a professional retoucher with a selective eraser. In Repaint, the retoucher works on a full canvas but is forced at every brush stroke to match the original in all unmasked areas — they erase their work in the unmasked region and paste back the original at the right noise level. This is labor-intensive (resampling) but requires no special training. In trained inpainting (SD Inpainting), the retoucher is given a photograph where the mask region is blacked out, and they fill it in — now they can see exactly what needs to be filled, plan their strokes based on the context around the hole, and follow a text prompt to add something specific. The trained model has seen millions of such fill-in-the-blank examples and learns both what the context implies and what the text prompt demands. The mask preprocessing (dilation, feathering) is like telling the retoucher 'also redo the pixels immediately around the hole so the new content blends in softly.'"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Repaint enforces mask consistency at every step by replacing unmasked regions with correctly-noised original pixels: x = M⊙x_gen + (1-M)⊙x_known. Resampling improves boundary quality." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "SD Inpainting trains a 9-channel U-Net (4 noisy latent + 1 mask + 4 masked image latent) so the model can explicitly condition on context and prompt." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Mask preprocessing matters: dilate by 8–16px so the model doesn't see hard edges; feather with Gaussian blur for smooth transitions; ensure mask region is at least 64×64 pixels." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "SD Inpainting's VAE encode/decode cycle alters unmasked regions slightly. For pixel-perfect preservation, composite the SD output with the original image using the feathered mask." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Outpainting is inpainting with a padding mask: extend the canvas and mask the new empty region, then run the inpainting pipeline with a prompt describing what should appear in the extension." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,612 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A Conditional VAE (CVAE) extends the standard VAE by conditioning both the encoder and decoder on an observed variable y — typically a class label, an attribute vector, or another data modality. Where a plain VAE asks \"what compact code describes x?\", the CVAE asks \"given that we know y, what compact code describes the remaining variation in x?\" This simple change unlocks class-conditional generation, attribute control, image-to-image translation, and semi-supervised learning, all within the same principled variational framework."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Conditional Generative Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In a standard VAE the joint model is p_θ(x, z) = p_θ(x|z) p(z). The CVAE extends this to a conditional joint model over (x, z) given y:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p_\\theta(x, z \\mid y) = p_\\theta(x \\mid z, y)\\, p(z \\mid y)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The prior p(z|y) is usually a learned Gaussian N(μ_y, σ²_y I) — one cluster per class — instead of the flat N(0,I). The approximate posterior becomes q_φ(z|x, y), and the ELBO conditions on y throughout:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{CVAE}}(\\theta, \\phi; x, y) = \\mathbb{E}_{q_\\phi(z|x,y)}[\\log p_\\theta(x \\mid z, y)] - \\mathrm{KL}(q_\\phi(z|x,y) \\| p(z|y))"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Architecture" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The CVAE has three components where the standard VAE has two:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Conditional encoder q_φ(z|x, y):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Takes both x and y as input. The simplest approach concatenates a label embedding to the flattened input or to the first hidden layer."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Conditional decoder p_θ(x|z, y):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Takes both z and y. The conditioning allows the decoder to reconstruct attribute-specific detail that would otherwise need to be encoded in z."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Conditional prior p(z|y):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " A learned network maps y → (μ_y, log σ²_y), giving each class its own Gaussian prior. The KL term now measures divergence from this class prior rather than N(0,I)."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Implementation" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\nclass ConditionalEncoder(nn.Module):\n    \"\"\"q_φ(z | x, y): encode x conditioned on label y.\"\"\"\n\n    def __init__(self, x_dim: int, num_classes: int,\n                 hidden_dim: int, z_dim: int, embed_dim: int = 16):\n        super().__init__()\n        self.embed = nn.Embedding(num_classes, embed_dim)\n        self.net = nn.Sequential(\n            nn.Linear(x_dim + embed_dim, hidden_dim),\n            nn.ReLU(),\n            nn.Linear(hidden_dim, hidden_dim),\n            nn.ReLU(),\n        )\n        self.mu_head      = nn.Linear(hidden_dim, z_dim)\n        self.log_var_head = nn.Linear(hidden_dim, z_dim)\n\n    def forward(self, x: torch.Tensor, y: torch.Tensor):\n        e = self.embed(y)                          # (B, embed_dim)\n        h = self.net(torch.cat([x, e], dim=-1))   # (B, hidden_dim)\n        return self.mu_head(h), self.log_var_head(h).clamp(-10, 2)\n\n\nclass ConditionalDecoder(nn.Module):\n    \"\"\"p_θ(x | z, y): decode z conditioned on label y.\"\"\"\n\n    def __init__(self, z_dim: int, num_classes: int,\n                 hidden_dim: int, x_dim: int, embed_dim: int = 16):\n        super().__init__()\n        self.embed = nn.Embedding(num_classes, embed_dim)\n        self.net = nn.Sequential(\n            nn.Linear(z_dim + embed_dim, hidden_dim),\n            nn.ReLU(),\n            nn.Linear(hidden_dim, hidden_dim),\n            nn.ReLU(),\n            nn.Linear(hidden_dim, x_dim),\n        )\n\n    def forward(self, z: torch.Tensor, y: torch.Tensor) -> torch.Tensor:\n        e = self.embed(y)\n        return self.net(torch.cat([z, e], dim=-1))   # raw logits\n\n\nclass ConditionalPrior(nn.Module):\n    \"\"\"p(z | y): learned Gaussian prior per class.\"\"\"\n\n    def __init__(self, num_classes: int, z_dim: int):\n        super().__init__()\n        self.mu_embed      = nn.Embedding(num_classes, z_dim)\n        self.log_var_embed = nn.Embedding(num_classes, z_dim)\n\n    def forward(self, y: torch.Tensor):\n        \"\"\"Returns (mu_prior, log_var_prior) for each label in y.\"\"\"\n        return self.mu_embed(y), self.log_var_embed(y).clamp(-6, 2)\n\n\nclass CVAE(nn.Module):\n    def __init__(self, encoder, decoder, prior, z_dim: int):\n        super().__init__()\n        self.encoder = encoder\n        self.decoder = decoder\n        self.prior   = prior\n        self.z_dim   = z_dim\n\n    def forward(self, x: torch.Tensor, y: torch.Tensor):\n        # 1. Encode\n        mu_q, log_var_q = self.encoder(x, y)\n\n        # 2. Reparameterise\n        std = (0.5 * log_var_q).exp()\n        z   = mu_q + std * torch.randn_like(std)\n\n        # 3. Decode\n        x_hat = self.decoder(z, y)\n\n        # 4. Class prior\n        mu_p, log_var_p = self.prior(y)\n\n        return x_hat, mu_q, log_var_q, mu_p, log_var_p\n\n    @torch.no_grad()\n    def generate(self, label: int, n: int, device: torch.device) -> torch.Tensor:\n        self.eval()\n        y = torch.full((n,), label, dtype=torch.long, device=device)\n        mu_p, log_var_p = self.prior(y)\n        z = mu_p + (0.5 * log_var_p).exp() * torch.randn_like(mu_p)\n        return torch.sigmoid(self.decoder(z, y))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "CVAE Loss Function" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The KL term now measures the divergence from the class prior rather than N(0,I). For two Gaussians the KL has a closed form:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathrm{KL}(q \\| p) = \\frac{1}{2} \\sum_j \\left[ \\frac{\\sigma^2_{q,j}}{\\sigma^2_{p,j}} + \\frac{(\\mu_{q,j} - \\mu_{p,j})^2}{\\sigma^2_{p,j}} - 1 + \\log\\frac{\\sigma^2_{p,j}}{\\sigma^2_{q,j}} \\right]"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def kl_gaussian_gaussian(\n    mu_q: torch.Tensor, log_var_q: torch.Tensor,\n    mu_p: torch.Tensor, log_var_p: torch.Tensor,\n) -> torch.Tensor:\n    \"\"\"\n    KL(N(mu_q, sigma_q^2) || N(mu_p, sigma_p^2)), per dimension, summed over z.\n    Returns shape (B,).\n    \"\"\"\n    var_q = log_var_q.exp()\n    var_p = log_var_p.exp()\n    kl = 0.5 * (\n        var_q / var_p\n        + (mu_q - mu_p).pow(2) / var_p\n        - 1\n        + log_var_p - log_var_q\n    )\n    return kl.sum(dim=-1)   # (B,)\n\n\ndef cvae_loss(\n    x: torch.Tensor,\n    x_hat_logits: torch.Tensor,\n    mu_q: torch.Tensor, log_var_q: torch.Tensor,\n    mu_p: torch.Tensor, log_var_p: torch.Tensor,\n    beta: float = 1.0,\n) -> torch.Tensor:\n    recon = F.binary_cross_entropy_with_logits(\n        x_hat_logits, x, reduction='sum'\n    ) / x.size(0)\n    kl = kl_gaussian_gaussian(mu_q, log_var_q, mu_p, log_var_p).mean()\n    return recon + beta * kl"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Training Loop" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom torch.optim import Adam\n\ndef train_cvae(cvae, train_loader, num_epochs: int = 50,\n               lr: float = 1e-3, beta: float = 1.0,\n               device: torch.device = torch.device('cuda')):\n    cvae.to(device)\n    optimizer = Adam(cvae.parameters(), lr=lr)\n\n    for epoch in range(num_epochs):\n        cvae.train()\n        total_loss = 0.0\n\n        for x, y in train_loader:\n            x, y = x.to(device).flatten(1), y.to(device)\n            x_hat, mu_q, lv_q, mu_p, lv_p = cvae(x, y)\n            loss = cvae_loss(x, x_hat, mu_q, lv_q, mu_p, lv_p, beta=beta)\n\n            optimizer.zero_grad()\n            loss.backward()\n            optimizer.step()\n            total_loss += loss.item()\n\n        print(f\"Epoch {epoch+1}/{num_epochs}  \"\n              f\"loss={total_loss / len(train_loader):.3f}\")\n\n\n# Usage: MNIST, 10 classes, 32-d latent space\nencoder = ConditionalEncoder(x_dim=784, num_classes=10, hidden_dim=512, z_dim=32)\ndecoder = ConditionalDecoder(z_dim=32, num_classes=10, hidden_dim=512, x_dim=784)\nprior   = ConditionalPrior(num_classes=10, z_dim=32)\ncvae    = CVAE(encoder, decoder, prior, z_dim=32)\ntrain_cvae(cvae, mnist_loader, device=torch.device('cuda'))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Conditioning Strategies" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "There are multiple ways to inject y into the encoder and decoder. Choice depends on architecture and modality:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Strategy" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "How" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best for" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Concatenation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Append embed(y) to x or first hidden layer" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "MLP encoders, tabular data" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Adaptive LayerNorm (AdaLN)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "y controls scale/shift in LayerNorm" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Transformer encoders, text" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Conditional batch norm (CBN)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "y controls γ/β in BatchNorm" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "CNN decoders, images" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Cross-attention" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "y (as sequence) attends to hidden states" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Text-conditioned image generation" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "CVAE vs VAE: What y Changes" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conditioning on y has a precise effect on what the latent code z must represent. In a standard VAE on handwritten digits, z encodes both digit identity (which digit) and style (pen pressure, slant). If y is the digit label, the CVAE's z no longer needs to encode identity — that information is provided by y directly. The z vector now captures only residual variation: stroke style, noise, and anything not explained by the label. This produces a much cleaner latent space where z dimensions correspond to style rather than content."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Applications" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Controlled image generation:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Generate images of a specified class or with specified attributes by conditioning generation on y."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Image-to-image translation:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Use y = source image (e.g. a sketch) and x = target image (e.g. a photo). The CVAE learns the stochastic mapping from sketch to realistic photo."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Semi-supervised learning:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " For labelled examples use the full CVAE ELBO; for unlabelled ones, marginalise over all possible y values. The model learns to classify and generate jointly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Drug discovery:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Condition on a target protein structure (y) to generate drug candidates (x) likely to bind it."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Trajectory prediction:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Condition on past frames (y) to generate diverse possible future trajectories (x) — the stochasticity in z models the inherent uncertainty of future motion."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Using N(0,I) as the prior."
+                  },
+                  {
+                    "type": "text",
+                    "text": " A flat prior ignores y in the KL term, forcing the encoder to absorb label information into z. This defeats the purpose of conditioning and makes generation require guessing the right z for a given y."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Not conditioning the decoder on y."
+                  },
+                  {
+                    "type": "text",
+                    "text": " If only the encoder sees y, the latent code z must still encode class information to allow reconstruction — the model degrades to a standard VAE with a more complex encoder."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Using one-hot labels without an embedding."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Concatenating a raw one-hot vector works but is less parameter-efficient than a small nn.Embedding, especially for many classes. The embedding also allows the model to learn relationships between classes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Forgetting to use the class prior at generation time."
+                  },
+                  {
+                    "type": "text",
+                    "text": " If you generate by sampling z ~ N(0,I) and then conditioning the decoder on y, you are not sampling from p(z|y) — the resulting samples will have incorrect characteristics for that class. Always sample z ~ p(z|y) = N(μ_y, σ²_y) at generation time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Condition both encoder and decoder on y, and use a learned class prior — this is the full CVAE that achieves clean latent factorisation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Keep the conditional embedding dimension small (8–32) relative to the hidden dimension to avoid the label dominating the encoder input."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Verify that z no longer encodes class information by training a linear classifier on z — if it predicts the class above chance, the conditioning is incomplete."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For semi-supervised use, anneal the KL weight (β) from 0 during warm-up to avoid the model collapsing the posterior before the reconstruction loss is meaningful."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Imagine a novelist writing mystery stories. In a vanilla VAE, the novelist must encode everything in a short outline: the genre, the protagonist, the setting, and the resolution. The z vector is overloaded — it must carry all the information needed to reconstruct the story. In a CVAE conditioned on genre, the novelist is told upfront that this is a mystery. The outline z only needs to capture the specific story — protagonist choices, plot twists — because genre information is given for free. The decoder (the full writing process) then uses both the outline and the genre label to produce the final text. Generation works by picking a genre label and then drawing a random outline from the genre-specific distribution of outlines, then writing the story from those two inputs."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The CVAE conditions encoder, decoder, and prior on y, allowing the latent code z to capture only residual variation not explained by y."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The ELBO becomes conditional: reconstruction term uses the conditional decoder, KL term uses the class prior p(z|y) instead of N(0,I)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "At generation time: sample z ~ p(z|y) = N(μ_y, σ²_y) and decode with both z and y — not from N(0,I)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The CVAE framework generalises to any type of condition y: class labels, attribute vectors, other images, text, or structured context."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate that z is class-agnostic after training; if a linear probe on z predicts the class label, conditioning is not fully working."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

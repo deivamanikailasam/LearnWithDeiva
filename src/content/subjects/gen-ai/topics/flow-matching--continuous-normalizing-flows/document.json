@@ -1,0 +1,368 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Continuous Normalising Flows (CNFs) extend normalising flows from discrete invertible layers to continuous-time transformations defined by neural ODEs. Instead of stacking hand-crafted bijective functions, a CNF learns an unconstrained vector field v_θ(x, t) and integrates it with a black-box ODE solver. This removes architectural constraints on the flow, enables exact likelihood computation via the instantaneous change-of-variables formula, and is the foundation on which flow matching is built."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "From Discrete Flows to Neural ODEs"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A discrete normalising flow transforms a noise sample z₀ through K bijections: x = fₖ ∘ … ∘ f₁(z₀). The log-likelihood decomposes as:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log p_x(x) = \\log p_z(z_0) - \\sum_{k=1}^{K} \\log \\left|\\det \\frac{\\partial f_k}{\\partial z_{k-1}}\\right|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each layer must have a tractable Jacobian determinant — achieved with coupling layers (Real-NVP), autoregressive transforms (IAF, MAF), or volume-preserving flows. A CNF replaces this stack with a single ODE:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\frac{dz(t)}{dt} = v_\\theta(z(t), t), \\quad z(0) \\sim p_z"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The final state z(T) = z(0) + ∫₀ᵀ v_θ dt is the generated sample. Because the ODE has no architectural constraints, v_θ can be any neural network — fully connected, convolutional, or attention-based."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom torchdiffeq import odeint_adjoint as odeint\n\n\nclass VelocityField(nn.Module):\n    \"\"\"Unconstrained velocity field v_theta(z, t).\"\"\"\n    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 3):\n        super().__init__()\n        layers = [nn.Linear(dim + 1, hidden), nn.Tanh()]\n        for _ in range(n_layers - 1):\n            layers += [nn.Linear(hidden, hidden), nn.Tanh()]\n        layers.append(nn.Linear(hidden, dim))\n        self.net = nn.Sequential(*layers)\n\n    def forward(self, t: torch.Tensor, z: torch.Tensor) -> torch.Tensor:\n        # t is a scalar; broadcast to (B, 1)\n        t_vec = t.expand(z.size(0), 1)\n        return self.net(torch.cat([z, t_vec], dim=-1))\n\n\nclass CNF(nn.Module):\n    def __init__(self, dim: int):\n        super().__init__()\n        self.vf = VelocityField(dim)\n\n    def forward(\n        self,\n        z0: torch.Tensor,   # (B, D) noise\n        t_span: torch.Tensor = None,  # integration range\n    ) -> torch.Tensor:\n        if t_span is None:\n            t_span = torch.tensor([0.0, 1.0])\n        # odeint_adjoint uses adjoint method for memory-efficient backprop\n        traj = odeint(self.vf, z0, t_span, method=\"dopri5\", rtol=1e-5, atol=1e-5)\n        return traj[-1]   # z(T)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Instantaneous Change of Variables"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The continuous analogue of the discrete log-det formula is the instantaneous change of variables (Chen et al., 2018). The log-density evolves according to:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\frac{d}{dt}\\log p(z(t)) = -\\operatorname{tr}\\!\\left(\\frac{\\partial v_\\theta(z(t),t)}{\\partial z(t)}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To compute the log-likelihood of a data point x, augment the ODE state with a scalar Δlog p, integrate forward from (x, 0) to (z_T, Δlog p_T), then combine with log p_z(z_T):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log p_x(x) = \\log p_z(z_T) + \\int_0^T \\operatorname{tr}\\!\\left(\\frac{\\partial v_\\theta}{\\partial z}\\right) dt"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The trace of the Jacobian ∂v/∂z is O(d²) to compute exactly (d = dimension of z). FFJORD (Grathwohl et al., 2018) makes this tractable with the Hutchinson stochastic trace estimator: tr(A) ≈ εᵀAε for ε ~ N(0,I), computed via a single vector-Jacobian product (vjp) which costs the same as one backward pass."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class FFJORDAugmented(nn.Module):\n    \"\"\"\n    FFJORD-style CNF: augment the ODE state with the log-density change.\n    State = (z, delta_logp) — shape (B, D+1).\n    \"\"\"\n    def __init__(self, vf: nn.Module):\n        super().__init__()\n        self.vf = vf\n\n    def forward(self, t: torch.Tensor, state: torch.Tensor) -> torch.Tensor:\n        z, _ = state[:, :-1], state[:, -1:]   # split state\n        with torch.enable_grad():\n            z = z.requires_grad_(True)\n            dz_dt = self.vf(t, z)              # (B, D)\n\n            # Hutchinson trace estimator\n            eps = torch.randn_like(z)\n            # vjp: eps^T * (dv/dz) = grad of (dz_dt * eps).sum() w.r.t. z\n            trace_est = torch.autograd.grad(\n                (dz_dt * eps).sum(), z, create_graph=True\n            )[0]                                   # (B, D)\n            trace_est = (trace_est * eps).sum(-1, keepdim=True)  # (B, 1)\n\n        d_logp_dt = -trace_est   # d(log p)/dt = -tr(dv/dz)\n        return torch.cat([dz_dt, d_logp_dt], dim=-1)\n\n\ndef cnf_log_likelihood(\n    augmented_ode: FFJORDAugmented,\n    x: torch.Tensor,   # (B, D) data points\n    t_span: torch.Tensor = None,\n) -> torch.Tensor:     # (B,) log p(x)\n    \"\"\"Compute exact log-likelihood via FFJORD augmented ODE.\"\"\"\n    if t_span is None:\n        t_span = torch.tensor([0.0, 1.0])\n    delta0 = torch.zeros(x.size(0), 1, device=x.device)\n    state0 = torch.cat([x, delta0], dim=-1)   # (B, D+1)\n\n    traj = odeint(augmented_ode, state0, t_span, method=\"dopri5\")\n    state_T = traj[-1]                         # (B, D+1) at t=T\n    z_T     = state_T[:, :-1]                  # (B, D)\n    delta_logp = state_T[:, -1]               # (B,)\n\n    # Prior log-prob under N(0, I)\n    D = z_T.size(-1)\n    log_prior = -0.5 * (z_T.pow(2).sum(-1) + D * torch.log(torch.tensor(2 * 3.14159265)))\n    return log_prior + delta_logp"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Adjoint Method for Training"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Backpropagating through an ODE solver stores all intermediate states (O(T·d) memory for T steps). The adjoint sensitivity method (Pontryagin) avoids this by solving a second ODE backward in time for the adjoint state a(t) = ∂L/∂z(t):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\frac{da(t)}{dt} = -a(t)^\\top \\frac{\\partial v_\\theta(z(t),t)}{\\partial z(t)}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Parameter gradients are then ∂L/∂θ = −∫ a(t)ᵀ (∂v_θ/∂θ) dt. The backward ODE only stores the current adjoint state — O(d) memory — at the cost of re-evaluating v_θ during the backward pass. `torchdiffeq`'s `odeint_adjoint` implements this automatically."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def train_cnf_step(\n    model: CNF,\n    x_batch: torch.Tensor,   # (B, D) data\n    optimizer: torch.optim.Optimizer,\n) -> float:\n    \"\"\"\n    Maximum likelihood training of a CNF via the adjoint method.\n    \"\"\"\n    # Build augmented ODE for log-likelihood\n    aug_ode = FFJORDAugmented(model.vf)\n    t_span  = torch.tensor([0.0, 1.0], device=x_batch.device)\n\n    log_p = cnf_log_likelihood(aug_ode, x_batch, t_span)  # (B,)\n    loss  = -log_p.mean()\n\n    optimizer.zero_grad()\n    loss.backward()  # adjoint used automatically by odeint_adjoint\n    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n    optimizer.step()\n    return loss.item()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "CNFs vs Discrete Normalising Flows"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Property"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Discrete NF (Real-NVP, Glow)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CNF (FFJORD, Flow Matching)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Architecture constraint"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Bijective layers with tractable det(J)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Any neural network (no constraint)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Jacobian cost"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "O(d) with coupling layers"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "O(d) with Hutchinson (stochastic)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Memory for training"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "O(K·d) for K layers"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "O(d) with adjoint method"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training speed"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fast (fixed K forward passes)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Slow (adaptive ODE solver)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sampling speed"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fast (K forward passes)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Slow (ODE solve); fast with flow matching + few steps"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Expressivity"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Limited by bijective structure"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Universal approximator (universal ODE)"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "How Flow Matching Solves CNF's Bottleneck"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FFJORD trains CNFs by maximising likelihood, which requires solving the augmented ODE at every training step — expensive because the ODE solver calls v_θ hundreds of times. Flow matching sidesteps this by training with simulation-free regression: given a conditional velocity target u_t(x|x₁) known in closed form, the model just minimises an MSE loss at randomly sampled t without running the ODE at all. This makes training as cheap as a standard supervised learning step while achieving the same generative performance."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# CNF (FFJORD): expensive — requires ODE solve per training step\n# Training step runtime ~ O(n_ode_steps * cost_per_vf_eval)\ndef ffjord_train_step(model, x_batch, optimizer):\n    log_p = cnf_log_likelihood(FFJORDAugmented(model.vf), x_batch, ...)\n    loss = -log_p.mean()   # requires ODE integration\n    ...\n\n# Flow Matching: cheap — single forward pass, no ODE\n# Training step runtime ~ O(1 * cost_per_vf_eval)\ndef flow_matching_train_step(model, x_batch, optimizer):\n    B = x_batch.size(0)\n    x0 = torch.randn_like(x_batch)\n    t  = torch.rand(B, device=x_batch.device)\n    xt = (1 - t[:, None]) * x0 + t[:, None] * x_batch\n    target = x_batch - x0\n    loss = torch.nn.functional.mse_loss(model(xt, t), target)\n    optimizer.zero_grad()\n    loss.backward()          # no ODE — just one forward + backward pass\n    optimizer.step()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Practical Architecture: Fully Connected CNF for 2D Data"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import matplotlib.pyplot as plt\nimport numpy as np\n\ndef make_2d_moons_cnf(hidden: int = 128) -> CNF:\n    \"\"\"Small CNF for 2D toy data (two moons distribution).\"\"\"\n    return CNF(dim=2)\n\n\ndef train_2d_cnf(n_iters: int = 5000, batch_size: int = 512) -> CNF:\n    from sklearn.datasets import make_moons\n    model = make_2d_moons_cnf()\n    opt   = torch.optim.Adam(model.parameters(), lr=1e-3)\n\n    for i in range(n_iters):\n        X, _ = make_moons(n_samples=batch_size, noise=0.05)\n        x = torch.tensor(X, dtype=torch.float32)\n        train_cnf_step(model, x, opt)\n        if i % 500 == 0:\n            with torch.no_grad():\n                z0 = torch.randn(2000, 2)\n                samples = model(z0).numpy()\n            print(f\"Step {i}: generated {len(samples)} samples\")\n    return model\n\n\n# To evaluate: generate samples and compare to training distribution\n# model = train_2d_cnf()\n# samples = model(torch.randn(2000, 2)).detach().numpy()"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [{"type": "bold"}],
+                "text": "Mental model."
+              },
+              {
+                "type": "text",
+                "text": " A discrete normalising flow is like a factory assembly line: every station (layer) must be reversible and must keep track of how much it stretches the production line (log-det). The chain of stations transforms noise into a product (sample) and back. A CNF is like replacing the fixed stations with a conveyor belt driven by a motor (the velocity field): the belt can take any shape because you just track how much it stretches at each instant (tr(dv/dz) per unit time), not at discrete steps. Flow matching then trains the motor directly by specifying the target conveyor speed at each point — no need to run the whole belt to check if the factory produces the right product."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CNFs define a generative model via an unconstrained ODE dz/dt = v_θ(z, t), removing the bijective layer constraint of discrete normalising flows."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exact log-likelihood is computed via the instantaneous change-of-variables: d(log p)/dt = −tr(∂v/∂z), estimated with O(d) cost using the Hutchinson trace estimator."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FFJORD trains CNFs by MLE with the augmented ODE and Hutchinson trace, combined with the adjoint method for O(d) memory backpropagation through the ODE solver."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CNF training is slow because MLE requires solving the ODE at every step. Flow matching eliminates this bottleneck by training with a simulation-free MSE regression on conditional velocity targets, making training as fast as standard supervised learning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rectified Flow and Conditional Flow Matching are practical implementations of CNF-style models trained via flow matching — they inherit CNFs' expressivity while bypassing the ODE-solve training bottleneck."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

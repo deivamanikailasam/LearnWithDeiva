@@ -1,0 +1,333 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training an energy-based model by maximum likelihood requires computing a gradient that involves both the data distribution and the model distribution. The model distribution term — the expected gradient of E_θ(x) under p_θ itself — requires sampling from the model, which is expensive. Contrastive Divergence (CD) is the key approximation: instead of running MCMC to convergence, run only k steps starting from real data. This cheap approximation made EBMs trainable in practice and remains the backbone of most EBM training methods."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The MLE Gradient Requires Two Expectations"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The log-likelihood under an EBM is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log p_\\theta(x) = -E_\\theta(x) - \\log Z_\\theta"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The gradient with respect to θ is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\nabla_\\theta \\log p_\\theta(x) = -\\nabla_\\theta E_\\theta(x) + \\mathbb{E}_{x^- \\sim p_\\theta}[\\nabla_\\theta E_\\theta(x^-)]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first term (negative energy gradient on data x⁺) is cheap — one backward pass. The second term is the expected energy gradient under the model p_θ — it requires generating model samples x⁻, which is expensive. The full MLE update is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\nabla_\\theta \\mathcal{L} = \\underbrace{\\mathbb{E}_{x^+ \\sim p_{\\text{data}}}[\\nabla_\\theta E_\\theta(x^+)]}_{\\text{positive phase}} - \\underbrace{\\mathbb{E}_{x^- \\sim p_\\theta}[\\nabla_\\theta E_\\theta(x^-)]}_{\\text{negative phase}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The positive phase pushes the energy of real data down. The negative phase pushes the energy of model samples up. Together they shape the energy landscape: a well-trained model assigns low energy to data and high energy elsewhere."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom typing import Callable\n\n\ndef mle_gradient(\n    energy_net: nn.Module,\n    x_pos: torch.Tensor,\n    x_neg: torch.Tensor,\n) -> torch.Tensor:\n    \"\"\"\n    Compute the MLE gradient as a loss: L = E_theta(x+) - E_theta(x-).\n    Minimising this is equivalent to:\n      - decreasing energy of real data (positive phase)\n      - increasing energy of model samples (negative phase)\n\n    x_pos: real data samples (B, *)\n    x_neg: model samples drawn via MCMC (B, *)\n    \"\"\"\n    e_pos = energy_net(x_pos).mean()   # positive phase energy\n    e_neg = energy_net(x_neg).mean()   # negative phase energy\n    # MLE gradient: d/dtheta [E(x+) - E(x-)]\n    # Minimising this loss does both phases in one step\n    return e_pos - e_neg\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Contrastive Divergence (CD-k)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "CD-k (Hinton, 2002) approximates the negative phase by running k steps of Gibbs sampling (or Langevin MCMC) starting from the real data x⁺, not from noise. The intuition: after k steps the chain hasn't moved far from the data, so x⁻ ≈ samples from the model near the data manifold. This is cheap (k is small, typically 1) and works remarkably well."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "x^{(0)} = x^+, \\quad x^{(k)} = \\text{MCMC}^k(x^{(0)};\\, p_\\theta), \\quad x^- = x^{(k)}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "CD-k minimises the contrastive divergence CD_k = KL(p_data ‖ p_∞) − KL(p_k ‖ p_∞), where p_k is the distribution after k Gibbs steps from data. This is not the MLE gradient — it has a well-understood bias — but in practice it is stable and converges to a reasonable model."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def contrastive_divergence_k(\n    energy_net: nn.Module,\n    x_pos: torch.Tensor,\n    k: int = 1,\n    step_size: float = 0.01,\n    noise_scale: float = 0.005,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    \"\"\"\n    CD-k: warm-start MCMC from real data, run k steps, return negative samples.\n\n    Returns:\n        loss:  scalar contrastive divergence loss\n        x_neg: model samples after k Langevin steps (B, *), detached\n    \"\"\"\n    # --- negative phase: k-step MCMC from data ---\n    x_neg = x_pos.detach().clone().requires_grad_(True)\n\n    for _ in range(k):\n        e = energy_net(x_neg).sum()\n        grad = torch.autograd.grad(e, x_neg)[0]\n        grad = grad.clamp(-0.03, 0.03)                  # stabilise\n        noise = torch.randn_like(x_neg) * noise_scale\n        x_neg = (x_neg - step_size / 2 * grad + noise).clamp(-1, 1).detach().requires_grad_(True)\n\n    x_neg = x_neg.detach()   # stop gradient — we don't backprop through MCMC\n\n    # --- contrastive loss ---\n    e_pos = energy_net(x_pos)   # (B,)\n    e_neg = energy_net(x_neg)   # (B,)\n    loss = e_pos.mean() - e_neg.mean()\n    return loss, x_neg\n\n\ndef cd1_train_step(\n    energy_net: nn.Module,\n    optimizer: torch.optim.Optimizer,\n    x_batch: torch.Tensor,\n) -> dict:\n    \"\"\"Minimal CD-1 training step.\"\"\"\n    loss, x_neg = contrastive_divergence_k(energy_net, x_batch, k=1)\n    optimizer.zero_grad()\n    loss.backward()\n    torch.nn.utils.clip_grad_norm_(energy_net.parameters(), 0.1)\n    optimizer.step()\n    return {\"loss\": loss.item()}\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Persistent Contrastive Divergence (PCD)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "CD-k's main weakness: starting MCMC from data means the chain never explores far from the data manifold. Model samples stay close to training data, so modes that the model incorrectly assigns high probability to are never discovered or penalised. Persistent CD (Tieleman, 2008) fixes this by maintaining a persistent set of MCMC chains that are never reset. Each training step, the chains are advanced k steps from wherever they last stopped, not from the data."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class PersistentContrastiveDivergence:\n    \"\"\"\n    PCD: maintains persistent MCMC chains across training steps.\n    Unlike CD-k (which starts chains from data each step), these chains\n    explore the full model distribution over the course of training.\n    \"\"\"\n    def __init__(\n        self,\n        n_chains: int,\n        x_shape: tuple,\n        device: torch.device,\n        k_steps: int = 5,\n        step_size: float = 0.01,\n        noise_scale: float = 0.005,\n    ):\n        self.k = k_steps\n        self.step_size = step_size\n        self.noise_scale = noise_scale\n        # initialise chains uniformly at random\n        self.chains = torch.FloatTensor(n_chains, *x_shape).uniform_(-1, 1).to(device)\n\n    def step(\n        self,\n        energy_net: nn.Module,\n        x_pos: torch.Tensor,\n    ) -> tuple[torch.Tensor, dict]:\n        \"\"\"\n        One PCD training step.\n\n        1. Advance all persistent chains k SGLD steps.\n        2. Sample batch-size chains as negative samples.\n        3. Compute CD loss and return it.\n\n        Returns:\n            loss: scalar\n            info: diagnostic dict\n        \"\"\"\n        # advance persistent chains\n        x_chain = self.chains.detach().requires_grad_(True)\n        for _ in range(self.k):\n            e = energy_net(x_chain).sum()\n            grad = torch.autograd.grad(e, x_chain)[0]\n            grad = grad.clamp(-0.03, 0.03)\n            noise = torch.randn_like(x_chain) * self.noise_scale\n            x_chain = (x_chain - self.step_size / 2 * grad + noise).clamp(-1, 1)\n            x_chain = x_chain.detach().requires_grad_(True)\n\n        self.chains = x_chain.detach()   # update persistent state\n\n        # sample negative examples from persistent chains\n        B = x_pos.shape[0]\n        idx = torch.randint(0, self.chains.shape[0], (B,))\n        x_neg = self.chains[idx].detach()\n\n        # contrastive loss\n        e_pos = energy_net(x_pos).mean()\n        e_neg = energy_net(x_neg).mean()\n        loss = e_pos - e_neg\n\n        return loss, {\"e_pos\": e_pos.item(), \"e_neg\": e_neg.item()}\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Noise Contrastive Estimation (NCE)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "NCE (Gutmann & Hyvärinen, 2010) avoids MCMC entirely by rephrasing density estimation as binary classification. Real data x⁺ ~ p_data and noise samples x⁻ ~ q (a fixed, known distribution) are mixed. A classifier learns to separate them. The Bayes-optimal classifier for this task implicitly recovers the ratio p_data(x)/q(x), which identifies p_data up to scale. For EBMs, this gives an objective that sidesteps Z_θ by treating it as a learnable scalar parameter c = −log Z_θ."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{NCE}} = \\mathbb{E}_{x^+ \\sim p_{\\text{data}}}[\\log \\sigma(h(x^+))] + k\\,\\mathbb{E}_{x^- \\sim q}[\\log(1 - \\sigma(h(x^-)))]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where h(x) = −E_θ(x) + c, σ is the sigmoid function, k is the noise-to-data ratio, and c = −log Z_θ is learned alongside θ. When p_data matches p_θ = exp(−E_θ + c) / 1, the classifier can do no better than chance."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch.nn.functional as F\n\n\nclass NCETrainer:\n    \"\"\"\n    Noise Contrastive Estimation for EBMs.\n    Avoids MCMC: uses a known noise distribution q instead.\n    \"\"\"\n    def __init__(self, energy_net: nn.Module, noise_ratio: int = 5):\n        self.energy_net = energy_net\n        self.k = noise_ratio              # number of noise samples per data sample\n        self.log_Z = nn.Parameter(torch.zeros(1))   # learn log Z_theta\n\n    def sample_noise(self, n: int, x_shape: tuple, device) -> torch.Tensor:\n        \"\"\"Noise distribution q: standard Gaussian (or uniform).\"\"\"\n        return torch.randn(n, *x_shape, device=device)\n\n    def loss(self, x_pos: torch.Tensor) -> torch.Tensor:\n        \"\"\"\n        NCE loss: treat real vs noise as a binary classification problem.\n        \"\"\"\n        B = x_pos.shape[0]\n        x_neg = self.sample_noise(B * self.k, x_pos.shape[1:], x_pos.device)\n\n        # unnormalised log p_theta(x) = -E_theta(x) + c, c = -log Z\n        # log q(x) for Gaussian: -0.5 * ||x||^2 - const (const cancels in ratio)\n        def log_model(x):\n            return -self.energy_net(x) + self.log_Z\n\n        def log_noise(x):\n            return -0.5 * x.flatten(1).pow(2).sum(-1)   # Gaussian log-prob (unnorm)\n\n        # h(x) = log p_model(x) - log [p_model(x) + k*q(x)]\n        #       = log_model(x) - log(exp(log_model(x)) + k*exp(log_noise(x)))\n        def binary_log_prob(x, is_real: bool):\n            lm = log_model(x)\n            ln = log_noise(x) + torch.log(torch.tensor(self.k, dtype=torch.float))\n            # numerically stable: log sigmoid of (lm - ln)\n            logit = lm - ln\n            if is_real:\n                return F.logsigmoid(logit)\n            else:\n                return F.logsigmoid(-logit)\n\n        loss_pos = -binary_log_prob(x_pos, is_real=True).mean()\n        loss_neg = -binary_log_prob(x_neg, is_real=False).mean()\n        return loss_pos + loss_neg\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "CD-k vs PCD vs NCE: When to Use Each"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Method"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Negative samples"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gradient bias"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best for"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CD-1", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1-step MCMC from data"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (near-data only)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RBMs; fast prototyping; unimodal distributions"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CD-k (k > 1)", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "k-step MCMC from data"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Moderate (k↑ → bias↓)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When CD-1 diverges; budget for more MCMC steps"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "PCD", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Persistent chains (resumed)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low (explores all modes)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multimodal distributions; deep EBMs on images"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "NCE", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Known noise dist. q"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None (consistent estimator)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Word2Vec, language models; when q can overlap p_data"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why CD-k Works Despite the Bias"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "CD-k is biased toward a fixed point that is not the MLE. Carreira-Perpiñán & Hinton (2005) showed the fixed point minimises the reconstruction error measured by the energy function — a useful proxy for the true likelihood. Empirically, CD-1 trains RBMs that are competitive with deeper unsupervised models on density estimation benchmarks, which remains somewhat surprising. The key intuitions are:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CD-1 penalises the model for assigning lower energy to small perturbations of data than to the data itself — essentially training local smoothness of the energy surface."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "For RBMs with exact Gibbs sampling, CD-k converges for k → ∞ to the true MLE gradient, so increasing k improves the approximation."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CD-k is most biased when the model distribution p_θ is far from the data distribution — early in training when it matters least (the landscape is still being shaped broadly)."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "A Minimal Working EBM Training Loop"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def train_ebm(\n    energy_net: nn.Module,\n    dataloader,\n    n_epochs: int = 50,\n    lr: float = 1e-4,\n    cd_k: int = 10,\n    use_pcd: bool = True,\n):\n    \"\"\"\n    Training loop that switches between CD-k and PCD based on use_pcd.\n    \"\"\"\n    optimizer = torch.optim.Adam(energy_net.parameters(), lr=lr)\n\n    # inspect first batch to get shape\n    sample_batch = next(iter(dataloader))[0]\n    x_shape = sample_batch.shape[1:]\n    device = next(energy_net.parameters()).device\n\n    if use_pcd:\n        pcd = PersistentContrastiveDivergence(\n            n_chains=512,\n            x_shape=x_shape,\n            device=device,\n            k_steps=cd_k,\n        )\n\n    for epoch in range(n_epochs):\n        epoch_losses = []\n        for x_batch, _ in dataloader:\n            x_batch = x_batch.to(device)\n\n            if use_pcd:\n                loss, info = pcd.step(energy_net, x_batch)\n            else:\n                loss, _ = contrastive_divergence_k(energy_net, x_batch, k=cd_k)\n\n            optimizer.zero_grad()\n            loss.backward()\n            torch.nn.utils.clip_grad_norm_(energy_net.parameters(), 0.1)\n            optimizer.step()\n            epoch_losses.append(loss.item())\n\n        print(f\"Epoch {epoch+1}: loss = {sum(epoch_losses)/len(epoch_losses):.4f}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Mental model: contrastive divergence is a tug-of-war between two forces on the energy landscape. The positive phase pulls the landscape down at real data points (making them more probable). The negative phase pushes it up at model samples (making improbable regions actually improbable). CD-k approximates the negative-phase samples by running a few MCMC steps from the real data — cheap but slightly biased because the chain doesn't wander far enough to find modes the model incorrectly assigns high probability. PCD fixes this by keeping chains running across all training steps, gradually discovering all the wrong modes."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The MLE gradient for EBMs has two terms: a positive phase (lower energy of data) and a negative phase (raise energy of model samples). Only the negative phase requires sampling."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CD-k approximates the negative phase with k-step MCMC from real data. CD-1 is cheap but biased toward near-data perturbations; CD-k with k↑ reduces bias."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Persistent CD keeps MCMC chains running across training steps, enabling the chains to discover multi-modal structure the model incorrectly assigns high probability to."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Noise Contrastive Estimation sidesteps MCMC by casting training as binary classification between real data and samples from a fixed noise distribution q, treating log Z_θ as a learnable parameter."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gradient clipping (max_norm ≈ 0.1 on parameters, element-wise clamp ≈ 0.03 on MCMC gradients) is essential for stable EBM training — without it, energy gradients can explode early in training."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}

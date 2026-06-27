@@ -1,0 +1,401 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Exposure bias is the mismatch between the input distribution seen during training (ground-truth prefixes) and inference (the model's own previously generated tokens). It is a special case of covariate shift: the model is tested on a distribution it was never trained on. The problem grows with sequence length, explains quality degradation in long-form generation, and motivates a family of sequence-level training objectives that go beyond token-level cross-entropy."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Formal Definition"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Let p* be the data distribution over prefixes and p_θ be the model's own generation distribution. Under teacher forcing, every training step conditions on a prefix drawn from p*. At inference, every step conditions on a prefix drawn from p_θ. The total variation distance between these distributions grows with position t as:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{TV}\\bigl(p^*(x_{1:t}),\\; p_\\theta(x_{1:t})\\bigr) \\leq 1 - (1-\\varepsilon)^t \\approx \\varepsilon t"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where ε is the per-step expected total variation between a single-step ground-truth token and the model's prediction. Even a well-trained model with ε = 0.02 (98% per-step accuracy) accumulates TV ≈ 1 after 50 steps. The consequence: the model is evaluated on states it assigns negligible probability to having been trained on."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Compounding Errors in Practice"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The effect is most visible in tasks where small early mistakes cascade. Machine translation: an incorrect article at position 3 shifts the noun phrase agreement and causes a cascade of agreement errors. Code generation: an off-by-one in a loop bound produces syntactically valid but semantically wrong downstream code. Story generation: an incorrect character name or event propagates throughout the narrative."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\ndef measure_exposure_bias(\n    model,\n    batch: torch.Tensor,   # (B, T) ground-truth tokens\n    n_samples: int = 10,\n) -> dict:\n    \"\"\"\n    Empirically estimate per-step total variation and cumulative drift.\n    Returns per-position TV and average hidden-state L2 distance from GT.\n    \"\"\"\n    model.eval()\n    B, T = batch.shape\n    device = batch.device\n\n    tv_per_pos = []\n    with torch.no_grad():\n        for t in range(1, T):\n            # Ground-truth prefix distribution (one-hot)\n            p_gt = F.one_hot(batch[:, t], num_classes=model.vocab_size).float()  # (B, V)\n\n            # Teacher-forced prediction at step t\n            logits_tf, _ = model(batch[:, :t])   # (B, t, V)\n            p_tf = logits_tf[:, -1].softmax(-1)  # (B, V)\n\n            # Free-running prediction (average over samples)\n            p_fr_sum = torch.zeros(B, model.vocab_size, device=device)\n            for _ in range(n_samples):\n                # Sample a free-running prefix of length t\n                gen = batch[:, :1]  # start from BOS\n                for s in range(t - 1):\n                    l, _ = model(gen)\n                    next_tok = l[:, -1].softmax(-1).multinomial(1)   # (B, 1)\n                    gen = torch.cat([gen, next_tok], dim=1)\n                logits_fr, _ = model(gen)\n                p_fr_sum += logits_fr[:, -1].softmax(-1)\n            p_fr = p_fr_sum / n_samples\n\n            # Per-batch TV(p_tf, p_fr) averaged over B\n            tv = 0.5 * (p_tf - p_fr).abs().sum(-1).mean().item()\n            tv_per_pos.append(tv)\n\n    return {\n        \"tv_per_position\": tv_per_pos,\n        \"cumulative_tv\": [sum(tv_per_pos[:i+1]) for i in range(len(tv_per_pos))],\n    }"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Imitation Learning View: DAgger"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Ross et al. (2011) formalised the covariate shift problem for imitation learning (learning to mimic an expert policy) and proposed Dataset Aggregation (DAgger). Instead of training only on expert (ground-truth) states, DAgger iteratively collects new training data from states reached by the current policy and queries the expert (oracle) for the correct action at those states. Applied to seq2seq: at each round, generate sequences with the current model, then label each generated prefix with the gold next token and add those (state, label) pairs to the training set."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{D}_{i+1} = \\mathcal{D}_i \\cup \\{(s, a^*) : s \\sim \\pi_i,\\; a^* = \\pi^*(s)\\}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DAgger guarantees no-regret against the expert in the tabular case, but requires a queryable oracle at training time — practical for tasks where the reference output can be regenerated (code execution, rule-based MT) but not for human-authored text."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def dagger_collect(\n    model,\n    src_batch: torch.Tensor,    # (B, S) source tokens\n    tgt_batch: torch.Tensor,    # (B, T) reference target tokens\n    beta: float = 0.5,          # probability of following model vs oracle\n) -> list[tuple]:\n    \"\"\"\n    Collect (prefix, next_oracle_token) pairs from mixed policy trajectories.\n    beta=1.0 is pure teacher forcing; beta=0.0 is DAgger.\n    \"\"\"\n    import random\n    model.eval()\n    B, T = tgt_batch.shape\n    data = []\n\n    with torch.no_grad():\n        for b in range(B):\n            prefix = tgt_batch[b, :1].unsqueeze(0)   # (1, 1) BOS\n            for t in range(T - 1):\n                # Oracle action: ground-truth next token\n                oracle_tok = tgt_batch[b, t + 1]\n\n                # Policy action: model's argmax prediction\n                logits, _ = model(prefix)\n                policy_tok = logits[0, -1].argmax()\n\n                # Store (current prefix, oracle next token)\n                data.append((prefix.clone(), oracle_tok.item()))\n\n                # Advance with mixed policy\n                if random.random() < beta:\n                    next_tok = oracle_tok.reshape(1, 1)\n                else:\n                    next_tok = policy_tok.reshape(1, 1)\n                prefix = torch.cat([prefix, next_tok], dim=1)\n\n    return data"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Sequence-Level Training: Minimum Risk Training"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Token-level cross-entropy is a surrogate for the true task metric (BLEU, ROUGE, F1). Minimum Risk Training (MRT) directly minimises the expected task loss under the model's own distribution, making exposure bias irrelevant during training because the model always conditions on its own samples:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{MRT}}(\\theta) = \\mathbb{E}_{\\hat{y} \\sim p_\\theta(\\cdot|x)}\\bigl[\\Delta(y^*, \\hat{y})\\bigr] = \\sum_{\\hat{y}} p_\\theta(\\hat{y}|x)\\,\\Delta(y^*, \\hat{y})"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where Δ(y*, ŷ) is the task loss (e.g. 1 − BLEU). The gradient is estimated via REINFORCE:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\nabla_\\theta \\mathcal{L}_{\\text{MRT}} = \\mathbb{E}_{\\hat{y} \\sim p_\\theta}\\bigl[\\Delta(y^*, \\hat{y})\\,\\nabla_\\theta \\log p_\\theta(\\hat{y}|x)\\bigr]"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction\n\ndef minimum_risk_training_step(\n    model,\n    src: torch.Tensor,      # (1, S)\n    ref_tokens: list[int],  # reference target as list of int ids\n    n_samples: int = 16,\n    baseline: str = \"mean\",\n) -> torch.Tensor:\n    \"\"\"\n    REINFORCE with mean baseline for MRT on BLEU.\n    Returns the policy gradient loss scalar.\n    \"\"\"\n    smooth = SmoothingFunction().method1\n    log_probs, rewards = [], []\n\n    for _ in range(n_samples):\n        # Sample a complete hypothesis from the model\n        sample_ids, sample_logprob = model.sample_with_logprob(src)  # (T,), scalar\n        # Task reward: sentence BLEU (0..1); negate for risk\n        bleu = sentence_bleu([ref_tokens], sample_ids, smoothing_function=smooth)\n        log_probs.append(sample_logprob)\n        rewards.append(1.0 - bleu)   # risk = 1 - BLEU\n\n    rewards_t = torch.tensor(rewards, dtype=torch.float32)\n    log_probs_t = torch.stack(log_probs)\n\n    # Subtract baseline to reduce variance\n    if baseline == \"mean\":\n        rewards_t = rewards_t - rewards_t.mean()\n\n    # REINFORCE gradient: E[risk * grad log p]\n    loss = (rewards_t.detach() * log_probs_t).mean()\n    return loss"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "SEARNN and Training with Beam Search"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "SEARNN (Leblond et al., 2018) extends the SEARN/DAgger framework with a cost-sensitive oracle: at each step t of the generated sequence, it samples K rollouts from step t+1 onward, evaluates the task metric for each, and uses those estimated costs as training signal rather than the raw task metric. This gives a dense, per-token reward without needing a separate RL loop."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training with beam search (Wiseman & Rush, 2016) exposes the model to the hypotheses it will actually encounter during beam search decoding — not just greedy predictions. The margin loss penalises when incorrect hypotheses in the beam outscore the gold sequence."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Exposure Bias in Transformers"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Transformers still suffer from exposure bias at the token level: during training every position attends to ground-truth prefixes (via causal masking), while at inference generated tokens fill those positions. However, transformers have key structural advantages:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No fixed-size hidden state: errors at position t do not compress all history into a vector that then drives all future steps — each generated token attends directly to all prior tokens."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scheduled sampling is harder to implement for transformers because all positions are processed in parallel; you must inject sampled tokens into the key-value cache mid-sequence, requiring a custom training loop."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reinforcement learning from human feedback (RLHF) and direct preference optimisation (DPO) are the practical solutions for large-scale transformers — they optimise directly under the model's generation distribution and align with human preference, not just token accuracy."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Comparison of Mitigations"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Method"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Oracle needed?"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Task metric aware?"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Complexity"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Scheduled sampling"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No (still CE)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Professor forcing"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Medium (GAN)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DAgger"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (queryable)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No (CE on oracle)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Medium"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "MRT / REINFORCE"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (variance)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RLHF / DPO"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Human labellers"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (preference)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [{"type": "bold"}],
+                "text": "Mental model."
+              },
+              {
+                "type": "text",
+                "text": " Exposure bias is like training a tightrope walker only on a stable platform and then expecting them to perform on an actual rope. Each misstep on the rope creates a new, out-of-distribution situation the training never covered. Scheduled sampling lets them occasionally practice on a slightly wobbly platform. DAgger puts them on the rope and brings an expert alongside to correct each wrong step. MRT/RLHF lets them fall, measure how bad the fall was, and learn to avoid that sequence of moves — the only approach that trains on the full distribution of real failures."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exposure bias is the total variation between the ground-truth prefix distribution (training) and the model's own prefix distribution (inference), which grows as TV ≈ ε·t — linearly in sequence length."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "It is a covariate shift problem: the model is tested on a distribution it was not trained on, causing compounding errors in long-form generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "DAgger solves exposure bias by iteratively training on states the current policy visits and labelling them with an oracle — eliminating the distributional mismatch at the cost of oracle access."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Minimum Risk Training directly minimises expected task loss via REINFORCE, so training always conditions on the model's own samples — no distributional mismatch, but high gradient variance requiring a baseline."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For large transformers, RLHF and DPO are the practical solutions: they train on the model's own generation distribution and directly optimise for human-aligned quality, not token-level accuracy."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

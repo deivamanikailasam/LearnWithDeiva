@@ -1,0 +1,498 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Few-step sampling methods reduce the number of model evaluations (NFEs) needed to generate a sample from a trained diffusion model without any retraining. They replace the naive DDPM reverse process (hundreds of steps) with higher-order numerical ODE/SDE solvers that achieve comparable quality in 5–20 steps. The key insight is that the diffusion reverse ODE has a semi-linear structure — the linear part can be solved exactly in closed form, leaving only the nonlinear noise-prediction residual to be approximated."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "DDIM: The Foundation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DDIM (Song et al., 2020) reinterprets the DDPM forward process as defining a family of non-Markovian processes. This yields a deterministic reverse ODE that can be discretized at any step count independently of the training schedule. The key parameter "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "η"
+          },
+          {
+            "type": "text",
+            "text": " interpolates between fully deterministic (η=0, DDIM) and fully stochastic (η=1, DDPM)."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "x_{t-1} = \\sqrt{\\bar{\\alpha}_{t-1}} \\underbrace{\\frac{x_t - \\sqrt{1-\\bar{\\alpha}_t}\\,\\hat{\\varepsilon}_\\theta(x_t)}{\\sqrt{\\bar{\\alpha}_t}}}_{\\hat{x}_0} + \\sqrt{1-\\bar{\\alpha}_{t-1} - \\sigma_t^2}\\,\\hat{\\varepsilon}_\\theta(x_t) + \\sigma_t\\,\\varepsilon_t"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ_t = η √((1-ᾱ_{t-1})/(1-ᾱ_t)) √(1-ᾱ_t/ᾱ_{t-1})"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "ε_t ~ N(0,I)"
+          },
+          {
+            "type": "text",
+            "text": " is fresh noise."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n\ndef ddim_sample(\n    model,\n    shape: tuple,\n    alpha_bars: torch.Tensor,   # full schedule of length T\n    n_steps: int = 50,\n    eta: float = 0.0,           # 0=deterministic, 1=DDPM\n    device: torch.device = torch.device('cpu'),\n) -> torch.Tensor:\n    \"\"\"\n    DDIM sampler. n_steps << T; timesteps are a uniform subset of [0, T-1].\n    eta=0: deterministic (DDIM); eta=1: DDPM-equivalent stochasticity.\n    \"\"\"\n    T = len(alpha_bars)\n    # Uniformly spaced subset of timesteps (reverse order)\n    t_seq = torch.linspace(T - 1, 0, n_steps + 1, dtype=torch.long)\n\n    x = torch.randn(*shape, device=device)\n\n    for i in range(n_steps):\n        t_cur  = t_seq[i].item()\n        t_prev = t_seq[i + 1].item()\n        ab_cur  = alpha_bars[t_cur]\n        ab_prev = alpha_bars[t_prev] if t_prev >= 0 else torch.tensor(1.0)\n\n        alpha_cur  = ab_cur.sqrt()\n        sigma_cur  = (1 - ab_cur).sqrt()\n        alpha_prev = ab_prev.sqrt()\n\n        t_batch = torch.tensor([t_cur], device=device)\n        with torch.no_grad():\n            eps_pred = model(x, t_batch)\n\n        # Predicted x0\n        x0_pred = (x - sigma_cur * eps_pred) / alpha_cur\n        x0_pred = x0_pred.clamp(-1, 1)\n\n        # Direction pointing to x_t\n        # sigma_t for DDIM\n        if t_prev > 0:\n            beta_t = 1 - ab_cur / ab_prev\n            sigma_t = eta * ((1 - ab_prev) / (1 - ab_cur) * beta_t).sqrt()\n            sigma_prev = (1 - ab_prev - sigma_t**2).clamp(min=0).sqrt()\n            x = alpha_prev * x0_pred + sigma_prev * eps_pred\n            if eta > 0:\n                x = x + sigma_t * torch.randn_like(x)\n        else:\n            x = x0_pred\n\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "DPM-Solver: Exponential Integrators"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DPM-Solver (Lu et al., 2022) exploits the semi-linear structure of the diffusion ODE. Rewriting in log-SNR space "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "λ_t = log(α_t/σ_t)"
+          },
+          {
+            "type": "text",
+            "text": ", the ODE becomes:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\frac{dx}{d\\lambda} = x - \\frac{\\sigma_\\lambda}{\\alpha_\\lambda}\\, \\hat{\\varepsilon}_\\theta\\!\\left(x_\\lambda, \\lambda\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The linear term "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "x"
+          },
+          {
+            "type": "text",
+            "text": " can be integrated exactly (giving a factor of "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "e^{Δλ}"
+          },
+          {
+            "type": "text",
+            "text": "); only the noise prediction term needs numerical approximation. DPM-Solver-2 uses a 2nd-order Taylor expansion of "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "ε_θ"
+          },
+          {
+            "type": "text",
+            "text": " in "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "λ"
+          },
+          {
+            "type": "text",
+            "text": ", requiring one additional model evaluation per step."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\n\n\ndef get_lambda(alpha_bar: torch.Tensor) -> torch.Tensor:\n    \"\"\"Log-SNR: λ = log(α / σ) = 0.5 * log(ᾱ / (1-ᾱ))\"\"\"\n    return 0.5 * torch.log(alpha_bar / (1 - alpha_bar))\n\n\ndef alpha_sigma_from_lambda(lam: torch.Tensor):\n    \"\"\"Recover α and σ from log-SNR λ.\"\"\"\n    alpha_sq = torch.sigmoid(2 * lam)   # α² = sigmoid(2λ)\n    alpha = alpha_sq.sqrt()\n    sigma = (1 - alpha_sq).sqrt()\n    return alpha, sigma\n\n\ndef dpm_solver_2(\n    model,\n    shape: tuple,\n    alpha_bars: torch.Tensor,\n    n_steps: int = 20,\n    device: torch.device = torch.device('cpu'),\n) -> torch.Tensor:\n    \"\"\"\n    DPM-Solver-2: 2nd-order exponential integrator for diffusion ODE.\n    Uses 2 model evaluations per step (1 extra vs. first-order).\n    Achieves quality of ~200 DDPM steps in ~20 steps.\n    \"\"\"\n    T = len(alpha_bars)\n    # Uniform schedule in λ-space\n    lam_T = get_lambda(alpha_bars[T - 1])\n    lam_0 = get_lambda(alpha_bars[0])\n    lambdas = torch.linspace(lam_T.item(), lam_0.item(), n_steps + 1)\n\n    alpha_T, sigma_T = alpha_sigma_from_lambda(lambdas[0])\n    x = torch.randn(*shape, device=device) * sigma_T  # start at noise level σ_T\n\n    for i in range(n_steps):\n        lam_s = lambdas[i]\n        lam_t = lambdas[i + 1]\n        h = lam_t - lam_s   # step size in λ-space\n\n        alpha_s, sigma_s = alpha_sigma_from_lambda(lam_s)\n        alpha_t, sigma_t = alpha_sigma_from_lambda(lam_t)\n\n        # Convert current time to integer index for model\n        # (approximate: find closest alpha_bar entry)\n        ab_s = alpha_s ** 2\n        t_s_idx = (alpha_bars - ab_s).abs().argmin()\n\n        # First model evaluation at s\n        with torch.no_grad():\n            eps_s = model(x, t_s_idx.unsqueeze(0).to(device))\n\n        # Midpoint in λ-space\n        lam_mid = (lam_s + lam_t) / 2\n        alpha_mid, sigma_mid = alpha_sigma_from_lambda(lam_mid)\n        ab_mid = alpha_mid ** 2\n        t_mid_idx = (alpha_bars - ab_mid).abs().argmin()\n\n        # First-order step to midpoint\n        phi_1 = torch.expm1(h / 2)   # e^(h/2) - 1\n        u_mid = (alpha_mid / alpha_s) * x - sigma_mid * phi_1 * eps_s\n\n        # Second model evaluation at midpoint\n        with torch.no_grad():\n            eps_mid = model(u_mid, t_mid_idx.unsqueeze(0).to(device))\n\n        # Second-order update\n        phi_1_full = torch.expm1(h)   # e^h - 1\n        x = (alpha_t / alpha_s) * x - sigma_t * phi_1_full * eps_mid\n\n    return x.clamp(-1, 1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "DPM-Solver++: Data Prediction"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DPM-Solver++ (Lu et al., 2022) switches from noise prediction to "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "bold"}],
+            "text": "data prediction"
+          },
+          {
+            "type": "text",
+            "text": " — approximating "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "x_0"
+          },
+          {
+            "type": "text",
+            "text": " (the denoised signal) rather than "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "ε"
+          },
+          {
+            "type": "text",
+            "text": ". At very low step counts (2–10 steps), the noise prediction "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "ε_θ"
+          },
+          {
+            "type": "text",
+            "text": " changes rapidly with "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "λ"
+          },
+          {
+            "type": "text",
+            "text": " near the data end, making polynomial approximation inaccurate. The predicted "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "x_0"
+          },
+          {
+            "type": "text",
+            "text": " is much smoother there, reducing truncation error. DPM-Solver++(2M) uses a second-order multistep method that reuses the previous step's evaluation."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def dpm_solver_pp_2m(\n    model,\n    shape: tuple,\n    alpha_bars: torch.Tensor,\n    n_steps: int = 20,\n    device: torch.device = torch.device('cpu'),\n) -> torch.Tensor:\n    \"\"\"\n    DPM-Solver++(2M): 2nd-order multistep solver using x0 prediction.\n    Only ONE model evaluation per step (reuses previous step's output).\n    \"\"\"\n    T = len(alpha_bars)\n    lam_T = get_lambda(alpha_bars[T - 1])\n    lam_0 = get_lambda(alpha_bars[0])\n    lambdas = torch.linspace(lam_T.item(), lam_0.item(), n_steps + 1)\n\n    alpha_T, sigma_T = alpha_sigma_from_lambda(lambdas[0])\n    x = torch.randn(*shape, device=device) * sigma_T\n\n    x0_prev = None\n    lam_prev = None\n\n    for i in range(n_steps):\n        lam_s = lambdas[i]\n        lam_t = lambdas[i + 1]\n        h = lam_t - lam_s\n        alpha_s, sigma_s = alpha_sigma_from_lambda(lam_s)\n        alpha_t, sigma_t = alpha_sigma_from_lambda(lam_t)\n\n        ab_s = alpha_s ** 2\n        t_s_idx = (alpha_bars - ab_s).abs().argmin()\n\n        # Model evaluation: predict x0 (from eps prediction)\n        with torch.no_grad():\n            eps = model(x, t_s_idx.unsqueeze(0).to(device))\n        x0_pred = (x - sigma_s * eps) / alpha_s\n        x0_pred = x0_pred.clamp(-1, 1)\n\n        if x0_prev is None or i == 0:\n            # First-order step\n            x = (sigma_t / sigma_s) * x - alpha_t * torch.expm1(-h) * x0_pred\n        else:\n            # Second-order multistep: linear combination of current and previous x0\n            h_prev = lam_s - lam_prev\n            r = h_prev / h\n            D0 = x0_pred\n            D1 = (x0_pred - x0_prev) / r   # finite difference of x0 estimates\n            x = (\n                (sigma_t / sigma_s) * x\n                - alpha_t * torch.expm1(-h) * D0\n                - alpha_t / 2 * torch.expm1(-h) * h * D1\n            )\n\n        x0_prev = x0_pred\n        lam_prev = lam_s\n\n    return x.clamp(-1, 1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Karras/EDM Sampler"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The EDM sampler (Karras et al., 2022) uses a 2nd-order Heun integrator on a "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ(t)"
+          },
+          {
+            "type": "text",
+            "text": " parameterised ODE with a carefully chosen noise schedule. The Heun step evaluates the model twice — once at "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ_cur"
+          },
+          {
+            "type": "text",
+            "text": " and once at the Euler prediction — and takes their average derivative. An optional stochastic correction (adding and re-removing noise) improves sample quality at low NFEs."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def edm_sigmas(\n    n_steps: int,\n    sigma_max: float = 80.0,\n    sigma_min: float = 0.002,\n    rho: float = 7.0,\n) -> torch.Tensor:\n    \"\"\"EDM sigma schedule: polynomial interpolation between σ_max and σ_min.\"\"\"\n    i = torch.arange(n_steps + 1, dtype=torch.float32)\n    sigmas = (\n        sigma_max ** (1 / rho)\n        + i / n_steps * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))\n    ) ** rho\n    return torch.cat([sigmas, torch.tensor([0.0])])  # append 0 as endpoint\n\n\ndef edm_heun_sampler(\n    model,   # EDM model: takes (x/sigma, sigma) as inputs, predicts denoised x\n    shape: tuple,\n    n_steps: int = 20,\n    sigma_max: float = 80.0,\n    sigma_min: float = 0.002,\n    s_churn: float = 0.0,    # stochastic churn (0=deterministic)\n    s_noise: float = 1.0,\n    device: torch.device = torch.device('cpu'),\n) -> torch.Tensor:\n    \"\"\"\n    EDM Heun sampler (Algorithm 2 in Karras et al., 2022).\n    s_churn > 0 adds stochastic noise injection between steps.\n    \"\"\"\n    sigmas = edm_sigmas(n_steps, sigma_max, sigma_min).to(device)\n    x = torch.randn(*shape, device=device) * sigma_max\n\n    for i in range(n_steps):\n        sigma_cur = sigmas[i]\n        sigma_next = sigmas[i + 1]\n\n        # Optional stochastic noise injection (\"churn\")\n        gamma = min(s_churn / n_steps, math.sqrt(2) - 1)\n        sigma_hat = sigma_cur * (1 + gamma)\n        if gamma > 0:\n            eps = torch.randn_like(x) * s_noise\n            x = x + (sigma_hat ** 2 - sigma_cur ** 2).sqrt() * eps\n        else:\n            sigma_hat = sigma_cur\n\n        # First model evaluation at sigma_hat\n        with torch.no_grad():\n            d_cur = (x - model(x / sigma_hat, sigma_hat)) / sigma_hat\n\n        # Euler step\n        x_next_euler = x + (sigma_next - sigma_hat) * d_cur\n\n        if sigma_next > 0:  # Heun correction (2nd order)\n            with torch.no_grad():\n                d_next = (x_next_euler - model(x_next_euler / sigma_next, sigma_next)) / sigma_next\n            # Average the two derivative estimates\n            x = x + (sigma_next - sigma_hat) * 0.5 * (d_cur + d_next)\n        else:\n            x = x_next_euler\n\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Choosing a Step Schedule"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The step schedule (which noise levels to visit) matters as much as the solver order. Uniformly spaced steps in "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "t"
+          },
+          {
+            "type": "text",
+            "text": " are not optimal — more steps should be allocated near low noise levels where the model output changes most rapidly."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def uniform_in_t(\n    n_steps: int, T: int\n) -> torch.Tensor:\n    \"\"\"Uniformly spaced timesteps (baseline).\"\"\"\n    return torch.linspace(T - 1, 0, n_steps + 1, dtype=torch.long)\n\n\ndef uniform_in_logsnr(\n    n_steps: int,\n    alpha_bars: torch.Tensor,\n) -> torch.Tensor:\n    \"\"\"Uniformly spaced in log-SNR λ (better than uniform in t).\"\"\"\n    lam_T = get_lambda(alpha_bars[-1])\n    lam_0 = get_lambda(alpha_bars[0])\n    lam_seq = torch.linspace(lam_T.item(), lam_0.item(), n_steps + 1)\n    # Map back to closest t indices\n    lam_all = get_lambda(alpha_bars)    # λ for all T levels\n    t_indices = [(lam_all - l).abs().argmin().item() for l in lam_seq]\n    return torch.tensor(t_indices, dtype=torch.long)\n\n\ndef leading_trailing_schedule(\n    n_steps: int, T: int, fraction_fine: float = 0.3\n) -> torch.Tensor:\n    \"\"\"\n    Allocate more steps at the fine end (low noise levels).\n    fraction_fine: fraction of steps for the bottom 10% of noise range.\n    \"\"\"\n    n_fine = max(1, int(n_steps * fraction_fine))\n    n_coarse = n_steps - n_fine\n    fine_boundary = int(T * 0.1)  # bottom 10% of timesteps\n    coarse = torch.linspace(T - 1, fine_boundary, n_coarse + 1, dtype=torch.long)\n    fine   = torch.linspace(fine_boundary - 1, 0, n_fine + 1, dtype=torch.long)\n    return torch.cat([coarse[:-1], fine])\n\n\n# Summary: for DPM-Solver and DPM-Solver++, uniform in λ is standard.\n# For EDM, the ρ-powered schedule concentrates steps at low σ.\n# Leading-trailing is simple and effective when λ-uniform is unavailable."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Solver Comparison"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Solver"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Order"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "NFE/step"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sweet spot"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Notes"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DDIM (η=0)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1st"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "20–50 steps"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Deterministic; simple to implement"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DPM-Solver-2"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2nd"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "10–20 steps"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Uses midpoint; 2× cost per step but far fewer steps needed"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DPM-Solver++(2M)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2nd"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "5–15 steps"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multistep; 1 NFE/step; default for most SD pipelines"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "EDM Heun"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2nd"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "10–35 steps"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Optional stochastic churn; designed for EDM-trained models"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "UniPC"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "up to 3rd"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "5–10 steps"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Predictor-corrector; good for very low NFE"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Guidance Compatibility"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "All these solvers integrate the diffusion ODE — they are compatible with classifier-free guidance (CFG) because CFG modifies the effective score function and the solver doesn't care about the prediction's origin. Just replace the model call with the CFG-guided prediction:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def cfg_eps(\n    model,\n    x_t: torch.Tensor,\n    t: torch.Tensor,\n    text_emb: torch.Tensor,\n    uncond_emb: torch.Tensor,\n    w: float = 7.5,\n) -> torch.Tensor:\n    \"\"\"Drop-in replacement for model() that applies CFG.\"\"\"\n    x_double = torch.cat([x_t, x_t])\n    t_double = torch.cat([t, t])\n    emb = torch.cat([uncond_emb, text_emb])\n    eps_both = model(x_double, t_double, encoder_hidden_states=emb)\n    eps_u, eps_c = eps_both.chunk(2)\n    return eps_u + w * (eps_c - eps_u)\n\n\n# Usage: replace `model(x, t)` with `cfg_eps(model, x, t, text_emb, uncond_emb, w)`\n# in any sampler (DDIM, DPM-Solver++, etc.)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Mental Model"}]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "DDPM takes 1000 tiny Euler steps along a curved road. DDIM straightens the road to a straight line and takes longer strides. DPM-Solver uses knowledge of the road's exact curvature formula (the semi-linear ODE structure) to correct each stride using calculus — and as the correction order increases, each stride can be larger without accumulating error. The schedule decides how to space your rest stops; stop more often at the steep end of the hill (low noise) where the scenery changes fastest."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "DDIM converts the stochastic DDPM process to a deterministic ODE solvable at any step count; η=0 is fully deterministic, η=1 recovers DDPM stochasticity."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "DPM-Solver exploits the semi-linear ODE structure to integrate the linear part exactly and approximate only the nonlinear (noise prediction) residual, achieving 2nd or 3rd order accuracy."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "DPM-Solver++(2M) uses data (x0) prediction instead of noise prediction, reducing truncation error at low steps, with only one NFE per step via multistep reuse."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "The EDM Heun sampler combines 2nd-order accuracy with optional stochastic churn for quality tuning, designed around the σ(t) parameterisation."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "All solvers are drop-in compatible with CFG — replace the model call with the guided prediction and the solver doesn't need modification."}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

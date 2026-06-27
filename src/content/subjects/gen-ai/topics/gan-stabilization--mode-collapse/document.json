@@ -1,0 +1,643 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Mode collapse is the most common and most damaging failure mode in GAN training: the generator stops producing diverse outputs and instead repeatedly generates a small set of samples — sometimes as few as one — that reliably fool the current discriminator. The term comes from the generator collapsing to one or a few modes of the target distribution rather than covering it. A GAN trained on MNIST undergoing mode collapse might produce only 3s and 8s, ignoring all other digits. A face generator might produce one generic face in every call. The discriminator responds by learning to reject those specific samples, the generator shifts to a new narrow set, and the two oscillate without either fully winning or converging. Understanding mode collapse requires understanding the game-theoretic structure of GAN training and how the optimization dynamics can trap the system in a cycle that standard gradient descent cannot escape."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why Mode Collapse Happens" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GAN objective is a minimax game. The generator minimizes and the discriminator maximizes the same quantity. In the original formulation the generator minimizes:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\min_G \\mathbb{E}_{z \\sim p_z}[\\log(1 - D(G(z)))]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a fixed discriminator, the generator can minimize this loss by concentrating all its probability mass on whatever input G(z) maximizes D(G(z)). If the discriminator currently assigns D(x) = 0.95 to images of a specific human face, the generator is strongly incentivized to produce that face for every z — because that is the globally optimal single-output policy given the current discriminator. This is the fundamental tension: the generator is optimizing against the discriminator, not against the target distribution directly. There is no direct pressure to cover the full distribution, only to fool the current discriminator."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The cycle dynamics play out as follows:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Generator focuses on mode A — images that fool the current discriminator." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Discriminator learns to reject mode A (it sees many identical-looking fakes)." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Generator shifts to mode B (the new easy-to-fool region of input space)." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Discriminator forgets about mode A (it stops seeing A in training batches) and starts rejecting mode B." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Generator cycles back to mode A. The system oscillates indefinitely." }]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Detecting Mode Collapse" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Mode collapse can be detected during training before manual inspection:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\ndef detect_mode_collapse(G, z_dim=100, n_samples=512, device='cuda'):\n    \"\"\"Detect mode collapse by measuring pairwise diversity of generated samples.\"\"\"\n    G.eval()\n    with torch.no_grad():\n        z = torch.randn(n_samples, z_dim, device=device)\n        samples = G(z)  # (N, C, H, W)\n        samples_flat = samples.view(n_samples, -1)  # (N, C*H*W)\n\n        # Pairwise cosine similarity — high similarity = mode collapse\n        normed = F.normalize(samples_flat, dim=1)\n        sim_matrix = normed @ normed.T  # (N, N)\n        # Exclude diagonal (self-similarity = 1)\n        mask = ~torch.eye(n_samples, dtype=torch.bool, device=device)\n        mean_sim = sim_matrix[mask].mean().item()\n\n        # Pixel-level variance — low variance = mode collapse\n        pixel_var = samples.var(dim=0).mean().item()\n\n    G.train()\n    return {'mean_pairwise_cosine_sim': mean_sim, 'mean_pixel_variance': pixel_var}\n\n\ndef log_diversity_metrics(G, z_dim, epoch, device='cuda'):\n    stats = detect_mode_collapse(G, z_dim, device=device)\n    print(f\"Epoch {epoch}: cosine_sim={stats['mean_pairwise_cosine_sim']:.4f}, \"\n          f\"pixel_var={stats['mean_pixel_variance']:.4f}\")\n    # Warning thresholds (heuristic, dataset-dependent)\n    if stats['mean_pairwise_cosine_sim'] > 0.95:\n        print(\"WARNING: high pairwise similarity — possible mode collapse\")\n    if stats['mean_pixel_variance'] < 0.01:\n        print(\"WARNING: very low pixel variance — possible mode collapse\")"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For class-conditional generators, track the fraction of generated samples falling into each class via a classifier. A fully collapsed generator would assign 100% of outputs to one class. Entropy of this class distribution — ∑ p(c) log p(c) — should be close to the entropy of the training distribution."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Minibatch Discrimination" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The discriminator in a standard GAN evaluates each sample independently. This is a key enabler of mode collapse: if all samples in a batch look similar, the discriminator still scores each individually and cannot detect the repetition. Minibatch discrimination (Salimans et al. 2016) gives the discriminator the ability to compare samples across the batch: it computes a feature that measures how different the current sample is from all other samples in the batch, then provides this feature to the discriminator as an additional input. The discriminator can now penalize batches of highly similar samples."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\nclass MinibatchDiscrimination(nn.Module):\n    \"\"\"\n    Minibatch discrimination layer (Salimans et al. 2016).\n    Projects each sample's intermediate representation into a space of\n    comparison vectors, computes L1 distance to every other sample in\n    the batch, and returns the sum of exp(-distance) as a diversity feature.\n    \"\"\"\n    def __init__(self, in_features, out_features, kernel_size=5):\n        super().__init__()\n        # Learned projection matrix T: (in_features, out_features * kernel_size)\n        self.T = nn.Parameter(torch.randn(in_features, out_features * kernel_size) * 0.02)\n        self.out_features = out_features\n        self.kernel_size = kernel_size\n\n    def forward(self, x):\n        # x: (B, in_features)\n        M = x @ self.T                          # (B, out_features * kernel_size)\n        M = M.view(x.size(0), self.out_features, self.kernel_size)  # (B, A, B_k)\n\n        # Compute L1 distances between all pairs of samples\n        # M_i: (1, A, B_k)  vs  M_j: (B, A, B_k)\n        M_i = M.unsqueeze(0)   # (1, B, A, B_k)\n        M_j = M.unsqueeze(1)   # (B, 1, A, B_k)\n        L1 = torch.abs(M_i - M_j).sum(dim=3)   # (B, B, A) — L1 per (i,j,a)\n\n        # Exp(-L1) summed over all j != i, for each feature a\n        # Mask diagonal\n        mask = 1 - torch.eye(x.size(0), device=x.device).unsqueeze(2)  # (B, B, 1)\n        cb = (torch.exp(-L1) * mask).sum(dim=1)  # (B, A)\n\n        return torch.cat([x, cb], dim=1)  # (B, in_features + out_features)\n\n\nclass MinibatchDiscriminator(nn.Module):\n    \"\"\"Discriminator with minibatch discrimination for MNIST-scale inputs.\"\"\"\n    def __init__(self, img_dim=784, hidden=512, mb_out=5, mb_kernel=3):\n        super().__init__()\n        self.feature_net = nn.Sequential(\n            nn.Linear(img_dim, hidden),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Linear(hidden, hidden // 2),\n            nn.LeakyReLU(0.2, inplace=True)\n        )\n        self.mb_disc = MinibatchDiscrimination(hidden // 2, mb_out, mb_kernel)\n        self.output = nn.Linear(hidden // 2 + mb_out, 1)\n\n    def forward(self, x):\n        h = self.feature_net(x)\n        h_mb = self.mb_disc(h)  # adds minibatch diversity features\n        return self.output(h_mb)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diversity features make a batch of near-identical samples easy to classify as fake: each sample's diversity feature would show high similarity to all other batch members. Minibatch discrimination is effective but adds significant memory and compute (O(B²) comparisons per batch). For convolutional generators at modest batch sizes (32–64) the overhead is acceptable."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Feature Matching" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Feature matching (Salimans et al. 2016) addresses mode collapse by changing the generator's training signal. Instead of the generator maximizing D(G(z)) directly, it minimizes the difference between the expected discriminator feature activations of real and generated data:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{FM}} = \\| \\mathbb{E}_{x \\sim p_{\\text{data}}} [f(x)] - \\mathbb{E}_{z \\sim p_z} [f(G(z))] \\|_2^2"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text", "text": "where f(x) are the intermediate feature activations of the discriminator. This is a distributional matching objective — it pushes the generator to produce outputs whose feature-level statistics match the real data, not just to fool the current discriminator output. The generator can no longer easily collapse to one mode because the expected features over the full real dataset span many modes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class DiscriminatorWithFeatures(nn.Module):\n    \"\"\"Discriminator that exposes intermediate features for feature matching.\"\"\"\n    def __init__(self, img_dim=784, hidden=512):\n        super().__init__()\n        self.features = nn.Sequential(\n            nn.Linear(img_dim, hidden),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Linear(hidden, hidden // 2),\n            nn.LeakyReLU(0.2, inplace=True)\n        )\n        self.output = nn.Linear(hidden // 2, 1)\n\n    def forward(self, x, return_features=False):\n        h = self.features(x)\n        out = self.output(h)\n        if return_features:\n            return out, h\n        return out\n\n\ndef feature_matching_loss(D, real, fake):\n    \"\"\"Feature matching loss: ||E[f(real)] - E[f(fake)]||^2.\"\"\"\n    _, real_features = D(real, return_features=True)\n    _, fake_features = D(fake, return_features=True)\n    # Detach real features — real data is fixed, we're moving the generator\n    return ((real_features.mean(0) - fake_features.mean(0)) ** 2).sum()\n\n\ndef train_with_feature_matching(\n    G, D, dataloader,\n    n_epochs=50, lr=2e-4, lambda_fm=1.0, device='cuda'\n):\n    G, D = G.to(device), D.to(device)\n    opt_G = torch.optim.Adam(G.parameters(), lr=lr, betas=(0.5, 0.999))\n    opt_D = torch.optim.Adam(D.parameters(), lr=lr, betas=(0.5, 0.999))\n    criterion = nn.BCEWithLogitsLoss()\n\n    for epoch in range(n_epochs):\n        for real, _ in dataloader:\n            real = real.view(real.size(0), -1).to(device)\n            B = real.size(0)\n            z = torch.randn(B, 100, device=device)\n            fake = G(z)\n\n            # ---- Discriminator ----\n            real_score = D(real)\n            fake_score = D(fake.detach())\n            loss_D = criterion(real_score, torch.ones_like(real_score)) + \\\n                     criterion(fake_score, torch.zeros_like(fake_score))\n            opt_D.zero_grad(); loss_D.backward(); opt_D.step()\n\n            # ---- Generator: adversarial + feature matching ----\n            fake = G(z)  # recompute\n            adv_loss = criterion(D(fake), torch.ones(B, 1, device=device))\n            fm_loss  = feature_matching_loss(D, real, fake) * lambda_fm\n            loss_G   = adv_loss + fm_loss\n            opt_G.zero_grad(); loss_G.backward(); opt_G.step()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Unrolled GANs" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unrolled GANs (Metz et al. 2017) take a different approach: instead of optimizing the generator against the current discriminator, optimize it against the discriminator after K gradient steps of discriminator training. The generator looks ahead K steps and produces outputs that would fool the discriminator even after it has had a chance to adapt. This breaks the oscillation cycle because the generator can no longer exploit the discriminator's current weakness — it must fool a stronger, more adapted discriminator."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import copy\n\ndef train_step_unrolled(\n    G, D, real, z_dim=100,\n    n_unroll=5, lr_unroll=2e-4, device='cuda'\n):\n    \"\"\"\n    One generator step with K-step unrolled discriminator.\n    Trains G against D after K discriminator gradient steps.\n    \"\"\"\n    B = real.size(0)\n    criterion = nn.BCEWithLogitsLoss()\n\n    # Save a copy of discriminator parameters for rollback\n    D_copy = copy.deepcopy(D)\n    opt_D_unroll = torch.optim.Adam(D_copy.parameters(), lr=lr_unroll, betas=(0.5, 0.999))\n\n    # Unroll: take K discriminator steps on a copy\n    for _ in range(n_unroll):\n        z = torch.randn(B, z_dim, device=device)\n        with torch.no_grad():\n            fake = G(z)\n        real_score = D_copy(real)\n        fake_score = D_copy(fake)\n        loss = criterion(real_score, torch.ones_like(real_score)) + \\\n               criterion(fake_score, torch.zeros_like(fake_score))\n        opt_D_unroll.zero_grad()\n        loss.backward()\n        opt_D_unroll.step()\n\n    # Train generator against the unrolled discriminator\n    z = torch.randn(B, z_dim, device=device)\n    fake = G(z)\n    # Use D_copy (after K steps), not the current D\n    gen_loss = criterion(D_copy(fake), torch.ones(B, 1, device=device))\n\n    # NOTE: D_copy is discarded after this step — D itself is updated separately\n    return gen_loss\n\n    # In practice:\n    # opt_G.zero_grad(); gen_loss.backward(); opt_G.step()"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unrolled GANs significantly reduce mode collapse but are K times more expensive per generator step (must run K discriminator forward/backward passes on a copy). K=5 to K=10 is typical. The cost is often justified for small-to-medium scale experiments where mode collapse is severe."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mode-Seeking Regularization (MSGAN)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For conditional GANs, mode collapse manifests as the generator ignoring the latent noise z and producing the same output regardless of z for a given condition. Mode-seeking regularization (MSGAN / DS loss, Mao et al. 2019) directly penalizes this by requiring that different z values produce different outputs:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{mode-seek}} = -\\mathbb{E}_{z_1, z_2} \\left[ \\frac{\\| G(c, z_1) - G(c, z_2) \\|_1}{\\| z_1 - z_2 \\|_1} \\right]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This ratio (output distance / input distance) is maximized during generator training — the generator is rewarded for producing diverse outputs from diverse latent codes. It is a particularly clean solution for conditional translation tasks like Pix2Pix where output diversity is desirable."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def mode_seeking_loss(G, condition, z_dim=8, device='cuda'):\n    \"\"\"\n    Mode-seeking regularization: reward output diversity proportional to z diversity.\n    For conditional generators G(condition, z).\n    \"\"\"\n    B = condition.size(0)\n    z1 = torch.randn(B, z_dim, device=device)\n    z2 = torch.randn(B, z_dim, device=device)\n\n    out1 = G(condition, z1)  # (B, C, H, W)\n    out2 = G(condition, z2)\n\n    # Flatten to pixel vectors\n    out1_flat = out1.view(B, -1)\n    out2_flat = out2.view(B, -1)\n    z1_flat   = z1.view(B, -1)\n    z2_flat   = z2.view(B, -1)\n\n    # L1 distances\n    img_dist = (out1_flat - out2_flat).abs().sum(dim=1)  # (B,)\n    z_dist   = (z1_flat   - z2_flat).abs().sum(dim=1)    # (B,)\n\n    # Maximize ratio: minimize negative ratio\n    ratio = img_dist / (z_dist + 1e-8)\n    return -ratio.mean()  # minimize this term to maximize diversity"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "PacGAN: Packing Samples" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PacGAN (Lin et al. 2018) provides a theoretically grounded fix: instead of showing the discriminator one sample at a time, show it m samples at once (\"packed\"). The discriminator must determine whether a set of m samples comes from the real distribution or from the generator — a fake set in which all m samples are identical is trivially detected. Packing is implemented by simply concatenating m samples along the channel dimension:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def pack_samples(x, pack_size=2):\n    \"\"\"\n    Pack pack_size samples into one discriminator input by concatenation.\n    x: (B * pack_size, C, H, W)\n    Returns: (B, C * pack_size, H, W)\n    \"\"\"\n    B_total, C, H, W = x.shape\n    assert B_total % pack_size == 0, \"Batch size must be divisible by pack_size\"\n    B = B_total // pack_size\n    return x.view(B, pack_size * C, H, W)\n\n\n# Usage in training loop:\n# Generate 2*B fakes, pack them into B pairs before feeding to D\n# D's first conv layer must accept C * pack_size input channels\nclass PacDiscriminator(nn.Module):\n    def __init__(self, in_channels=3, pack_size=2, ndf=64):\n        super().__init__()\n        self.pack_size = pack_size\n        self.net = nn.Sequential(\n            nn.Conv2d(in_channels * pack_size, ndf, 4, 2, 1),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(ndf, ndf*2, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(ndf*2),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(ndf*2, ndf*4, 4, 2, 1, bias=False),\n            nn.BatchNorm2d(ndf*4),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(ndf*4, 1, 4, 2, 1)\n        )\n\n    def forward(self, x):\n        # x: (B * pack_size, C, H, W) — pack before forwarding\n        packed = pack_samples(x, self.pack_size)  # (B, C*pack_size, H, W)\n        return self.net(packed)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Comparison of Mode Collapse Fixes" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Technique" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Core Idea" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Overhead" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best For" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Minibatch discrimination" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "D sees diversity statistics across batch" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "O(B²) memory" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Small-batch unconditional GANs" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Feature matching" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "G matches D feature statistics to real data" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low (one extra forward pass)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "General; combine with other losses" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Unrolled GANs" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "G trains against future D (K-step lookahead)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "K× D forward/backward per G step" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low-D problems, 2D distribution fitting" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Mode-seeking loss (MSGAN)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Penalise collapsed z→output mapping" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "2 extra forward passes per step" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Conditional image-to-image translation" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "PacGAN" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "D classifies packed sets of m samples" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low (just reshape)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Provably reduces collapse; general use" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "WGAN / WGAN-GP" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Wasserstein distance naturally encourages coverage" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Gradient penalty computation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "General; best overall stability fix" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Replay Buffers and Historical Averaging" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Mode cycling — the oscillation between modes — can be addressed by showing the discriminator samples from earlier in training, not just the current generator. Historical averaging (Salimans et al. 2016) adds a penalty that prevents the parameters from changing too quickly:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{hist}} = \\| \\theta - \\frac{1}{t} \\sum_{i=1}^{t} \\theta_i \\|^2"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This keeps both G and D close to their time-averaged parameters, breaking the fast oscillation cycle. A simpler and more practical implementation is exponential moving average (EMA) of generator weights:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class EMAModel:\n    \"\"\"Exponential moving average of model parameters for stable evaluation.\"\"\"\n    def __init__(self, model, decay=0.999):\n        self.decay = decay\n        # Shadow copy — updated every step\n        self.shadow = {name: p.data.clone() for name, p in model.named_parameters()}\n\n    def update(self, model):\n        for name, p in model.named_parameters():\n            self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * p.data\n\n    def apply(self, model):\n        \"\"\"Apply shadow weights to model (for evaluation).\"\"\"\n        self._backup = {name: p.data.clone() for name, p in model.named_parameters()}\n        for name, p in model.named_parameters():\n            p.data.copy_(self.shadow[name])\n\n    def restore(self, model):\n        \"\"\"Restore original weights after evaluation.\"\"\"\n        for name, p in model.named_parameters():\n            p.data.copy_(self._backup[name])\n\n\n# Usage:\n# ema = EMAModel(G, decay=0.999)\n# for each training step:\n#   update G ...\n#   ema.update(G)\n# For evaluation:\n# ema.apply(G)\n# generate samples\n# ema.restore(G)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Complete Diagnostic Training Loop" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\ndef train_with_mode_collapse_safeguards(\n    G, D, dataloader,\n    n_epochs=100, lr=2e-4, z_dim=100,\n    lambda_fm=1.0, log_interval=5, device='cuda'\n):\n    G, D = G.to(device), D.to(device)\n    ema = EMAModel(G, decay=0.999)\n    opt_G = torch.optim.Adam(G.parameters(), lr=lr, betas=(0.5, 0.999))\n    opt_D = torch.optim.Adam(D.parameters(), lr=lr, betas=(0.5, 0.999))\n    criterion = nn.BCEWithLogitsLoss()\n\n    for epoch in range(n_epochs):\n        for real, _ in dataloader:\n            real = real.view(real.size(0), -1).to(device)\n            B   = real.size(0)\n            z   = torch.randn(B, z_dim, device=device)\n\n            # ---- Discriminator ----\n            with torch.no_grad():\n                fake = G(z)\n            loss_D = (\n                criterion(D(real), torch.ones(B, 1, device=device)) +\n                criterion(D(fake), torch.zeros(B, 1, device=device))\n            )\n            opt_D.zero_grad(); loss_D.backward(); opt_D.step()\n\n            # ---- Generator: adversarial + feature matching ----\n            fake = G(z)\n            loss_G_adv = criterion(D(fake), torch.ones(B, 1, device=device))\n            loss_G_fm  = feature_matching_loss(D, real.detach(), fake) * lambda_fm\n            loss_G     = loss_G_adv + loss_G_fm\n            opt_G.zero_grad(); loss_G.backward(); opt_G.step()\n            ema.update(G)\n\n        if (epoch + 1) % log_interval == 0:\n            # Evaluate diversity on EMA weights\n            ema.apply(G)\n            stats = detect_mode_collapse(G, z_dim, device=device)\n            ema.restore(G)\n            print(\n                f\"Epoch {epoch+1}: D={loss_D.item():.4f}, \"\n                f\"G_adv={loss_G_adv.item():.4f}, G_fm={loss_G_fm.item():.4f}, \"\n                f\"cosine_sim={stats['mean_pairwise_cosine_sim']:.4f}, \"\n                f\"pixel_var={stats['mean_pixel_variance']:.4f}\"\n            )\n\n    return G, D, ema"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Waiting until collapse is obvious before intervening.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Track pairwise diversity metrics every few epochs. Once mode collapse sets in deeply, the discriminator's gradient landscape has already changed to reinforce it — recovery from full collapse is unreliable. Catch it early." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Using a too-powerful discriminator early in training.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " If the discriminator becomes near-perfect before the generator improves, the generator's gradient vanishes (D(G(z)) → 0, gradient → 0). The generator then cannot improve, and training stalls in a degenerate state. Use progressive training or limit discriminator capacity early." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Using too large a learning rate for the generator.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " A high generator LR makes the generator jump aggressively to whatever mode the discriminator is weakest on, producing fast and severe collapse. Use TTUR: lr_G < lr_D." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Confusing mode collapse with underfitting.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " An undertrained generator produces noisy, low-quality outputs — mode collapse produces sharp but repetitive outputs. These need different fixes: collapse needs diversity pressure; underfitting needs more capacity or training time." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Default to WGAN-GP as the starting point.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " The Wasserstein distance naturally provides gradient everywhere and is less prone to mode collapse than JS-divergence-based GANs. Many mode collapse fixes become less necessary under the Wasserstein objective." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Add feature matching as a regularizer alongside adversarial loss.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " It is cheap, generally helpful, and directly targets the statistical coverage failure that causes mode collapse. λ_FM in [0.1, 1.0] typically." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Always maintain an EMA copy of the generator for evaluation.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " EMA weights are more stable and often more diverse than the instantaneous weights. Use EMA for FID computation and sample generation, training weights only for gradient steps." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Monitor D(real) and D(fake) separately.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Healthy training: both hover around 0.5 and slowly improve. Mode collapse warning: D(fake) drops sharply below 0.3 while D(real) stays at 0.9 — the discriminator has learned to reject the collapsed modes, but the generator hasn't responded yet." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "For conditional GANs, use mode-seeking loss alongside L1.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Conditional generators are especially prone to z-ignoring collapse (the latent code becomes unused). Mode-seeking loss directly prevents this with minimal overhead." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of mode collapse as the generator finding a Nash equilibrium exploit: it discovers that producing one very realistic output reliably fools the current discriminator, and since the GAN loss has no term rewarding coverage of the full distribution, this is locally optimal. The discriminator eventually closes this exploit, but the generator just finds the next one. The fundamental fix is to give the discriminator information about coverage — minibatch discrimination gives it cross-sample diversity information; feature matching makes the generator match the entire real distribution statistically; WGAN-GP's Lipschitz constraint makes the loss surface smooth so coverage is explicitly rewarded. Mode collapse is not a training hyperparameter problem — it is a loss function design problem."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Mode collapse = generator concentrating on a small subset of modes because fooling the current discriminator is locally optimal. The GAN loss does not directly penalize low coverage." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Minibatch discrimination exposes cross-batch diversity statistics to the discriminator. It can reject batches where all samples look identical, directly detecting collapse." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Feature matching changes the generator loss from \"fool D now\" to \"match real data feature statistics.\" This distributional objective naturally resists collapse because the full real dataset spans many modes." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Mode-seeking loss (MSGAN) specifically prevents z-ignoring collapse in conditional GANs: reward the generator for producing different outputs from different z values." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "EMA of generator weights stabilises both sample quality and diversity. Always use EMA for evaluation; it averages out the high-frequency oscillations that drive mode cycling." }]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "WGAN-GP is the best overall fix: the Wasserstein objective provides gradients everywhere and discourages collapse implicitly. Mode collapse is less frequent and less severe under WGAN-GP than standard GAN training." }]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

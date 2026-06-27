@@ -1,0 +1,276 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A Variational Autoencoder differs from a plain autoencoder in that both the encoder and decoder are probabilistic: the encoder defines a distribution over latent codes rather than producing a single point, and the decoder defines a distribution over outputs rather than producing a single reconstruction. This probabilistic framing gives the VAE a generative interpretation — the decoder is a proper generative model p_θ(x|z), and samples from the model require only drawing z from the prior and passing it through the decoder."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Generative Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A VAE defines a joint distribution over observed data x and latent variable z:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p_\\theta(x, z) = p_\\theta(x \\mid z)\\, p(z)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The prior p(z) is fixed, typically N(0, I). The conditional likelihood p_θ(x|z) is the probabilistic decoder — a neural network with parameters θ that takes z and returns the parameters of a distribution over x. Generating a new sample from the model is then straightforward:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": { "start": 1 },
+        "content": [
+          { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sample z ~ p(z) = N(0, I)" }] }] },
+          { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Compute decoder parameters: μ_θ(z) = decoder_network(z)" }] }] },
+          { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sample x ~ p_θ(x|z), e.g. x ~ N(μ_θ(z), σ²I) or x ~ Bernoulli(σ(μ_θ(z)))" }] }] }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Probabilistic Encoder (Inference Network)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The true posterior p(z|x) = p(x|z)p(z)/p(x) is intractable because p(x) = ∫ p(x|z)p(z)dz requires integrating over all z. The encoder q_φ(z|x) is an approximate posterior — a neural network that takes x and outputs the parameters of a distribution over z, typically a diagonal Gaussian:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "q_\\phi(z \\mid x) = \\mathcal{N}(z;\\ \\mu_\\phi(x),\\ \\mathrm{diag}(\\sigma^2_\\phi(x)))"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The encoder parameters φ are trained jointly with the decoder parameters θ. At test time, encoding x produces the mean and variance of the approximate posterior, from which the latent code is sampled via the reparametrisation trick: z = μ_φ(x) + σ_φ(x) ⊙ ε, ε ~ N(0, I)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Probabilistic Encoder Implementation" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom torch.distributions import Normal\n\nclass ProbabilisticEncoder(nn.Module):\n    \"\"\"\n    Encodes x into the parameters of q_φ(z|x) = N(μ_φ(x), diag(σ²_φ(x))).\n    Returns a torch.distributions.Normal object for clean downstream use.\n    \"\"\"\n    def __init__(self, x_dim, hidden_dim, z_dim):\n        super().__init__()\n        self.backbone     = nn.Sequential(\n            nn.Linear(x_dim, hidden_dim), nn.SiLU(),\n            nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),\n        )\n        self.mu_head      = nn.Linear(hidden_dim, z_dim)\n        self.log_var_head = nn.Linear(hidden_dim, z_dim)\n\n    def forward(self, x):\n        h       = self.backbone(x)\n        mu      = self.mu_head(h)\n        log_var = self.log_var_head(h).clamp(-10, 2)\n        sigma   = torch.exp(0.5 * log_var)         # σ from log σ²\n        return Normal(mu, sigma)                   # distribution object\n\n    def rsample(self, x):\n        \"\"\"Reparametrised z sample + distribution parameters.\"\"\"\n        dist = self(x)\n        z    = dist.rsample()                       # gradient flows through this\n        return z, dist.loc, 2 * torch.log(dist.scale)  # z, mu, log_var\n\n# Usage\nenc = ProbabilisticEncoder(784, 512, 20)\nx   = torch.randn(32, 784)\nq   = enc(x)             # Normal distribution\nz   = q.rsample()        # differentiable sample\nprint(q.loc.shape)       # (32, 20) — means\nprint(q.scale.shape)     # (32, 20) — standard deviations"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Probabilistic Decoder Implementation" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class ProbabilisticDecoder(nn.Module):\n    \"\"\"\n    Decodes z into the parameters of p_θ(x|z).\n    For binary data: returns Bernoulli logits.\n    For continuous data: returns Gaussian mean (with fixed σ²=1).\n    \"\"\"\n    def __init__(self, z_dim, hidden_dim, x_dim, output='bernoulli'):\n        super().__init__()\n        self.output = output\n        self.net = nn.Sequential(\n            nn.Linear(z_dim, hidden_dim), nn.SiLU(),\n            nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),\n            nn.Linear(hidden_dim, x_dim),     # no final activation — return raw logits/mean\n        )\n\n    def forward(self, z):\n        return self.net(z)     # logits (Bernoulli) or mean (Gaussian)\n\n    def log_prob(self, z, x):\n        \"\"\"log p_θ(x|z) — used in ELBO computation.\"\"\"\n        out = self(z)\n        if self.output == 'bernoulli':\n            from torch.distributions import Bernoulli\n            return Bernoulli(logits=out).log_prob(x).sum(dim=-1)  # (batch,)\n        else:\n            from torch.distributions import Normal\n            return Normal(out, torch.ones_like(out)).log_prob(x).sum(dim=-1)\n\n# Usage\ndec = ProbabilisticDecoder(z_dim=20, hidden_dim=512, x_dim=784, output='bernoulli')\nz   = torch.randn(32, 20)\nx   = torch.randint(0, 2, (32, 784)).float()\nlog_pxz = dec.log_prob(z, x)   # (32,) — per-sample log-likelihood\nprint(log_pxz.shape, log_pxz.mean().item())"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why Both Are Probabilistic" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Making the encoder probabilistic (outputting a distribution rather than a point) serves two purposes. First, it enables the reparametrisation trick so gradients flow through the latent sample during training. Second, the distribution width σ_φ(x) communicates uncertainty: if the encoder is confident about x's latent code, σ is small; if x is ambiguous, σ is large and the sampled z explores more of the space."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Making the decoder probabilistic enables the reconstruction loss to be interpreted as log-likelihood: maximising E_q[log p_θ(x|z)] is equivalent to maximising the average probability the decoder assigns to the true x. This is more principled than minimising an arbitrary distance metric."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Putting It All Together: One Training Step" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\nimport torch.nn.functional as F\n\nclass VAE(nn.Module):\n    def __init__(self, x_dim=784, h_dim=512, z_dim=20):\n        super().__init__()\n        self.encoder = ProbabilisticEncoder(x_dim, h_dim, z_dim)\n        self.decoder = ProbabilisticDecoder(z_dim, h_dim, x_dim, output='bernoulli')\n\n    def forward(self, x):\n        # Encode: q_φ(z|x)\n        q = self.encoder(x)\n        # Sample z via reparametrisation trick\n        z = q.rsample()     # z = μ + σ * ε, ε ~ N(0,I)\n        # Decode: log p_θ(x|z)\n        log_pxz = self.decoder.log_prob(z, x)           # (batch,)\n        # KL: closed form KL(q_φ(z|x) || p(z)) for diagonal Gaussian vs N(0,I)\n        mu, sigma = q.loc, q.scale\n        log_var   = 2 * torch.log(sigma)\n        kl        = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=1)  # (batch,)\n        # ELBO: maximize E_q[log p(x|z)] - KL\n        elbo = (log_pxz - kl).mean()\n        return -elbo    # minimise negative ELBO\n\nvae   = VAE()\noptim = torch.optim.Adam(vae.parameters(), lr=1e-3)\nx     = torch.randint(0, 2, (64, 784)).float()\n\nloss = vae(x)\nloss.backward()    # stochastic backprop through reparametrised z\noptim.step()\nprint(f\"Negative ELBO: {loss.item():.2f}\")"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Deterministic vs Probabilistic: Side-by-Side" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Property" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Plain autoencoder" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "VAE" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encoder output" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Single point z" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Distribution parameters (μ, σ²)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Decoder output" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reconstruction x̂" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Distribution parameters over x" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Loss" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "MSE / BCE" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ELBO = E_q[log p(x|z)] − KL" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Can sample new data" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No — latent space has holes" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Yes — sample z ~ N(0,I), decode" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Latent space structure" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Uncontrolled; may be discontinuous" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "KL regularised; smooth and continuous" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Using sample() instead of rsample():" }, { "type": "text", "text": " " }, { "type": "text", "marks": [{ "type": "code" }], "text": "dist.sample()" }, { "type": "text", "text": " returns a tensor with no gradient. The encoder's μ and σ receive no gradient signal. Always use " }, { "type": "text", "marks": [{ "type": "code" }], "text": "dist.rsample()" }, { "type": "text", "text": " in training." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Treating decoder output as a reconstruction directly:" }, { "type": "text", "text": " the decoder outputs distribution parameters (logits or means), not reconstructions. Apply sigmoid/softmax only when computing probabilities for visualisation, not inside the loss." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Not detaching the prior when computing KL:" }, { "type": "text", "text": " the prior p(z) = N(0,I) has no parameters; gradients should never flow into it. The closed-form KL formula handles this automatically without needing to construct a distribution object." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of the encoder as a witness describing a crime scene: instead of giving one definitive answer, it gives a range of possibilities with associated confidence (a distribution). The decoder is the forensic artist who reconstructs the scene from that description. The VAE trains both to communicate efficiently: the witness learns to give informative descriptions, and the artist learns to produce accurate reconstructions from them."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "The VAE encoder q_φ(z|x) is a probabilistic approximate posterior that outputs distribution parameters — not a single latent code." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "The VAE decoder p_θ(x|z) is the generative model; its log-probability of the input forms the reconstruction term of the ELBO." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "The reparametrisation trick (rsample) is what makes the stochastic encoder differentiable — always use it over sample() during training." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Both components are trained jointly via the ELBO: reconstruction pushes both to preserve information; the KL term regularises the encoder toward the prior." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "At generation time only the decoder is needed: sample z ~ N(0,I) and decode. The encoder is only used for inference (encoding real inputs to their latent distributions)." }] }]
+          }
+        ]
+      }
+    ]
+  }
+}

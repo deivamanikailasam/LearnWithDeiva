@@ -1,0 +1,362 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PixelRNN (van den Oord et al., 2016) generates images pixel by pixel, left-to-right and top-to-bottom, treating image generation as a sequence modelling problem. Each pixel's RGB values are predicted conditioned on all previously generated pixels. By modelling "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "p(x) = ∏ᵢ p(xᵢ | x₁, ..., xᵢ₋₁)"
+          },
+          {
+            "type": "text",
+            "text": " exactly, PixelRNN provides tractable likelihood estimation and faithful sample generation — but pays for it with slow sequential sampling."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Autoregressive Factorization"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For an image "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "x"
+          },
+          {
+            "type": "text",
+            "text": " of size H×W with RGB channels, the joint probability is factored as a product of conditionals:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p(x) = \\prod_{i=1}^{N} p(x_i \\mid x_1, \\ldots, x_{i-1})"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "N = H × W"
+          },
+          {
+            "type": "text",
+            "text": " and pixels are ordered in raster scan order. Each "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "x_i"
+          },
+          {
+            "type": "text",
+            "text": " represents a full RGB triplet; the channels within each pixel are also factored:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p(x_i) = p(R_i)\\, p(G_i \\mid R_i)\\, p(B_i \\mid R_i, G_i)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each colour value is treated as a discrete variable in {0, ..., 255}, and the model outputs a 256-way softmax. The training objective is the cross-entropy loss:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "-\\log p(x) = -\\sum_{i=1}^{N} \\log p(x_i \\mid x_{<i})"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Masked Convolution Input Layer"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Before the recurrent layers, a masked convolution ensures the receptive field respects the autoregressive order. Type A masks exclude the current pixel; Type B masks include it (for subsequent layers that can condition on the current pixel's previous channels)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\nclass MaskedConv2d(nn.Conv2d):\n    \"\"\"\n    Masked convolution for autoregressive image models.\n    Type A: excludes current pixel (used as first layer — must not see x_i itself).\n    Type B: includes current pixel (used in subsequent layers — can condition on\n             earlier channels of x_i after the first layer has already encoded them).\n    \"\"\"\n\n    def __init__(self, mask_type: str, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n        assert mask_type in ('A', 'B'), \"mask_type must be 'A' or 'B'\"\n        self.register_buffer('mask', torch.zeros_like(self.weight))\n        self._build_mask(mask_type)\n\n    def _build_mask(self, mask_type: str):\n        kH, kW = self.weight.shape[2], self.weight.shape[3]\n        # Allow all rows above the center\n        self.mask[:, :, :kH // 2, :] = 1\n        # Center row: allow all columns to the left of center\n        self.mask[:, :, kH // 2, :kW // 2] = 1\n        # Center pixel itself:\n        if mask_type == 'B':\n            self.mask[:, :, kH // 2, kW // 2] = 1  # include current pixel\n        # Below center: remain 0 (future pixels masked out)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        self.weight.data *= self.mask   # zero out future connections\n        return super().forward(x)\n\n\n# Example:\n# First layer (Type A): cannot peek at current pixel\nconv_a = MaskedConv2d('A', in_channels=3, out_channels=128, kernel_size=7, padding=3)\n# Subsequent layers (Type B): can use current pixel's earlier channels\nconv_b = MaskedConv2d('B', in_channels=128, out_channels=128, kernel_size=3, padding=1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Row LSTM"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Row LSTM processes the image one row at a time, left-to-right. Each row's hidden state is passed as the initial state to the next row's LSTM. A 1×k input-to-state convolution (masked, Type B) covers the current position's local context; the state-to-state transition uses a 1×k convolution to capture the previous row's influence. This is computationally efficient because all positions in a row can be processed in parallel."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class RowLSTM(nn.Module):\n    \"\"\"\n    Row LSTM layer: processes image row by row.\n    For each row, a 1D LSTM operates left-to-right.\n    The input-to-state convolution uses a 1×k masked kernel.\n    \"\"\"\n\n    def __init__(self, in_ch: int, h_ch: int, kernel_size: int = 3):\n        super().__init__()\n        pad = kernel_size // 2\n        # Input-to-state: 1×k conv (masked, sees only current and left positions)\n        self.i2s = MaskedConv2d(\n            'B', in_ch, 4 * h_ch, kernel_size=(1, kernel_size), padding=(0, pad)\n        )\n        # State-to-state: 1×k conv on previous row's hidden state\n        self.s2s = nn.Conv2d(h_ch, 4 * h_ch, kernel_size=(1, kernel_size), padding=(0, pad))\n        self.h_ch = h_ch\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [B, C, H, W]\n        B, C, H, W = x.shape\n        h = torch.zeros(B, self.h_ch, 1, W, device=x.device)\n        c = torch.zeros(B, self.h_ch, 1, W, device=x.device)\n        outputs = []\n\n        for row in range(H):\n            x_row = x[:, :, row:row+1, :]    # [B, C, 1, W]\n\n            # Input gates from current row\n            i2s_out = self.i2s(x_row)         # [B, 4h, 1, W]\n            # State gates from previous row hidden state\n            s2s_out = self.s2s(h)             # [B, 4h, 1, W]\n            combined = i2s_out + s2s_out      # [B, 4h, 1, W]\n\n            # LSTM gates\n            i, f, g, o = combined.chunk(4, dim=1)\n            i = torch.sigmoid(i)\n            f = torch.sigmoid(f)\n            g = torch.tanh(g)\n            o = torch.sigmoid(o)\n\n            c = f * c + i * g\n            h = o * torch.tanh(c)\n            outputs.append(h)  # [B, h_ch, 1, W]\n\n        return torch.cat(outputs, dim=2)  # [B, h_ch, H, W]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Diagonal BiLSTM"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Row LSTM has a limited receptive field — it sees the current row left of the current position and all previous rows only through one step of LSTM. The Diagonal BiLSTM (also from van den Oord et al.) skews the image by shifting each row to the right, making all prior pixels accessible in a single pass. After skewing, a column-wise LSTM processes each column independently in parallel, then the output is unskewed. This gives each position access to a triangular receptive field covering all prior pixels."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def skew(x: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Skew the image to align diagonal stripes as columns.\n    Each row i is shifted right by i positions.\n    \"\"\"\n    B, C, H, W = x.shape\n    # Pad with zeros on the left, shift each row\n    rows = []\n    for i in range(H):\n        pad = F.pad(x[:, :, i, :], (i, H - i - 1))  # pad left with i zeros\n        rows.append(pad.unsqueeze(2))\n    return torch.cat(rows, dim=2)  # [B, C, H, W+H-1]\n\n\ndef unskew(x: torch.Tensor, original_W: int) -> torch.Tensor:\n    \"\"\"Reverse the skewing operation to restore original spatial layout.\"\"\"\n    B, C, H, _ = x.shape\n    rows = []\n    for i in range(H):\n        rows.append(x[:, :, i, i:i + original_W].unsqueeze(2))\n    return torch.cat(rows, dim=2)  # [B, C, H, original_W]\n\n\nclass DiagonalBiLSTM(nn.Module):\n    \"\"\"\n    Diagonal BiLSTM: skew + column LSTM (two directions) + unskew.\n    Captures a full triangular context for each pixel.\n    \"\"\"\n    def __init__(self, in_ch: int, h_ch: int):\n        super().__init__()\n        # Simple column 1D LSTM (applied column-by-column after skewing)\n        self.lstm_fwd = nn.LSTM(in_ch, h_ch, batch_first=True)\n        self.lstm_bwd = nn.LSTM(in_ch, h_ch, batch_first=True)\n        self.out_proj = nn.Linear(h_ch * 2, in_ch)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        B, C, H, W = x.shape\n        x_skewed = skew(x)       # [B, C, H, W+H-1]\n        _, _, _, W_skew = x_skewed.shape\n\n        # Process each column independently as a temporal sequence\n        x_cols = x_skewed.permute(0, 3, 2, 1)   # [B, W_skew, H, C]\n        x_cols = x_cols.reshape(B * W_skew, H, C)\n        h_fwd, _ = self.lstm_fwd(x_cols)         # [B*W_skew, H, h_ch]\n        h_bwd, _ = self.lstm_bwd(x_cols.flip(1)) # process reversed\n        h_bwd = h_bwd.flip(1)\n\n        h = torch.cat([h_fwd, h_bwd], dim=-1)    # [B*W_skew, H, 2*h_ch]\n        h = self.out_proj(h)                       # [B*W_skew, H, C]\n        h = h.view(B, W_skew, H, C).permute(0, 3, 2, 1)  # [B, C, H, W_skew]\n        return unskew(h, W)  # [B, C, H, W]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Output and Training"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The final layer maps hidden states to a 256×3 logit vector per pixel position (3 channels, 256 classes each). To handle the RGB channel ordering dependency, channels are either modelled jointly (with the full 256³ joint distribution, infeasible) or factored as "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "p(R), p(G|R), p(B|R,G)"
+          },
+          {
+            "type": "text",
+            "text": " using masked channel convolutions."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class PixelRNN(nn.Module):\n    \"\"\"Simplified PixelRNN with Row LSTM layers.\"\"\"\n\n    def __init__(\n        self,\n        in_ch: int = 3,\n        h_ch: int = 128,\n        n_layers: int = 4,\n        n_classes: int = 256,\n    ):\n        super().__init__()\n        # Input: Type A masked conv (7×7), projects to h_ch features\n        self.input_conv = MaskedConv2d('A', in_ch, h_ch, kernel_size=7, padding=3)\n        # Stack of Row LSTM layers\n        self.lstm_layers = nn.ModuleList([\n            RowLSTM(h_ch, h_ch) for _ in range(n_layers)\n        ])\n        # Residual connections between LSTM layers via 1×1 skip convs\n        self.skip_convs = nn.ModuleList([\n            nn.Conv2d(h_ch, h_ch, 1) for _ in range(n_layers)\n        ])\n        # Output: two ReLU + 1×1 conv projections then 256-way softmax per channel\n        self.out1 = nn.Sequential(\n            nn.ReLU(),\n            nn.Conv2d(h_ch, h_ch, 1),\n        )\n        self.out2 = nn.Sequential(\n            nn.ReLU(),\n            nn.Conv2d(h_ch, in_ch * n_classes, 1),  # [B, 3*256, H, W]\n        )\n        self.n_classes = n_classes\n        self.in_ch = in_ch\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [B, 3, H, W] in {0,...,255} or normalised\n        B, C, H, W = x.shape\n        h = self.input_conv(x)             # [B, h_ch, H, W]\n        for lstm, skip in zip(self.lstm_layers, self.skip_convs):\n            h = h + skip(lstm(h))          # residual connection\n        logits = self.out2(self.out1(h))   # [B, 3*256, H, W]\n        return logits.view(B, C, self.n_classes, H, W)  # [B, 3, 256, H, W]\n\n\ndef pixelrnn_loss(\n    model: PixelRNN,\n    x: torch.Tensor,   # [B, 3, H, W] long tensor with values in {0,...,255}\n) -> torch.Tensor:\n    logits = model(x.float() / 127.5 - 1.0)  # [B, 3, 256, H, W]\n    # Cross-entropy per pixel per channel\n    B, C, K, H, W = logits.shape\n    logits = logits.permute(0, 1, 3, 4, 2).reshape(-1, K)  # [B*C*H*W, 256]\n    targets = x.permute(0, 1, 2, 3).reshape(-1)             # [B*C*H*W]\n    return F.cross_entropy(logits, targets.long())"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Sampling"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sampling from PixelRNN is inherently sequential — each pixel must be generated before the next can be computed. For a 32×32 image, sampling requires 32×32 = 1024 forward passes. For 256×256, it is 65,536 passes. This makes PixelRNN impractical for large-image generation, which is why PixelCNN (which replaces LSTM layers with masked convolutions and can partially parallelise) became more popular in practice."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def sample_pixelrnn(\n    model: PixelRNN,\n    n_samples: int = 4,\n    H: int = 32,\n    W: int = 32,\n    device: torch.device = torch.device('cpu'),\n    temperature: float = 1.0,\n) -> torch.Tensor:\n    \"\"\"\n    Sequential sampling: generate one pixel at a time in raster order.\n    Returns [n_samples, 3, H, W] uint8 tensor.\n    \"\"\"\n    x = torch.zeros(n_samples, 3, H, W, device=device, dtype=torch.long)\n    model.eval()\n\n    with torch.no_grad():\n        for row in range(H):\n            for col in range(W):\n                # Full forward pass using all pixels generated so far\n                x_float = x.float() / 127.5 - 1.0\n                logits = model(x_float)  # [B, 3, 256, H, W]\n\n                # Sample each channel\n                for ch in range(3):\n                    logit_pixel = logits[:, ch, :, row, col]  # [B, 256]\n                    if temperature != 1.0:\n                        logit_pixel = logit_pixel / temperature\n                    probs = torch.softmax(logit_pixel, dim=-1)\n                    pixel_val = torch.multinomial(probs, 1).squeeze(-1)  # [B]\n                    x[:, ch, row, col] = pixel_val\n\n    return x.byte()  # [n_samples, 3, H, W] values in {0,...,255}\n\n\n# Note: sampling 32×32 requires 1024 model forward passes.\n# For 64×64 it is 4096 passes — prohibitively slow on large images.\n# This motivated PixelCNN and later parallel autoregressive models."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "PixelRNN Variants and Limitations"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Variant"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Architecture"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Context size"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training parallelism"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Row LSTM"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Row-by-row LSTM"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Triangular, limited left-right in rows"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Parallel within rows"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Diagonal BiLSTM"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Skewed column LSTM"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Full triangular context"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Parallel over columns per diagonal"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "PixelCNN (next topic)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Masked convolutions"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Kernel-limited, no long-range"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fully parallel (all pixels)"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Mental Model"}]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "PixelRNN is a painter who reveals the canvas one pixel at a time, left to right, top to bottom, deciding each colour by looking at everything already painted. The Row LSTM is like reading the painting left-to-right across the current row while remembering the rows above; the Diagonal BiLSTM is a smarter painter who tilts the canvas so the entire diagonal of prior pixels arrives in a single horizontal sweep. The cost is that you cannot un-paint — generation must happen in strict order, making sampling slow but training fast (all pixels are known during training)."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "PixelRNN factorizes p(x) into a product of conditionals in raster order, providing an exact tractable likelihood and avoiding the need for a latent variable."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Type A masked convolutions exclude the current pixel; Type B include it — together they enforce the autoregressive dependency ordering."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "The Row LSTM processes images row-by-row with an LSTM, parallelisable within each row but sequential across rows; the Diagonal BiLSTM gives each position access to the full triangular prior context."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "RGB channels are factored within each pixel: p(R), p(G|R), p(B|R,G), using masked channel convolutions in the output head."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Training is fully parallel (all target pixels known), but sampling requires H×W sequential forward passes — the fundamental bottleneck of autoregressive image generation."}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,357 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Rectified Flow (Liu et al., 2022) is a generative model that learns to transport noise samples to data samples along straight-line paths. Unlike diffusion models that denoise along curved stochastic trajectories requiring hundreds of steps, Rectified Flow trains a velocity field that ideally moves samples in straight lines — enabling 1-step or few-step generation by the reflow procedure. It underlies Stable Diffusion 3 and FLUX, making it one of the most practically important flow-based methods today."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Core Idea: Linear Interpolation ODE"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Given a sample from data x₁ ~ q (data distribution) and noise x₀ ~ p (e.g. Gaussian), define the linear interpolant:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "X_t = (1-t)\\,x_0 + t\\,x_1, \\quad t \\in [0,1]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The velocity along this path is constant: dXₜ/dt = x₁ − x₀. A neural network v_θ(x, t) is trained to regress this velocity:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{RF}} = \\mathbb{E}_{t \\sim U[0,1],\\; x_0 \\sim p,\\; x_1 \\sim q}\\bigl\\|v_\\theta(X_t, t) - (x_1 - x_0)\\bigr\\|^2"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At inference, starting from x₀ ~ p, the ODE dx/dt = v_θ(x, t) is integrated from t=0 to t=1 using an Euler solver. If v_θ were perfect, the trajectories would be perfectly straight and a single Euler step would suffice. In practice, v_θ models the conditional expectation over paired (x₀, x₁) given Xₜ, causing slight curvature that requires a few steps."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\ndef rectified_flow_loss(\n    model: nn.Module,            # v_theta(x_t, t) -> velocity\n    x1: torch.Tensor,            # (B, C, H, W) data samples\n) -> torch.Tensor:\n    \"\"\"\n    Rectified Flow training objective.\n    Sample random t in [0,1], interpolate, regress velocity x1 - x0.\n    \"\"\"\n    B = x1.size(0)\n    x0 = torch.randn_like(x1)                           # noise samples\n    t  = torch.rand(B, device=x1.device)                # t ~ U[0,1]\n    t4 = t.view(B, 1, 1, 1)                             # broadcast\n    xt = (1 - t4) * x0 + t4 * x1                       # linear interpolant\n    target_velocity = x1 - x0                           # constant velocity\n\n    pred_velocity = model(xt, t)                         # (B, C, H, W)\n    loss = F.mse_loss(pred_velocity, target_velocity)\n    return loss\n\n\n@torch.no_grad()\ndef euler_sample(\n    model: nn.Module,\n    shape: tuple,\n    n_steps: int = 50,\n    device: torch.device = torch.device(\"cpu\"),\n) -> torch.Tensor:\n    \"\"\"\n    Euler ODE integration from t=0 (noise) to t=1 (data).\n    \"\"\"\n    x = torch.randn(*shape, device=device)\n    dt = 1.0 / n_steps\n    for i in range(n_steps):\n        t = torch.full((shape[0],), i / n_steps, device=device)\n        v = model(x, t)\n        x = x + dt * v\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why Straight Paths Matter"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The number of Euler steps needed to accurately integrate an ODE grows with the curvature of the trajectories. Diffusion models (DDPM, score-based SDEs) follow curved paths in pixel/latent space because the marginals pₜ are defined by a non-linear SDE — even DDIM, which straightens the path somewhat, still requires 10–100 steps for high-quality samples. Rectified Flow's straight paths have zero curvature in the ideal case, giving Euler O(1) theoretical step complexity."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Practically, the learned velocity v_θ is the conditional expectation E[x₁ − x₀ | Xₜ = xₜ], which averages over all pairs (x₀, x₁) that are consistent with the observed xₜ. This averaging introduces curvature proportional to the diversity of trajectories passing through xₜ. Reflow reduces this by making the coupling between x₀ and x₁ more deterministic."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Reflow: Straightening Trajectories"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reflow is the key procedure that makes Rectified Flow converge toward straight-line generation. After training an initial model RF₁ on random (x₀, x₁) pairs, reflow creates a new coupled dataset by generating x₁' = RF₁(x₀) from each noise sample x₀. The second model RF₂ is then trained on (x₀, x₁') pairs — which are far more deterministically linked, reducing trajectory crossing and curvature. This can be repeated k times (k-Rectified Flow)."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{RF}_k:\\quad (z_0, z_1) \\leftarrow \\text{RF}_{k-1}(z_0),\\quad \\mathcal{L}_k = \\mathbb{E}\\|v_\\theta(Z_t, t) - (z_1 - z_0)\\|^2"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def reflow_dataset(\n    model: nn.Module,\n    n_samples: int,\n    shape: tuple,\n    n_steps: int = 100,\n    device: torch.device = torch.device(\"cpu\"),\n    batch_size: int = 64,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    \"\"\"\n    Generate (x0, x1_prime) pairs using the current model for reflow training.\n    x0 are fresh noise samples; x1_prime = RF(x0) are model-generated images.\n    \"\"\"\n    model.eval()\n    all_x0, all_x1 = [], []\n\n    with torch.no_grad():\n        for start in range(0, n_samples, batch_size):\n            b = min(batch_size, n_samples - start)\n            x0 = torch.randn(b, *shape[1:], device=device)\n            x1_prime = euler_sample_from_noise(model, x0, n_steps=n_steps)\n            all_x0.append(x0.cpu())\n            all_x1.append(x1_prime.cpu())\n\n    return torch.cat(all_x0), torch.cat(all_x1)\n\n\n@torch.no_grad()\ndef euler_sample_from_noise(\n    model: nn.Module,\n    x0: torch.Tensor,      # (B, C, H, W) starting noise\n    n_steps: int = 100,\n) -> torch.Tensor:\n    x = x0.clone()\n    dt = 1.0 / n_steps\n    B = x.size(0)\n    device = x.device\n    for i in range(n_steps):\n        t = torch.full((B,), i / n_steps, device=device)\n        x = x + dt * model(x, t)\n    return x\n\n\ndef reflow_loss(\n    model: nn.Module,\n    x0: torch.Tensor,    # (B, C, H, W) noise (fixed coupling)\n    x1: torch.Tensor,    # (B, C, H, W) matched data (from previous RF)\n) -> torch.Tensor:\n    \"\"\"Rectified Flow loss on reflow-coupled pairs.\"\"\"\n    B = x0.size(0)\n    t  = torch.rand(B, device=x0.device).view(B, 1, 1, 1)\n    xt = (1 - t) * x0 + t * x1\n    target = x1 - x0\n    pred = model(xt, t.squeeze())\n    return F.mse_loss(pred, target)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Distillation to 1-Step Generation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After k rounds of reflow, the velocity field is nearly constant — meaning a single Euler step xₜ + v_θ(xₜ, t)·Δt should closely reach x₁. The final step is distillation: train a student model to replicate the multi-step RF₂ output in a single step, using the same reflow-coupled pairs as supervision. Liu et al. demonstrate that 2-Rectified Flow + distillation achieves competitive FID with a single NFE on CIFAR-10 and image generation benchmarks."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def one_step_distillation_loss(\n    student: nn.Module,          # predicts x1 directly from x0\n    teacher_rf: nn.Module,       # multi-step RF teacher\n    x0: torch.Tensor,            # (B, C, H, W) noise\n    n_teacher_steps: int = 100,\n) -> torch.Tensor:\n    \"\"\"\n    Student learns to output teacher's full ODE trajectory in one step.\n    Teacher generates x1' = RF(x0); student regresses x1' directly.\n    \"\"\"\n    with torch.no_grad():\n        x1_prime = euler_sample_from_noise(teacher_rf, x0, n_steps=n_teacher_steps)\n\n    # Student takes x0 at t=0 and should output x1' directly\n    t_zero = torch.zeros(x0.size(0), device=x0.device)\n    pred_x1 = x0 + student(x0, t_zero)   # one Euler step from t=0 to t=1\n    return F.mse_loss(pred_x1, x1_prime)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Rectified Flow vs Diffusion Models"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Property"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Diffusion (DDPM/EDM)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Rectified Flow"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Forward process"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gaussian SDE (nonlinear marginals)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Linear interpolation (affine)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training target"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Score ∇ log p_t(x) or ε prediction"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Velocity x₁ − x₀ (constant)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "ODE path"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Curved (probability flow ODE)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Straight (linear interpolant)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Steps for quality"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "20–100 (DDIM); 5–10 (DPM-Solver)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1–10 (after reflow)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1-step possible?"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Via distillation (LCM, ADD)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Via reflow + distillation"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Production examples"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DALL-E 2, SDXL"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "SD3, FLUX.1"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Conditional Generation with CFG"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Classifier-free guidance (CFG) applies to Rectified Flow the same way as diffusion: train the velocity model with conditioning c (text embedding, class label) and randomly drop c with probability p_uncond to learn an unconditional model simultaneously. At inference, interpolate between the conditional and unconditional velocities:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\tilde{v}(x_t, t, c) = v_\\theta(x_t, t, \\emptyset) + w\\bigl(v_\\theta(x_t, t, c) - v_\\theta(x_t, t, \\emptyset)\\bigr)"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def cfg_euler_sample(\n    model: nn.Module,\n    x0: torch.Tensor,           # (B, C, H, W) starting noise\n    cond: torch.Tensor,         # (B, D) conditioning embeddings\n    guidance_scale: float = 7.5,\n    n_steps: int = 20,\n) -> torch.Tensor:\n    \"\"\"\n    Euler ODE with classifier-free guidance for Rectified Flow.\n    \"\"\"\n    x = x0.clone()\n    dt = 1.0 / n_steps\n    B = x.size(0)\n    device = x.device\n    uncond = torch.zeros_like(cond)   # null conditioning (zeros or learned embedding)\n\n    for i in range(n_steps):\n        t = torch.full((B,), i / n_steps, device=device)\n        # Double batch trick: conditional + unconditional in one forward pass\n        x_in   = torch.cat([x, x], dim=0)\n        t_in   = torch.cat([t, t], dim=0)\n        c_in   = torch.cat([cond, uncond], dim=0)\n        v_both = model(x_in, t_in, c_in)\n        v_cond, v_uncond = v_both.chunk(2, dim=0)\n        v_guided = v_uncond + guidance_scale * (v_cond - v_uncond)\n        x = x + dt * v_guided\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [{"type": "bold"}],
+                "text": "Mental model."
+              },
+              {
+                "type": "text",
+                "text": " Diffusion models generate images the way a painter adds detail through many passes of glazing, each layer built on the previous. Rectified Flow is more like throwing a ball directly at the target — ideally a straight-line path. The first throw (RF₁) is imprecise because there are many possible targets; reflow is practicing the throw by always aiming at where the ball actually landed, making the path increasingly direct. After enough practice, a single throw hits the target."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rectified Flow trains a velocity field v_θ to transport noise to data along straight-line interpolants Xₜ = (1−t)x₀ + t·x₁, with target velocity x₁ − x₀ (a constant)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Straight trajectories require fewer ODE integration steps than curved diffusion paths — the theoretical ideal is 1 Euler step if trajectories never cross."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reflow creates deterministic (x₀, x₁') couplings by running the current model to generate x₁' = RF(x₀), then training a new model on those pairs — iteratively reducing trajectory curvature."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "After reflow, the model can be distilled into a 1-step generator by training a student to replicate the teacher's multi-step output in a single Euler step."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CFG applies unchanged to Rectified Flow — double-batch the velocity model with conditional and null conditioning, then interpolate toward the conditional direction at inference."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stable Diffusion 3 and FLUX are production systems built on Rectified Flow, demonstrating that straight-path flow matching scales to billion-parameter text-to-image generation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

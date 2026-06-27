@@ -1,0 +1,204 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Classical vs Amortised Variational Inference" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In classical variational inference (VI), the variational parameters φₓ are optimised independently for each data point x. Given a dataset of N observations, this requires N separate optimisation problems — one per point — which does not scale to large datasets."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Amortised inference eliminates this per-point cost by training a single neural network — the inference network or encoder — that maps any input x directly to the variational parameters of q_φ(z|x):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "(\\mu_\\phi(x),\\, \\sigma^2_\\phi(x)) = f_\\phi(x) \\quad \\text{(one forward pass, any } x\\text{)}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The cost of training the encoder is paid once, up front. At test time, encoding a new x costs a single forward pass — no iterative optimisation. This is the property that makes VAEs practical for large-scale generation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Amortisation Gap" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A shared encoder cannot perfectly represent every individual posterior — it must generalise. The resulting loss in ELBO tightness is the amortisation gap:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\underbrace{\\log p_\\theta(x)}_{\\text{true log-marginal}} - \\underbrace{\\mathcal{L}(\\theta, \\phi; x)}_{\\text{ELBO}} = \\underbrace{\\mathrm{KL}(q_{\\phi^*}(z|x) \\| p(z|x))}_{\\text{VI gap}} + \\underbrace{\\mathrm{KL}(q_{\\phi^*} \\| q_\\phi)}_{\\text{amortisation gap}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first term (VI gap) is the approximation error from the variational family. The second term (amortisation gap) is the additional loss from using a shared encoder rather than per-point optimised parameters φ*ₓ. A more expressive encoder reduces the amortisation gap."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Semi-Amortised Inference" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Semi-amortised inference bridges the two extremes: the encoder provides an initial estimate, which is then refined with a few gradient steps on the ELBO for each specific x. This recovers some of the tightness of per-sample VI at a fraction of the full classical cost."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\ndef semi_amortised_encode(x, encoder, decoder, n_steps=5, lr=0.01):\n    \"\"\"\n    Initialise q(z|x) from encoder, then refine with n_steps gradient steps.\n    Returns the refined (mu, log_var) for this specific x.\n    \"\"\"\n    mu, log_var = encoder(x)\n    # Convert encoder outputs to leaf tensors we can optimise\n    mu_opt      = mu.detach().requires_grad_(True)\n    lv_opt      = log_var.detach().requires_grad_(True)\n    inner_optim = torch.optim.Adam([mu_opt, lv_opt], lr=lr)\n\n    for _ in range(n_steps):\n        eps = torch.randn_like(mu_opt)\n        z   = mu_opt + torch.exp(0.5 * lv_opt) * eps\n        log_p_xz = decoder.log_prob(z, x)         # log p(x|z)\n        kl        = -0.5 * (1 + lv_opt - mu_opt.pow(2) - lv_opt.exp()).sum(dim=1).mean()\n        elbo      = log_p_xz - kl\n        (-elbo).backward()                         # minimise negative ELBO\n        inner_optim.step()\n        inner_optim.zero_grad()\n\n    return mu_opt.detach(), lv_opt.detach()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Normalising Flows as the Variational Distribution" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The mean-field Gaussian encoder is a common choice, but it cannot capture correlations between latent dimensions. A normalising flow q_φ applies a sequence of invertible transformations to an initial Gaussian sample:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "z_K = f_K \\circ f_{K-1} \\circ \\cdots \\circ f_1(z_0), \\quad z_0 \\sim \\mathcal{N}(0, I)"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log q_K(z_K) = \\log q_0(z_0) - \\sum_{k=1}^{K} \\log \\left|\\det \\frac{\\partial f_k}{\\partial z_{k-1}}\\right|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because the flow is invertible and the log-determinant of the Jacobian can be computed, the ELBO is still tractable. The flow-augmented encoder can express multi-modal or correlated posteriors that a diagonal Gaussian cannot, reducing the VI gap at the cost of more computation per step."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Comparison: Inference Strategies" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Method" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Test-time cost" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ELBO quality" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Expressiveness" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Classical VI (per-sample)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Iterative optimisation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Tightest (family-limited)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Family-limited" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Amortised (encoder)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "One forward pass" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Amortisation gap" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encoder capacity" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Semi-amortised" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Pass + few grad steps" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reduced gap" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Encoder + refinement" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Flow-augmented encoder" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Pass + K flow steps" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reduced VI gap" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Arbitrary with enough flows" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Practical Encoder Design" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\nclass AmortisedEncoder(nn.Module):\n    \"\"\"\n    Inference network for a VAE. Takes x, returns (mu, log_var).\n    Architecture choice affects the amortisation gap:\n    - Too shallow → high gap (cannot model complex posteriors)\n    - Too deep / overfit → poor generalisation to new x\n    \"\"\"\n    def __init__(self, x_dim, hidden_dims, z_dim):\n        super().__init__()\n        layers = []\n        in_dim = x_dim\n        for h in hidden_dims:\n            layers += [nn.Linear(in_dim, h), nn.SiLU()]  # SiLU smoother than ReLU\n            in_dim = h\n        self.shared       = nn.Sequential(*layers)\n        self.mu_head      = nn.Linear(in_dim, z_dim)\n        self.log_var_head = nn.Linear(in_dim, z_dim)\n        # Clamp log_var to prevent numerical instability\n        self._log_var_min = -10.0\n        self._log_var_max = 2.0\n\n    def forward(self, x):\n        h       = self.shared(x)\n        mu      = self.mu_head(h)\n        log_var = self.log_var_head(h).clamp(self._log_var_min, self._log_var_max)\n        return mu, log_var\n\n# Example: MNIST encoder\nenc = AmortisedEncoder(x_dim=784, hidden_dims=[512, 256], z_dim=32)\nx   = torch.randn(64, 784)\nmu, lv = enc(x)\nprint(mu.shape, lv.shape)  # (64, 32), (64, 32)"
+          }
+        ]
+      }
+    ]
+  }
+}

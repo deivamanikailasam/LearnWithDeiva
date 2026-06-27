@@ -1,0 +1,777 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StyleGAN (Karras et al., NVIDIA 2018/2019) fundamentally rearchitected the GAN generator to give explicit, per-layer control over the style of generated images. Rather than feeding the noise vector z directly into the synthesis network as traditional GANs do, StyleGAN introduces a mapping network that transforms z into an intermediate latent w, then injects w at every layer of the synthesis network via Adaptive Instance Normalisation (AdaIN). This separation — noise determines spatial stochastic variation, w determines overall style at each scale — produces qualitatively better images and enables powerful editing operations like style mixing, truncation, and GAN inversion that are impossible with conventional GAN architectures."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why Standard GAN Generators Fall Short" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In a DCGAN-style generator, the noise vector z is fed as the sole input at the first layer. All style information — coarse structure (pose, identity), mid-level details (facial features, hair style), and fine details (skin texture, pores) — must be encoded in z and decoded throughout the network. This entangles different levels of abstraction: a single component of z might simultaneously control both the head pose and the hair texture, making it impossible to independently control these attributes. The generator's latent space is constrained to match the prior distribution p_z = N(0, I), which is not well-suited to representing complex, curved manifolds of natural images."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Mapping Network: Z → W" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StyleGAN's first innovation is a non-linear mapping network f: Z → W that transforms the input noise z ∈ Z = ℝ^512 into an intermediate latent w ∈ W = ℝ^512. The mapping network is an 8-layer fully connected network with leaky ReLU activations. Its purpose is disentanglement: because f is learned and not constrained to any specific distribution, the W space can map onto the natural geometry of the image manifold much better than Z can."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "w = f(z) = f_{8}(f_{7}(\\cdots f_{1}(z) \\cdots)), \\quad z \\sim \\mathcal{N}(0, I_{512})"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\nimport math\n\n\nclass EqualLinear(nn.Module):\n    \"\"\"\n    Linear layer with equalized learning rate (He initialisation at runtime).\n    Keeps weight magnitudes equal across layers during training.\n    \"\"\"\n    def __init__(self, in_dim: int, out_dim: int, lr_mul: float = 1.0, bias: bool = True):\n        super().__init__()\n        self.weight = nn.Parameter(torch.randn(out_dim, in_dim) / lr_mul)\n        self.bias = nn.Parameter(torch.zeros(out_dim)) if bias else None\n        self.scale = (1.0 / math.sqrt(in_dim)) * lr_mul\n        self.lr_mul = lr_mul\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return F.linear(x, self.weight * self.scale,\n                        self.bias * self.lr_mul if self.bias is not None else None)\n\n\nclass MappingNetwork(nn.Module):\n    \"\"\"\n    StyleGAN mapping network: 8-layer MLP with LeakyReLU.\n    Maps z (noise) -> w (intermediate latent).\n    \"\"\"\n    def __init__(self, z_dim: int = 512, w_dim: int = 512,\n                 num_layers: int = 8, lr_mul: float = 0.01):\n        super().__init__()\n        layers = []\n        in_dim = z_dim\n        for _ in range(num_layers):\n            layers.append(EqualLinear(in_dim, w_dim, lr_mul=lr_mul))\n            layers.append(nn.LeakyReLU(0.2))\n            in_dim = w_dim\n        self.net = nn.Sequential(*layers)\n\n    def forward(self, z: torch.Tensor) -> torch.Tensor:\n        # Normalise z to unit sphere before mapping\n        z_norm = F.normalize(z, p=2, dim=1)\n        return self.net(z_norm)  # (B, w_dim)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Synthesis Network: AdaIN + Noise Injection" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The synthesis network starts from a learned constant 4×4 tensor (not the noise z — z has already been consumed by the mapping network) and upsamples through a series of resolution-doubling blocks. At each block, two operations inject the style information:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "AdaIN (Adaptive Instance Normalisation)."
+                  },
+                  {
+                    "type": "text",
+                    "text": " After each convolution, the feature map is normalised per-channel with instance normalisation, then scaled and shifted by a learned affine transform of w. The affine transform A_i: ℝ^512 → ℝ^{2C_i} (mapping w to per-channel scale and bias) is different at each resolution. This allows w to control style at every level of the hierarchy: coarse styles at low resolution, fine styles at high resolution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Noise injection."
+                  },
+                  {
+                    "type": "text",
+                    "text": " A separate per-pixel random noise map B·ε (ε ~ N(0,I)) is added to the feature map after each convolution. The per-channel scale B is learned. This noise controls stochastic variation — hair strands, skin pores, freckles — at each scale independently. Because noise and w are separate inputs, stochastic fine details do not interfere with the global style."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class AdaIN(nn.Module):\n    \"\"\"Adaptive Instance Normalisation: w -> (scale, bias) per channel.\"\"\"\n    def __init__(self, in_channels: int, w_dim: int):\n        super().__init__()\n        self.norm = nn.InstanceNorm2d(in_channels, affine=False)\n        self.style = EqualLinear(w_dim, in_channels * 2)  # scale + bias\n        nn.init.ones_(self.style.weight)                   # init scale=1\n\n    def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:\n        style = self.style(w)                              # (B, 2C)\n        gamma, beta = style.chunk(2, dim=1)                # (B, C), (B, C)\n        gamma = gamma.unsqueeze(-1).unsqueeze(-1) + 1      # (B, C, 1, 1), +1 for init=1\n        beta = beta.unsqueeze(-1).unsqueeze(-1)\n        return gamma * self.norm(x) + beta\n\n\nclass NoiseInjection(nn.Module):\n    \"\"\"Per-pixel noise injection with learned per-channel scale B.\"\"\"\n    def __init__(self, channels: int):\n        super().__init__()\n        self.B = nn.Parameter(torch.zeros(1, channels, 1, 1))\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        B_noise, C, H, W = x.shape\n        noise = torch.randn(B_noise, 1, H, W, device=x.device)  # (B, 1, H, W)\n        return x + self.B * noise\n\n\nclass StyleBlock(nn.Module):\n    \"\"\"One StyleGAN synthesis block: upsample -> conv -> noise -> AdaIN.\"\"\"\n    def __init__(self, in_channels: int, out_channels: int, w_dim: int = 512):\n        super().__init__()\n        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)\n        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False)\n        self.noise1 = NoiseInjection(out_channels)\n        self.adain1 = AdaIN(out_channels, w_dim)\n        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1, bias=False)\n        self.noise2 = NoiseInjection(out_channels)\n        self.adain2 = AdaIN(out_channels, w_dim)\n        self.act = nn.LeakyReLU(0.2)\n\n    def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:\n        x = self.upsample(x)\n        x = self.act(self.adain1(self.noise1(self.conv1(x)), w))\n        x = self.act(self.adain2(self.noise2(self.conv2(x)), w))\n        return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The W Space and Its Properties" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The W space has important structural properties that make it more useful than Z for image editing:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Space" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Distribution" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Entanglement" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Editing" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Z" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "N(0, I) — spherical Gaussian" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High — features correlated across dimensions" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Hard — moving one dimension changes many features" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "W" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Learned — curved, matches image manifold" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Lower — mapping network disentangles factors" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Easier — linear directions correspond to attributes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "W+" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Different w per layer" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Very low — independent style per scale" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Most flexible — layer-specific attribute control" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The W+ space arises during GAN inversion: when reconstructing a real image, a single w doesn't have enough capacity, so different w vectors are used for each resolution block (18 vectors for a 1024×1024 generator with 18 synthesis layers). W+ allows near-perfect reconstruction of any real image, at the cost of some editability."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Style Mixing" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because w is injected independently at each synthesis layer, different w vectors can be used at different resolutions — mixing styles from two different latents. For example, using w₁ at resolutions 4×4–32×32 and w₂ at 64×64–1024×1024 produces images with the coarse structure (pose, face shape) of source 1 and the fine-detail style (texture, hair colour) of source 2:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class StyleGANGenerator(nn.Module):\n    def __init__(self, z_dim=512, w_dim=512, img_size=256, nc=3):\n        super().__init__()\n        self.mapping = MappingNetwork(z_dim, w_dim)\n        # Learned 4x4 constant input (no z goes to synthesis network)\n        self.const_input = nn.Parameter(torch.randn(1, 512, 4, 4))\n        # Resolution blocks: 4->8->16->32->64->128->256\n        channel_map = {4: 512, 8: 512, 16: 256, 32: 256, 64: 128, 128: 64, 256: 32}\n        resolutions = [4, 8, 16, 32, 64, 128, 256]\n        self.blocks = nn.ModuleList([\n            StyleBlock(channel_map[r], channel_map[r*2 if r<256 else r], w_dim)\n            for r in resolutions[:-1]\n        ])\n        self.to_rgb = nn.Conv2d(channel_map[img_size], nc, 1)\n\n    def forward(self, z1: torch.Tensor,\n                z2: torch.Tensor = None,\n                mix_layer: int = None) -> torch.Tensor:\n        w1 = self.mapping(z1)\n        w2 = self.mapping(z2) if z2 is not None else w1\n\n        x = self.const_input.expand(z1.size(0), -1, -1, -1)\n        for i, block in enumerate(self.blocks):\n            # Style mixing: use w2 after mix_layer\n            w = w2 if (mix_layer is not None and i >= mix_layer) else w1\n            x = block(x, w)\n\n        return torch.tanh(self.to_rgb(x))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Truncation Trick" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Not all regions of W are equally well-represented in the training data. The tails of the w distribution (extreme, unusual styles) are rare and the generator was trained on fewer examples there, so it generates lower-quality images from tail w vectors. The truncation trick pulls all w toward the mean latent w̄ = E[f(z)] by a factor ψ:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "w' = \\bar{w} + \\psi(w - \\bar{w}), \\qquad \\bar{w} = \\mathbb{E}_{z\\sim p_z}[f(z)]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ψ=1 is no truncation (full diversity, including lower-quality samples). ψ=0 generates the average face/scene (low diversity, highest quality). ψ∈[0.5, 0.7] is the typical sweet spot for maximising quality. ψ < 0 produces images that diverge from the average (exaggerated features, creative styles)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def compute_mean_w(mapping_network: MappingNetwork, n_samples: int = 4096,\n                   device = 'cuda') -> torch.Tensor:\n    \"\"\"Estimate the mean w by averaging many samples from the mapping network.\"\"\"\n    with torch.no_grad():\n        z = torch.randn(n_samples, 512, device=device)\n        w_samples = mapping_network(z)\n    return w_samples.mean(dim=0, keepdim=True)  # (1, w_dim)\n\n\ndef truncated_w(mapping_network, z, mean_w, psi=0.7):\n    w = mapping_network(z)\n    return mean_w + psi * (w - mean_w)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "StyleGAN2: Weight Demodulation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StyleGAN1's AdaIN normalises the feature map independently per channel, which can introduce characteristic \"water droplet\" or \"blob\" artefacts — the normalisation interacts with the convolutional weights in a way that causes local texture variance to leak into long-range feature correlations. StyleGAN2 (Karras et al. 2019) fixes this by replacing AdaIN with weight demodulation: instead of normalising the activations, it modulates (scales) the convolutional weights themselves, then demodulates (normalises) them to maintain unit expected activation magnitude."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The modulated weight for a convolutional filter is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "w'_{ijk} = s_i \\cdot w_{ijk}, \\qquad w''_{ijk} = \\frac{w'_{ijk}}{\\sqrt{\\sum_{i,k} w'^2_{ijk} + \\varepsilon}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where s_i is the per-input-channel scale from the affine transform of w, and the denominator normalises across the input channels and kernel positions. This is equivalent to AdaIN but applied to the weights rather than the activations, avoiding the normalisation artefacts."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class ModulatedConv2d(nn.Module):\n    \"\"\"\n    StyleGAN2 modulated convolution with weight demodulation.\n    Replaces AdaIN from StyleGAN1.\n    \"\"\"\n    def __init__(self, in_channels, out_channels, kernel_size, w_dim=512, eps=1e-8):\n        super().__init__()\n        self.in_channels = in_channels\n        self.out_channels = out_channels\n        self.kernel_size = kernel_size\n        self.eps = eps\n        self.weight = nn.Parameter(\n            torch.randn(out_channels, in_channels, kernel_size, kernel_size)\n        )\n        self.style = EqualLinear(w_dim, in_channels, bias=True)  # scale s_i\n        nn.init.ones_(self.style.bias)   # initialise s_i = 1\n\n    def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:\n        B, C, H, W = x.shape\n        # Style: per-input-channel scale\n        s = self.style(w).view(B, 1, C, 1, 1)             # (B, 1, C, 1, 1)\n        weight = self.weight.unsqueeze(0) * s              # (B, Co, Ci, k, k)\n        # Demodulate\n        denom = (weight.pow(2).sum(dim=[2, 3, 4], keepdim=True) + self.eps).sqrt()\n        weight = weight / denom                            # (B, Co, Ci, k, k)\n        # Fuse batch into weight for grouped convolution\n        weight = weight.view(B * self.out_channels, self.in_channels,\n                             self.kernel_size, self.kernel_size)\n        x = x.view(1, B * C, H, W)\n        x = F.conv2d(x, weight, padding=self.kernel_size // 2, groups=B)\n        return x.view(B, self.out_channels, H, W)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "StyleGAN2 Additional Improvements" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Improvement" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "What it replaces" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Benefit" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Weight demodulation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "AdaIN" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Eliminates droplet/blob artefacts; cleaner high-frequency details" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Lazy regularisation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Every-step R1 penalty" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "R1 every 16 steps instead of every step — reduces compute by 30%" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Path length regularisation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Progressive growing" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Penalises discontinuous changes in image when walking W; promotes smoother interpolation" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No progressive growing" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Progressive growing (StyleGAN1)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Full-resolution training from scratch with skip connections; simpler training schedule" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Equalized learning rate" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Standard weight init" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Normalises weight magnitudes at runtime (He init applied every step); prevents any layer from dominating" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "StyleGAN3: Alias-Free Generation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StyleGAN3 (Karras et al. 2021) addresses a subtle aliasing problem: in StyleGAN2, the generated image is not equivariant to small translations or rotations — subpixel content \"sticks\" to screen coordinates rather than flowing naturally through the image. This causes the classic \"texture sticking\" artefact visible in latent space interpolations."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "StyleGAN3 redesigns the synthesis network from first principles using continuous-domain signal processing: all operations are designed to preserve the Nyquist limit and avoid introducing aliased content. Key changes include replacing learned per-pixel noise with a set of Fourier features (complex sinusoids) that transform naturally under translation, removing all learned point-wise operations that could create positional dependencies, and using critically-sampled filters for all upsampling operations. The result is a generator where each pixel sees content from the same location in an underlying continuous signal — translation of the image is equivalent to shifting the Fourier features, not shifting individual pixel values."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "GAN Inversion" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GAN inversion maps a real image x into the generator's latent space, finding w* such that G(w*) ≈ x. This enables editing real images in W space (add a smile, change age, alter lighting) and then decoding back. The main approaches are:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Optimisation-based."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Directly minimise ‖G(w) - x‖ over w via gradient descent on w. Uses the perceptual loss (VGG features) for better reconstruction. Slow (~1 min per image) but most accurate. Operates in W+ space (different w per layer)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Encoder-based."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Train an encoder E: X → W that maps images directly to w. Fast at inference (~10ms), but less accurate. Used in real-time editing applications."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Hybrid."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Use an encoder to get an initial w estimate, then refine with a few steps of optimisation. Balances accuracy and speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\nfrom torchvision import models\n\n\ndef invert_image(\n    G,\n    target: torch.Tensor,\n    num_steps: int = 1000,\n    lr: float = 0.01,\n    device = 'cuda',\n) -> torch.Tensor:\n    \"\"\"\n    Optimisation-based GAN inversion in W space.\n    Returns w* such that G(w*) ≈ target.\n    \"\"\"\n    # VGG perceptual loss (frozen)\n    vgg = models.vgg16(pretrained=True).features[:23].eval().to(device)\n    for p in vgg.parameters():\n        p.requires_grad_(False)\n\n    # Initialise w from mean\n    w = G.mapping(torch.randn(1, 512, device=device)).clone().detach()\n    w.requires_grad_(True)\n    optim = torch.optim.Adam([w], lr=lr)\n\n    for step in range(num_steps):\n        gen = G.synthesis(w)   # G takes w directly\n        # Pixel loss\n        l_pix = F.mse_loss(gen, target)\n        # Perceptual loss\n        gen_feats = vgg((gen + 1) / 2)\n        tgt_feats = vgg((target + 1) / 2)\n        l_perc = F.mse_loss(gen_feats, tgt_feats.detach())\n        loss = l_pix + 0.1 * l_perc\n        optim.zero_grad()\n        loss.backward()\n        optim.step()\n\n        if step % 100 == 0:\n            print(f\"Step {step} | pixel: {l_pix.item():.4f} | perc: {l_perc.item():.4f}\")\n\n    return w.detach()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Editing directly in Z space instead of W space."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Z is spherical Gaussian and heavily entangled. Linear interpolations in Z mix unrelated attributes. Always map z → w first and edit in W."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Not computing the mean_w for truncation."
+                  },
+                  {
+                    "type": "text",
+                    "text": " The truncation trick requires a pre-computed mean latent w̄. Estimating it from just 100 samples gives a poor approximation. Use 4096–8192 samples."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Using ψ > 1 without understanding the quality penalty."
+                  },
+                  {
+                    "type": "text",
+                    "text": " ψ > 1 moves w away from the mean, entering low-density regions of the distribution. Image quality drops significantly. Use ψ ≤ 0.7 for production-quality outputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Inverting in W instead of W+ for real images."
+                  },
+                  {
+                    "type": "text",
+                    "text": " A single w cannot reconstruct arbitrary real images with high fidelity. W+ (different w per layer) is needed for accurate reconstruction. Use W for better editability, W+ for better fidelity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Omitting the normalisation of z before the mapping network."
+                  },
+                  {
+                    "type": "text",
+                    "text": " StyleGAN normalises z to the unit sphere (F.normalize(z, dim=1)) before the mapping network. Without this, the scale of z varies across batches and the mapping network is harder to train."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use StyleGAN2 as the baseline (not StyleGAN1). Weight demodulation eliminates the blob artefacts present in StyleGAN1 at minimal extra cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use equalized learning rate for all convolutions and linear layers. This prevents the common failure mode where a few layers learn much faster than others."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Apply style mixing regularisation during training (randomly use two different w values at a random cutoff layer with probability ~0.9). This prevents the network from assuming a single consistent w and forces better disentanglement."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use R1 regularisation on the discriminator (penalise the squared gradient norm of D on real images). Apply it lazily (every 16 steps) to save compute."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For GAN inversion of real images, prefer the W+ space for fidelity and the W space for editability. The tradeoff depends on whether reconstruction or editing is the primary goal."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of StyleGAN like a skilled portrait photographer who separates \"what the subject looks like\" from \"what camera/lighting settings to use.\" The mapping network acts as a translator: the randomness (z = \"who to photograph today\") is translated into a rich description of the subject's characteristics (w = age, expression, hair, etc.). The synthesis network is the camera system that renders an image from that description, applying the style at each resolution: \"w₁ says it's a middle-aged woman\" at low resolution (4×4 coarse shape), \"w₂ says she has light skin\" at medium resolution (16×16 texture), \"w₃ says she has fine wrinkles\" at high resolution (256×256 detail). The noise injection adds the random fine grain that makes every photograph unique even under identical settings. Style mixing is like photographing someone with the body language of one person and the lighting of another — possible precisely because the generator decouples these concerns."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "StyleGAN introduces a mapping network (Z → W) and AdaIN injection at each synthesis layer, separating global style (w) from stochastic fine detail (per-pixel noise)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The W space is more disentangled than Z — linear directions in W correspond more closely to interpretable image attributes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Style mixing uses different w vectors at different resolution layers, enabling independent control over coarse structure and fine details."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The truncation trick (w' = w̄ + ψ(w - w̄)) trades diversity (ψ=1) for quality (ψ=0). ψ∈[0.5, 0.7] is the practical sweet spot."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "StyleGAN2 replaces AdaIN with weight demodulation (applying style to convolution weights, not activations) to eliminate blob/droplet artefacts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GAN inversion maps real images into W or W+ for editing. W enables better attribute editing; W+ provides better reconstruction fidelity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "StyleGAN3 addresses aliasing by redesigning the synthesis network as a continuous-signal processor, making generated content truly translation-equivariant."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

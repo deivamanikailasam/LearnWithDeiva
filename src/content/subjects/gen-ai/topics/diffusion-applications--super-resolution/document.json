@@ -1,0 +1,532 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Diffusion models are exceptional at super-resolution because they can synthesize the high-frequency detail that deterministic regression methods cannot. Rather than predicting a single blurry upscale, a diffusion model samples from the conditional distribution "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "p(HR | LR)"
+          },
+          {
+            "type": "text",
+            "text": ", producing sharp, perceptually convincing images at the cost of not being pixel-accurate. This trade-off — perceptual quality over fidelity — is central to understanding when and why to use diffusion-based SR."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Super-Resolution Problem"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Given a low-resolution (LR) image "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "y"
+          },
+          {
+            "type": "text",
+            "text": " (produced by downsampling or degradation), recover a high-resolution (HR) image "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "x"
+          },
+          {
+            "type": "text",
+            "text": ". This is an ill-posed inverse problem: many HR images map to the same LR image under the degradation operator "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "D"
+          },
+          {
+            "type": "text",
+            "text": " (e.g., bicubic downsampling). An L2-trained CNN minimises the expected reconstruction error, producing the conditional mean — which is blurry because it averages over the multiple valid HR solutions. A diffusion model instead samples from the full posterior, producing one sharp plausible HR image per run."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The choice of metric matters enormously here. PSNR and SSIM reward pixel closeness to a reference, which favours regression models. LPIPS, FID, and NIQE reward perceptual realism, where diffusion models excel. These objectives are in fundamental tension: maximising fidelity pushes toward conditional mean outputs; maximising perceptual quality pushes toward diverse, sharp samples."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Conditioning Mechanisms"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The cleanest way to condition a diffusion U-Net on an LR image is to channel-concatenate the bicubic-upsampled LR image with the noisy HR input "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "x_t"
+          },
+          {
+            "type": "text",
+            "text": " before the first convolution. The model then has access to the spatial structure of the LR image at every resolution in the U-Net."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\nclass SR3UNet(nn.Module):\n    \"\"\"SR3-style U-Net conditioned on bicubic-upsampled LR image.\"\"\"\n\n    def __init__(self, in_ch: int = 6, out_ch: int = 3, base_ch: int = 64):\n        # in_ch = 3 (noisy HR) + 3 (LR upsampled) = 6\n        super().__init__()\n        self.enc1 = self._block(in_ch, base_ch)\n        self.enc2 = self._block(base_ch, base_ch * 2)\n        self.enc3 = self._block(base_ch * 2, base_ch * 4)\n        self.mid  = self._block(base_ch * 4, base_ch * 4)\n        self.dec3 = self._block(base_ch * 8, base_ch * 2)  # skip from enc3\n        self.dec2 = self._block(base_ch * 4, base_ch)\n        self.dec1 = self._block(base_ch * 2, base_ch)\n        self.out  = nn.Conv2d(base_ch, out_ch, 1)\n\n    def _block(self, in_ch, out_ch):\n        return nn.Sequential(\n            nn.Conv2d(in_ch, out_ch, 3, padding=1),\n            nn.GroupNorm(8, out_ch),\n            nn.SiLU(),\n            nn.Conv2d(out_ch, out_ch, 3, padding=1),\n            nn.GroupNorm(8, out_ch),\n            nn.SiLU(),\n        )\n\n    def forward(self, x_t: torch.Tensor, lr_up: torch.Tensor) -> torch.Tensor:\n        # Concatenate along channel dim: [B, 6, H, W]\n        inp = torch.cat([x_t, lr_up], dim=1)\n        e1 = self.enc1(inp)                          # [B, 64, H, W]\n        e2 = self.enc2(F.avg_pool2d(e1, 2))         # [B, 128, H/2, W/2]\n        e3 = self.enc3(F.avg_pool2d(e2, 2))         # [B, 256, H/4, W/4]\n        m  = self.mid(F.avg_pool2d(e3, 2))           # [B, 256, H/8, W/8]\n        d3 = self.dec3(torch.cat([F.interpolate(m, scale_factor=2), e3], 1))\n        d2 = self.dec2(torch.cat([F.interpolate(d3, scale_factor=2), e2], 1))\n        d1 = self.dec1(torch.cat([F.interpolate(d2, scale_factor=2), e1], 1))\n        return self.out(d1)\n\n\ndef sr3_training_step(\n    model: SR3UNet,\n    hr: torch.Tensor,      # [B, 3, H, W]  high-resolution ground truth\n    lr: torch.Tensor,      # [B, 3, h, w]  low-resolution input\n    alphas_bar: torch.Tensor,\n    device: torch.device,\n) -> torch.Tensor:\n    B = hr.shape[0]\n    # Upsample LR to HR resolution\n    lr_up = F.interpolate(lr, size=hr.shape[-2:], mode='bicubic', align_corners=False)\n    # Sample random timesteps\n    t = torch.randint(0, len(alphas_bar), (B,), device=device)\n    ab = alphas_bar[t].view(B, 1, 1, 1)\n    # Add noise to HR image\n    eps = torch.randn_like(hr)\n    x_t = ab.sqrt() * hr + (1 - ab).sqrt() * eps\n    # Predict noise, conditioned on LR upsampled\n    eps_pred = model(x_t, lr_up)\n    return F.mse_loss(eps_pred, eps)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Noise Conditioning Augmentation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cascaded diffusion models (Ho et al., 2022) introduce "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "bold"}],
+            "text": "noise conditioning augmentation (NCA)"
+          },
+          {
+            "type": "text",
+            "text": " to close the distribution gap between the LR images seen during training (clean ground-truth downsampled) and inference (output from a previous cascade stage, which may have artefacts). During training, Gaussian noise with standard deviation "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ_aug"
+          },
+          {
+            "type": "text",
+            "text": " is added to the LR conditioning image, and "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ_aug"
+          },
+          {
+            "type": "text",
+            "text": " is given to the model as an extra scalar embedding. At inference, "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ_aug"
+          },
+          {
+            "type": "text",
+            "text": " can be swept to control the strength of conditioning — higher "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "σ_aug"
+          },
+          {
+            "type": "text",
+            "text": " lets the model hallucinate more texture, lower values enforce fidelity to the LR signal."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\n\n\ndef noise_conditioning_augmentation(\n    lr_up: torch.Tensor,\n    sigma_aug: float,\n) -> torch.Tensor:\n    \"\"\"Add noise to LR conditioning image to close train/inference gap.\"\"\"\n    if sigma_aug == 0.0:\n        return lr_up\n    noise = torch.randn_like(lr_up) * sigma_aug\n    return lr_up + noise\n\n\ndef sigma_aug_embedding(sigma_aug: float, dim: int = 256) -> torch.Tensor:\n    \"\"\"Sinusoidal embedding for σ_aug, analogous to time step embedding.\"\"\"\n    log_sigma = math.log(max(sigma_aug, 1e-8))\n    half = dim // 2\n    freqs = torch.exp(-math.log(10000) * torch.arange(half) / half)\n    emb = torch.tensor(log_sigma) * freqs\n    return torch.cat([emb.sin(), emb.cos()], dim=-1)  # [dim]\n\n\ndef cascaded_sr_inference(\n    base_model,      # generates 64x64\n    sr_model,        # upscales 64x64 → 256x256\n    prompt_emb: torch.Tensor,\n    sigma_aug: float = 0.1,\n    T: int = 250,\n) -> torch.Tensor:\n    \"\"\"Two-stage cascaded generation with NCA.\"\"\"\n    # Stage 1: generate 64x64 base image\n    z = torch.randn(1, 3, 64, 64)\n    for t in reversed(range(T)):\n        z = base_model.denoise_step(z, t, prompt_emb)\n    base_img = z  # [1, 3, 64, 64]\n\n    # Stage 2: upsample to 256x256 conditioned on (noisy) base\n    lr_up = F.interpolate(base_img, size=(256, 256), mode='bicubic', align_corners=False)\n    lr_up_aug = noise_conditioning_augmentation(lr_up, sigma_aug=sigma_aug)\n    sigma_emb = sigma_aug_embedding(sigma_aug)\n\n    x = torch.randn(1, 3, 256, 256)\n    for t in reversed(range(T)):\n        x = sr_model.denoise_step(x, t, prompt_emb, lr_up=lr_up_aug, sigma_emb=sigma_emb)\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "ILVR: Reference-Guided Sampling"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ILVR (Choi et al., 2021) guides a "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "pre-trained unconditional"
+          },
+          {
+            "type": "text",
+            "text": " diffusion model toward a reference image by replacing the low-frequency content of the denoised estimate at each step. The idea: at diffusion step "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "t"
+          },
+          {
+            "type": "text",
+            "text": ", both the current sample "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "x_t"
+          },
+          {
+            "type": "text",
+            "text": " and a noisy version of the reference "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "y_t"
+          },
+          {
+            "type": "text",
+            "text": " share the same noise level. Applying a low-pass filter "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "Φ"
+          },
+          {
+            "type": "text",
+            "text": " and replacing the low-frequency content of "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "x_t"
+          },
+          {
+            "type": "text",
+            "text": " with that of "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "y_t"
+          },
+          {
+            "type": "text",
+            "text": " steers generation without any conditioning training."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def low_pass_filter(\n    x: torch.Tensor,\n    scale_factor: int = 4,\n) -> torch.Tensor:\n    \"\"\"Downsample then upsample — acts as a Φ_N low-pass filter.\"\"\"\n    H, W = x.shape[-2:]\n    small = F.avg_pool2d(x, scale_factor)          # lose high-freq detail\n    return F.interpolate(small, size=(H, W), mode='bilinear', align_corners=False)\n\n\ndef ilvr_sample(\n    model,\n    y: torch.Tensor,           # reference image (LR upsampled to HR size)\n    alphas_bar: torch.Tensor,\n    betas: torch.Tensor,\n    T: int = 1000,\n    scale_factor: int = 4,\n    device: torch.device = torch.device('cpu'),\n) -> torch.Tensor:\n    \"\"\"\n    ILVR sampling: guide unconditional model toward reference y.\n    At each step, replace low-frequency content of x_t with that of y_t.\n    \"\"\"\n    x = torch.randn_like(y).to(device)\n    y = y.to(device)\n\n    for t in reversed(range(T)):\n        t_tensor = torch.tensor([t], device=device)\n        ab_t = alphas_bar[t]\n        alpha_t = 1 - betas[t]\n\n        # 1. Standard DDPM reverse step\n        eps = model(x, t_tensor)\n        x0_pred = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()\n        x0_pred = x0_pred.clamp(-1, 1)\n\n        if t > 0:\n            ab_prev = alphas_bar[t - 1]\n            mean = (\n                ab_prev.sqrt() * betas[t] / (1 - ab_t) * x0_pred\n                + alpha_t.sqrt() * (1 - ab_prev) / (1 - ab_t) * x\n            )\n            sigma = ((1 - ab_prev) / (1 - ab_t) * betas[t]).sqrt()\n            x_next = mean + sigma * torch.randn_like(x)\n        else:\n            x_next = x0_pred\n\n        # 2. ILVR correction: replace low-freq of x_next with low-freq of y_t\n        if t > 0:\n            # Create noisy reference at level t-1\n            ab_prev = alphas_bar[t - 1]\n            y_t_prev = ab_prev.sqrt() * y + (1 - ab_prev).sqrt() * torch.randn_like(y)\n\n            # Replace low-frequency content\n            x_next = (\n                x_next\n                - low_pass_filter(x_next, scale_factor)\n                + low_pass_filter(y_t_prev, scale_factor)\n            )\n        x = x_next\n\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Stable Diffusion Upscaler"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Stable Diffusion x4 upscaler (Rombach et al.) is a latent diffusion model specifically trained for 4× SR. It differs from the base SD model in that the conditioning is not just a text prompt — the LR image is concatenated to the noisy latent "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "bold"}],
+            "text": "in pixel space"
+          },
+          {
+            "type": "text",
+            "text": " (after tiling for large images), while generation happens in latent space. This hybrid approach avoids encoding the LR image through the VAE (which could lose spatial structure) while still benefiting from latent compression for the generative model."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# Conceptual sketch of tiled SD upscaler inference\nimport torch\nimport torch.nn.functional as F\n\n\nTILE_SIZE = 512       # pixels\nTILE_OVERLAP = 64\nSCALE_FACTOR = 4\n\n\ndef tile_image(img: torch.Tensor, tile_size: int, overlap: int):\n    \"\"\"Yield (tile, row_start, col_start) for each patch.\"\"\"\n    B, C, H, W = img.shape\n    step = tile_size - overlap\n    for r in range(0, H, step):\n        for c in range(0, W, step):\n            r_end = min(r + tile_size, H)\n            c_end = min(c + tile_size, W)\n            yield img[:, :, r:r_end, c:c_end], r, c\n\n\ndef sd_upscale_tile(\n    vae_encode, vae_decode, unet, scheduler,\n    lr_tile: torch.Tensor,\n    text_emb: torch.Tensor,\n    T: int = 50,\n) -> torch.Tensor:\n    \"\"\"\n    Upscale a single LR tile by 4× using a conditioned LDM.\n    The LR tile is bicubic-upsampled then channel-concatenated with the noisy latent.\n    \"\"\"\n    # Upsample LR to target pixel size\n    hr_size = [s * SCALE_FACTOR for s in lr_tile.shape[-2:]]\n    lr_up = F.interpolate(lr_tile, size=hr_size, mode='bicubic', align_corners=False)\n\n    # Encode upsampled LR into latent (conditioning signal)\n    with torch.no_grad():\n        lr_latent = vae_encode(lr_up) * 0.18215\n\n    # Start from noise in latent space\n    z = torch.randn_like(lr_latent)\n\n    for t in reversed(range(T)):\n        # Concatenate noisy latent with LR latent conditioning\n        unet_input = torch.cat([z, lr_latent], dim=1)   # doubled channel count\n        eps_pred = unet(unet_input, t, encoder_hidden_states=text_emb)\n        z = scheduler.step(eps_pred, t, z).prev_sample\n\n    with torch.no_grad():\n        hr_tile = vae_decode(z / 0.18215)\n    return hr_tile"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Perceptual Quality vs. Fidelity"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The perceptual-distortion trade-off (Blau & Michaeli, 2018) shows that you cannot simultaneously minimise pixel distortion (PSNR) and maximise perceptual quality (FID) — they are in direct tension. Regression models optimise distortion and land in the \"regression to the mean\" regime; generative models like diffusion can sample from the perceptual frontier at the cost of higher distortion."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Method"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "PSNR (4×)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LPIPS (lower=better)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Typical use"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Bicubic"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~28 dB"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~0.56"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Baseline"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "EDSR (CNN regression)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~32 dB"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~0.42"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High-PSNR tasks"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Real-ESRGAN (GAN)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~28 dB"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~0.17"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Perceptual SR (fast)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "SR3 / diffusion"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~27–29 dB"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~0.12–0.15"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best perceptual quality"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For real-world SR where the LR image has unknown or complex degradation (noise, JPEG compression, blur), blind SR models like StableSR or SeeSR combine a degradation-aware conditioning with a pre-trained SD prior, using a ControlNet-style adapter to inject the degraded image while keeping the generative prior intact."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Sampling and Inference Considerations"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Several practical concerns arise when deploying diffusion SR models:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Consistency vs. diversity:"},
+                  {"type": "text", "text": " Multiple samples from the same LR input will produce different HR images. For benchmarking, use the PSNR-best sample over N draws; for user-facing applications, diversity is a feature."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Tiling for large images:"},
+                  {"type": "text", "text": " LDM-based upscalers process tiles independently; overlapping tiles with weighted blending (e.g., Gaussian window) avoids seams. Context-aware tiling (MultiDiffusion) improves global coherence."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Hallucination:"},
+                  {"type": "text", "text": " Diffusion SR can generate textures not present in the LR — faces with wrong identity, text that doesn't match. For forensic or scientific imaging, this is unacceptable; regression models are safer."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Speed:"},
+                  {"type": "text", "text": " SR3 requires ~100–2000 diffusion steps. DDIM or DPM-Solver can reduce this to 20–50 steps with acceptable quality. Flow-matching based SR (like FLUX) can achieve high quality in fewer NFEs."}
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def tiled_sr_with_blending(\n    sr_fn,             # function(lr_tile) -> hr_tile\n    lr_img: torch.Tensor,\n    tile_size: int = 128,\n    overlap: int = 32,\n    scale: int = 4,\n) -> torch.Tensor:\n    \"\"\"Tile LR image, upscale each tile, blend overlaps with Gaussian window.\"\"\"\n    B, C, H, W = lr_img.shape\n    OH, OW = H * scale, W * scale\n    output = torch.zeros(B, C, OH, OW)\n    weight = torch.zeros(B, 1, OH, OW)\n\n    step = tile_size - overlap\n    # 1D Gaussian window [0,1] for blending\n    win_1d = torch.exp(-0.5 * ((torch.arange(tile_size * scale) - (tile_size * scale) / 2)\n                                / (tile_size * scale * 0.3)) ** 2)\n    win = win_1d[None, :] * win_1d[:, None]   # 2D Gaussian\n    win = win.unsqueeze(0).unsqueeze(0)         # [1, 1, tile_H, tile_W]\n\n    for r in range(0, H, step):\n        for c in range(0, W, step):\n            r_end = min(r + tile_size, H)\n            c_end = min(c + tile_size, W)\n            lr_tile = lr_img[:, :, r:r_end, c:c_end]\n            hr_tile = sr_fn(lr_tile)  # upscaled tile\n\n            # Map to HR coordinates\n            r_hr, c_hr = r * scale, c * scale\n            r_hr_end, c_hr_end = r_end * scale, c_end * scale\n            w = win[:, :, :r_hr_end - r_hr, :c_hr_end - c_hr]\n\n            output[:, :, r_hr:r_hr_end, c_hr:c_hr_end] += hr_tile * w\n            weight[:, :, r_hr:r_hr_end, c_hr:c_hr_end] += w\n\n    return (output / weight.clamp(min=1e-6)).clamp(-1, 1)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Mental Model"}]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Diffusion SR is a constrained generation problem: given the low-frequency skeleton of the answer, fill in plausible high-frequency details. The LR image eliminates most of the uncertainty in p(HR) but not all — the remaining ambiguity is exactly what the diffusion model samples from. Conditioning by concatenation gives the model spatial access to this skeleton at every scale in the U-Net; NCA forces the model to be robust to the exact quality of the LR input."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Channel-concatenation of the bicubic-upsampled LR image with the noisy HR input is the simplest and most effective SR conditioning strategy."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Cascaded diffusion models add noise conditioning augmentation (NCA) to the LR conditioning to close the train/inference distribution gap across stages."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "ILVR guides an unconditional model toward a reference without any conditioning training by replacing low-frequency content at each denoising step."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Diffusion SR achieves state-of-the-art perceptual quality (LPIPS/FID) but lower PSNR than regression models — choose based on whether your task rewards realism or faithfulness."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "For large images, tile with Gaussian blending (or MultiDiffusion) to avoid seams; for real-world degradation, use blind SR models that condition on estimated degradation."}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

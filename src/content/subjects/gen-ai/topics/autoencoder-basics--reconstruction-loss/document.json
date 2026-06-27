@@ -1,0 +1,348 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reconstruction loss measures how well the decoder's output matches the original input after the data has been compressed through the latent bottleneck and expanded again. It is the primary training signal that drives both the encoder and decoder to preserve information through the autoencoder. Choosing the right form of reconstruction loss is not a minor implementation detail — it determines what the model treats as important to reconstruct, what it treats as noise, and therefore what structure the latent space learns to capture."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Reconstruction Loss as Negative Log-Likelihood" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In the VAE framework, the reconstruction loss is the negative log-likelihood of the input x under the decoder distribution p_θ(x|z):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{recon}} = -\\mathbb{E}_{q_\\phi(z|x)}[\\log p_\\theta(x \\mid z)]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This expectation is estimated via a single reparametrised sample z ~ q_φ(z|x) during training. The specific form of -log p_θ(x|z) depends entirely on the assumed decoder distribution, which must be chosen to match the data type."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Binary Cross-Entropy (Bernoulli Decoder)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When each output dimension is a binary value (e.g. binarised MNIST pixels), the decoder models p_θ(x|z) = Π_i Bernoulli(x_i; p_i) where p_i = σ(g_θ(z)_i). The negative log-likelihood is binary cross-entropy:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "-\\log p_\\theta(x \\mid z) = -\\sum_i \\left[ x_i \\log p_i + (1 - x_i) \\log(1 - p_i) \\right]"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\ndef bce_reconstruction_loss(x_logits, x_target):\n    \"\"\"\n    Binary cross-entropy reconstruction loss.\n    x_logits: raw decoder output (before sigmoid), shape (B, D)\n    x_target: binary targets in [0, 1], shape (B, D)\n    Returns: scalar loss (mean over batch, sum over dims)\n    \"\"\"\n    # Use logits form for numerical stability (avoids log(sigmoid(logit)))\n    return F.binary_cross_entropy_with_logits(\n        x_logits, x_target, reduction='sum'\n    ) / x_target.size(0)   # mean over batch, sum over pixels\n\n# Common mistake: applying sigmoid before this function\n# WRONG:  F.binary_cross_entropy(torch.sigmoid(logits), x)  # numerically unstable\n# RIGHT:  F.binary_cross_entropy_with_logits(logits, x)      # stable, equivalent"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mean Squared Error (Gaussian Decoder)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When the decoder models a continuous output as p_θ(x|z) = N(μ_θ(z), σ²I), the negative log-likelihood is proportional to the mean squared error between x and the decoder mean μ_θ(z):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "-\\log p_\\theta(x \\mid z) = \\frac{\\|x - \\mu_\\theta(z)\\|^2}{2\\sigma^2} + \\text{const}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "MSE is the default for continuous data. It treats each output dimension as equally important and penalises large errors quadratically. A key limitation: MSE minimisation finds the average over all plausible reconstructions, which for multi-modal data (e.g. images with ambiguous textures) produces blurry, over-smoothed outputs."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def mse_reconstruction_loss(x_recon, x_target):\n    \"\"\"\n    MSE reconstruction loss — Gaussian decoder with unit variance.\n    x_recon:  decoder output, shape (B, D)\n    x_target: continuous target, shape (B, D)\n    Returns: scalar (mean over batch and dims)\n    \"\"\"\n    return F.mse_loss(x_recon, x_target, reduction='mean')\n\n# Note: with fixed σ²=1, MSE is proportional to -log N(x; recon, I).\n# If σ² is learned or set differently, scale the MSE accordingly:\ndef gaussian_nll(x_recon, x_target, log_var=0.0):\n    \"\"\"Exact Gaussian NLL with per-element log variance.\"\"\"\n    return 0.5 * (log_var + (x_target - x_recon).pow(2) / log_var.exp()).mean()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Perceptual Loss" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For image data, pixel-wise MSE or BCE does not correlate well with human perception of image quality. Perceptual loss addresses this by comparing feature activations from a pretrained network (typically VGG) rather than raw pixels:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{perceptual}} = \\sum_l \\frac{1}{C_l H_l W_l} \\| \\phi_l(\\hat{x}) - \\phi_l(x) \\|^2"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where φ_l denotes activations at layer l of the feature network. Perceptual loss encourages the reconstruction to match the input in feature space — which captures texture, edges, and semantic content — producing sharper, more visually plausible images than MSE. It is widely used in image VAEs, image super-resolution, and neural style transfer."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torchvision.models as models\n\nclass PerceptualLoss(torch.nn.Module):\n    \"\"\"\n    Perceptual loss using VGG16 feature activations.\n    Compares intermediate features, not raw pixels.\n    \"\"\"\n    def __init__(self, layers=(3, 8, 15)):\n        super().__init__()\n        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features\n        self.slices = torch.nn.ModuleList([\n            vgg[:layers[0]], vgg[layers[0]:layers[1]], vgg[layers[1]:layers[2]]\n        ])\n        for p in self.parameters():\n            p.requires_grad_(False)  # freeze VGG\n\n    def forward(self, x_recon, x_target):\n        loss = 0.0\n        r, t = x_recon, x_target\n        for slice_ in self.slices:\n            r = slice_(r)\n            t = slice_(t)\n            loss += F.mse_loss(r, t.detach())\n        return loss\n\n# Usage: combine with pixel-wise MSE\n# total_recon_loss = mse_reconstruction_loss(x_recon, x) + 0.1 * perceptual(x_recon, x)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Choosing the Right Loss" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Data type" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Recommended loss" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Why" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Binarised images (0/1 pixels)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "BCE with logits" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Matches Bernoulli likelihood; numerically stable" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Normalised continuous data" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "MSE" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Gaussian NLL with unit variance; simple baseline" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Natural images (photorealistic)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "MSE + perceptual" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Pixel fidelity + perceptual sharpness" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Discrete tokens (text, codebooks)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Cross-entropy" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Categorical NLL; standard for discrete outputs" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Count data (scRNA-seq)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Negative binomial NLL" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Handles overdispersion in count distributions" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Balancing Reconstruction Loss and KL in the ELBO" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The ELBO for a VAE is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L} = \\underbrace{\\mathbb{E}_{q_\\phi}[\\log p_\\theta(x|z)]}_{\\text{reconstruction}} - \\underbrace{\\mathrm{KL}(q_\\phi(z|x) \\| p(z))}_{\\text{regularisation}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The two terms must be on comparable scales. BCE sums over all pixels, resulting in losses on the order of hundreds or thousands. KL is typically in the range 1–20 per dimension. If the reconstruction loss dominates, the KL term is effectively ignored and the model behaves like a plain autoencoder. If the KL dominates, the model ignores the input (posterior collapse). Common mitigations:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Normalise losses:" }, { "type": "text", "text": " divide reconstruction loss by the number of output dimensions so both terms are per-element." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "β-VAE:" }, { "type": "text", "text": " multiply the KL by β > 1 to increase disentanglement pressure, or β < 1 to reduce it and prioritise reconstruction." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "KL annealing:" }, { "type": "text", "text": " ramp β from 0 to 1 over the first N epochs to give the encoder time to learn useful representations before the KL penalty activates." }] }]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def vae_loss(x_logits, x_target, mu, log_var, beta=1.0):\n    \"\"\"\n    Full VAE ELBO loss: reconstruction (BCE) + beta * KL.\n    x_logits: decoder output before sigmoid, (B, D)\n    x_target: binary input, (B, D)\n    mu, log_var: encoder output, (B, z_dim)\n    beta: KL weight (1.0 = standard VAE, >1 = beta-VAE)\n    \"\"\"\n    # Reconstruction: sum over pixels, mean over batch\n    recon = F.binary_cross_entropy_with_logits(\n        x_logits, x_target, reduction='sum'\n    ) / x_target.size(0)\n\n    # KL: closed form for Gaussian q vs N(0,I) prior\n    kl = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=1).mean()\n\n    return recon + beta * kl, recon.item(), kl.item()\n\n\n# KL annealing schedule\ndef kl_weight(epoch, warmup_epochs=50):\n    \"\"\"Linear ramp from 0 to 1 over warmup_epochs.\"\"\"\n    return min(1.0, epoch / warmup_epochs)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why MSE Produces Blurry Images" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "MSE minimisation finds the conditional expectation E[x|z]. For images where the posterior p(x|z) is multi-modal — e.g. a face that could have slightly different hair positions — the expectation averages the modes, producing a blurry blend. BCE has the same problem. Perceptual loss, adversarial loss (from a discriminator), or a diffusion decoder all mitigate this by comparing higher-level features or explicitly encouraging samples to be sharp."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Applying sigmoid before BCE with logits:" }, { "type": "text", "text": " always pass raw logits to " }, { "type": "text", "marks": [{ "type": "code" }], "text": "F.binary_cross_entropy_with_logits" }, { "type": "text", "text": ". Computing sigmoid first then passing to " }, { "type": "text", "marks": [{ "type": "code" }], "text": "F.binary_cross_entropy" }, { "type": "text", "text": " is numerically unstable and gives wrong gradients." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Using reduction='mean' for BCE and comparing against KL summed per sample:" }, { "type": "text", "text": " mixing reduction schemes makes the ELBO balance arbitrary. Pick one scheme (sum over dims, mean over batch) and apply it consistently to both terms." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Using MSE for 8-bit images without normalisation:" }, { "type": "text", "text": " pixel values in [0, 255] produce MSE values orders of magnitude larger than in [0, 1]. Always normalise inputs to [0, 1] or [-1, 1] before computing the reconstruction loss." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reconstruction loss is the autoencoder's report card: it grades each reconstruction on how closely it matches the original. BCE grades each pixel independently on a pass/fail binary scale. MSE grades on continuous accuracy, but grades outliers much more harshly than small errors. Perceptual loss grades by impression — a reconstruction that looks right to a trained eye, even if individual pixels differ."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reconstruction loss is the negative log-likelihood of the input under the decoder distribution — the choice of loss implies a choice of output distribution." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "BCE (Bernoulli) for binary data, MSE (Gaussian) for continuous data, cross-entropy (Categorical) for discrete tokens." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "MSE and BCE both produce blurry image reconstructions because they average over posterior modes. Perceptual or adversarial losses produce sharper results." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "In a VAE, the reconstruction loss must be balanced with the KL term. Use consistent reduction schemes and consider KL annealing to prevent posterior collapse early in training." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Always pass raw logits to " }, { "type": "text", "marks": [{ "type": "code" }], "text": "F.binary_cross_entropy_with_logits" }, { "type": "text", "text": "; never apply sigmoid first." }] }]
+          }
+        ]
+      }
+    ]
+  }
+}

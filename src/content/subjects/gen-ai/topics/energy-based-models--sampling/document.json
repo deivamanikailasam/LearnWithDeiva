@@ -1,0 +1,380 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sampling from an energy-based model means drawing x ~ p_θ(x) ∝ exp(−E_θ(x)) without knowing the partition function Z_θ. Since Z_θ is intractable, direct inverse-CDF or ancestral sampling are out — the only general strategy is Markov Chain Monte Carlo (MCMC): start from some initial point and run a chain of updates that leaves p_θ invariant. For EBMs the energy gradient ∇_x E_θ(x) is cheap (one backward pass), making gradient-guided chains far more efficient than random-walk methods."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Langevin Dynamics"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unadjusted Langevin Algorithm (ULA) discretises the Langevin SDE to define a Markov chain whose stationary distribution approximates p_θ. The continuous SDE is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "dx_t = -\\nabla_x E_\\theta(x_t)\\, dt + \\sqrt{2}\\, dW_t"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With step size η, the Euler–Maruyama discretisation gives the update rule:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "x_{t+1} = x_t - \\frac{\\eta}{2}\\,\\nabla_x E_\\theta(x_t) + \\sqrt{\\eta}\\,\\varepsilon_t, \\quad \\varepsilon_t \\sim \\mathcal{N}(0, I)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The gradient term drives x toward energy minima; the noise term prevents collapse and ensures exploration. Because this is a discretisation, it introduces a bias — the stationary distribution is p_θ only in the limit η → 0. In practice a small but finite η is used and the bias is accepted or corrected via Metropolis–Hastings."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom typing import Optional\n\n\ndef unadjusted_langevin(\n    energy_net: nn.Module,\n    x_init: torch.Tensor,\n    n_steps: int = 60,\n    step_size: float = 0.01,\n    noise_scale: float = 0.005,\n    x_min: float = -1.0,\n    x_max: float = 1.0,\n    clamp_grad: Optional[float] = 0.03,\n) -> torch.Tensor:\n    \"\"\"\n    Unadjusted Langevin Algorithm.\n\n    Args:\n        energy_net: maps (B, *) -> (B,) scalar energies.\n        x_init:     starting samples (B, *).\n        n_steps:    number of MCMC steps (burn-in + chain).\n        step_size:  η — gradient step magnitude.\n        noise_scale: √η coefficient; sometimes set < √step_size for stability.\n        clamp_grad:  per-element gradient clamp (None = no clamp).\n\n    Returns:\n        x after n_steps Langevin updates, detached from the graph.\n    \"\"\"\n    x = x_init.clone().detach().requires_grad_(True)\n\n    for _ in range(n_steps):\n        # energy gradient w.r.t. x\n        energy = energy_net(x).sum()          # sum over batch\n        grad = torch.autograd.grad(energy, x)[0]  # (B, *)\n\n        if clamp_grad is not None:\n            grad = grad.clamp(-clamp_grad, clamp_grad)\n\n        noise = torch.randn_like(x) * noise_scale\n        x = (x - step_size / 2.0 * grad + noise).detach().requires_grad_(True)\n        x = x.clamp(x_min, x_max)           # keep in valid pixel range\n\n    return x.detach()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Stochastic Gradient Langevin Dynamics (SGLD)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "SGLD (Welling & Teh, 2011) was originally proposed for Bayesian parameter learning on mini-batches, but in the EBM context the “stochastic” part refers to running the chain on a subset of the data or from random restarts. The key addition for EBMs (Du & Mordatch, 2019) is a persistent replay buffer: old chain states are stored and continued rather than re-initialised each training step. This amortises mixing cost across training iterations."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class ReplayBuffer:\n    \"\"\"\n    Persistent MCMC buffer: stores past chain states so Langevin\n    can resume from them instead of cold-starting each training step.\n    \"\"\"\n    def __init__(self, capacity: int, x_shape: tuple, device: torch.device):\n        self.capacity = capacity\n        self.device = device\n        # initialise buffer with uniform noise in [-1, 1]\n        self.buffer = torch.FloatTensor(capacity, *x_shape).uniform_(-1, 1).to(device)\n        self.size = 0\n\n    def sample(self, batch_size: int, reinit_prob: float = 0.05) -> torch.Tensor:\n        \"\"\"\n        Sample a batch from the buffer.\n        With probability reinit_prob, replace each entry with fresh uniform noise\n        to prevent chain collapse and encourage diversity.\n        \"\"\"\n        if self.size == 0:\n            # buffer not filled yet — return random noise\n            return torch.FloatTensor(batch_size, *self.buffer.shape[1:]).uniform_(-1, 1).to(self.device)\n\n        idx = torch.randint(0, min(self.size, self.capacity), (batch_size,))\n        samples = self.buffer[idx].clone()\n\n        # random re-initialisation mask\n        reinit_mask = torch.rand(batch_size) < reinit_prob\n        if reinit_mask.any():\n            samples[reinit_mask] = torch.FloatTensor(\n                reinit_mask.sum(), *self.buffer.shape[1:]\n            ).uniform_(-1, 1).to(self.device)\n\n        return samples\n\n    def update(self, x: torch.Tensor):\n        \"\"\"Store new chain states back into the buffer.\"\"\"\n        n = x.shape[0]\n        idx = torch.randint(0, self.capacity, (n,))\n        self.buffer[idx] = x.detach().cpu().to(self.device)\n        self.size = min(self.size + n, self.capacity)\n\n\ndef sgld_sample(\n    energy_net: nn.Module,\n    x_init: torch.Tensor,\n    n_steps: int = 60,\n    step_size: float = 0.01,\n    noise_scale: float = 0.005,\n) -> torch.Tensor:\n    \"\"\"Run SGLD from x_init for n_steps; return final chain state.\"\"\"\n    return unadjusted_langevin(\n        energy_net, x_init,\n        n_steps=n_steps, step_size=step_size, noise_scale=noise_scale,\n    )\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Metropolis-Adjusted Langevin Algorithm (MALA)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ULA has a discretisation bias. MALA eliminates it by wrapping each Langevin proposal with a Metropolis–Hastings (MH) accept/reject step. A proposal x’ is drawn from the Langevin kernel, then accepted with probability:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\alpha(x, x') = \\min\\!\\left(1,\\; \\frac{p_\\theta(x')\\, q(x \\mid x')}{p_\\theta(x)\\, q(x' \\mid x)}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where q(x’ | x) = N(x’; x − (η/2)∇E_θ(x), ηI) is the Langevin proposal density. The ratio of proposal densities q(x | x’)/q(x’ | x) is tractable (both Gaussians), and p_θ(x’)/p_θ(x) = exp(E_θ(x) − E_θ(x’)) also avoids Z_θ. Accepted chains have the exact stationary distribution p_θ, but each step costs two energy evaluations (at x and x’)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def mala_step(\n    energy_net: nn.Module,\n    x: torch.Tensor,\n    step_size: float = 0.01,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    \"\"\"\n    One step of MALA: propose from Langevin kernel, accept/reject via MH.\n\n    Returns:\n        x_new:       updated chain state (B, *)\n        accept_rate: fraction of proposals accepted (scalar)\n    \"\"\"\n    x = x.detach().requires_grad_(True)\n    e_x = energy_net(x)                    # (B,)\n    grad_x = torch.autograd.grad(e_x.sum(), x)[0].detach()  # (B, *)\n\n    # Langevin proposal\n    noise = torch.randn_like(x)\n    x_prop = (x - step_size / 2.0 * grad_x + (step_size ** 0.5) * noise).detach()\n    x_prop = x_prop.clamp(-1.0, 1.0).requires_grad_(True)\n\n    e_x_prop = energy_net(x_prop)           # (B,)\n    grad_x_prop = torch.autograd.grad(e_x_prop.sum(), x_prop)[0].detach()\n\n    # log q(x | x') - log q(x' | x)\n    # q(x' | x) = N(x'; x - (eta/2)*g_x, eta*I)\n    def log_q(src, dst, grad_src):\n        diff = dst - (src - step_size / 2.0 * grad_src)\n        return -diff.pow(2).flatten(1).sum(-1) / (2.0 * step_size)\n\n    log_ratio = (\n        e_x.detach() - e_x_prop.detach()          # log p ratio (no Z)\n        + log_q(x_prop.detach(), x.detach(), grad_x_prop)  # log q(x | x')\n        - log_q(x.detach(), x_prop.detach(), grad_x)       # log q(x' | x)\n    )\n\n    accept = torch.rand(x.shape[0], device=x.device) < log_ratio.exp().clamp(max=1.0)\n    accept_expanded = accept.view(-1, *([1] * (x.dim() - 1)))\n\n    x_new = torch.where(accept_expanded, x_prop.detach(), x.detach())\n    return x_new, accept.float().mean()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Hamiltonian Monte Carlo (HMC)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "HMC augments the state space with auxiliary momentum p ~ N(0, I) and proposes large moves via Hamiltonian dynamics: H(x, p) = E_θ(x) + ½‖p‖². Leapfrog integration of Hamilton’s equations generates long-range proposals that follow the energy landscape and still satisfy detailed balance. A final MH step corrects for leapfrog integration error. HMC mixes far faster than Langevin in high dimensions because its leapfrog trajectory avoids random walk diffusion — but each proposal requires L gradient evaluations (leapfrog steps), making it expensive when E_θ is a large neural net."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def hmc_step(\n    energy_net: nn.Module,\n    x: torch.Tensor,\n    step_size: float = 0.01,\n    n_leapfrog: int = 20,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    \"\"\"\n    One HMC proposal + Metropolis accept/reject for a batch of chains.\n\n    Returns:\n        x_new:       updated state (B, *)\n        accept_rate: scalar float\n    \"\"\"\n    def energy_and_grad(z):\n        z = z.detach().requires_grad_(True)\n        e = energy_net(z)        # (B,)\n        g = torch.autograd.grad(e.sum(), z)[0].detach()\n        return e.detach(), g\n\n    x = x.detach()\n    p = torch.randn_like(x)       # momentum ~ N(0, I)\n    e0, g0 = energy_and_grad(x)\n\n    # store initial H\n    H0 = e0 + 0.5 * p.flatten(1).pow(2).sum(-1)   # (B,)\n\n    # leapfrog integration\n    x_c, p_c, g_c = x.clone(), p.clone(), g0.clone()\n    p_c = p_c - 0.5 * step_size * g_c          # half step\n    for i in range(n_leapfrog):\n        x_c = x_c + step_size * p_c\n        e_c, g_c = energy_and_grad(x_c)\n        if i < n_leapfrog - 1:\n            p_c = p_c - step_size * g_c\n    p_c = p_c - 0.5 * step_size * g_c          # final half step\n\n    H1 = e_c + 0.5 * p_c.flatten(1).pow(2).sum(-1)  # (B,)\n\n    # MH accept\n    accept = torch.rand(x.shape[0], device=x.device) < (H0 - H1).exp().clamp(max=1.0)\n    accept_expanded = accept.view(-1, *([1] * (x.dim() - 1)))\n    x_new = torch.where(accept_expanded, x_c, x)\n    return x_new, accept.float().mean()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Practical Training Loop with Persistent Replay"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The standard EBM training loop pairs the persistent replay buffer with SGLD to generate negative samples for contrastive divergence. Each step: (1) draw real data x⁺, (2) warm-start SGLD from the buffer to produce model samples x⁻, (3) update the buffer with the refined x⁻, (4) compute the contrastive gradient and update θ."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def ebm_train_step(\n    energy_net: nn.Module,\n    optimizer: torch.optim.Optimizer,\n    replay: ReplayBuffer,\n    x_real: torch.Tensor,\n    n_sgld_steps: int = 60,\n    step_size: float = 0.01,\n    noise_scale: float = 0.005,\n    l2_coeff: float = 1.0,\n) -> dict:\n    \"\"\"\n    One EBM training step with persistent replay SGLD.\n\n    Contrastive divergence loss:\n        L = E_data[E_theta(x+)] - E_model[E_theta(x-)]\n    Both terms should be minimised (real data low energy, fake data high energy).\n    L2 regularisation on energies prevents energy magnitudes from growing unbounded.\n    \"\"\"\n    # --- negative phase: run SGLD from replay buffer ---\n    x_init = replay.sample(x_real.shape[0])   # warm-start from buffer\n    x_init = x_init.to(x_real.device)\n\n    x_fake = sgld_sample(\n        energy_net, x_init,\n        n_steps=n_sgld_steps, step_size=step_size, noise_scale=noise_scale,\n    )  # (B, *) — no grad tracked\n\n    replay.update(x_fake)   # write refined states back\n\n    # --- forward pass: energy on real and fake ---\n    e_real = energy_net(x_real)   # (B,)  want low\n    e_fake = energy_net(x_fake)   # (B,)  want high\n\n    # contrastive loss (positive = data low, negative = model high)\n    cd_loss = e_real.mean() - e_fake.mean()\n\n    # L2 energy regularisation: prevent ||E|| growing arbitrarily large\n    reg_loss = l2_coeff * (e_real.pow(2).mean() + e_fake.pow(2).mean())\n\n    loss = cd_loss + reg_loss\n\n    optimizer.zero_grad()\n    loss.backward()\n    # gradient clipping stabilises training\n    torch.nn.utils.clip_grad_norm_(energy_net.parameters(), max_norm=0.1)\n    optimizer.step()\n\n    return {\n        \"loss\": loss.item(),\n        \"cd_loss\": cd_loss.item(),\n        \"e_real\": e_real.mean().item(),\n        \"e_fake\": e_fake.mean().item(),\n    }\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Diagnosing and Tuning MCMC Chains"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A poorly tuned sampler is the most common failure mode in EBM training. Energy values during SGLD, acceptance rate in MALA, and effective sample size (ESS) are the key diagnostics."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def monitor_sgld_chain(\n    energy_net: nn.Module,\n    x_init: torch.Tensor,\n    n_steps: int = 100,\n    step_size: float = 0.01,\n    noise_scale: float = 0.005,\n) -> dict:\n    \"\"\"\n    Run a chain and record energy at each step for diagnostics.\n    Use this to check:\n      - Does energy decrease monotonically? (step_size too large — oscillates)\n      - Does energy plateau immediately? (step_size too small — doesn't explore)\n      - Are final energies close to training data energies? (chain has mixed)\n    \"\"\"\n    x = x_init.clone().detach().requires_grad_(True)\n    energies = []\n\n    for _ in range(n_steps):\n        e = energy_net(x)\n        energies.append(e.mean().item())\n\n        grad = torch.autograd.grad(e.sum(), x)[0]\n        grad = grad.clamp(-0.03, 0.03)\n        noise = torch.randn_like(x) * noise_scale\n        x = (x - step_size / 2.0 * grad + noise).clamp(-1, 1).detach().requires_grad_(True)\n\n    return {\n        \"energies\": energies,\n        \"final_energy_mean\": energies[-1],\n        \"initial_energy_mean\": energies[0],\n        \"energy_drop\": energies[0] - energies[-1],\n    }\n\n\ndef effective_sample_size(chain: torch.Tensor, max_lag: int = 50) -> float:\n    \"\"\"\n    Estimate ESS via autocorrelation of flattened chain.\n    chain: (T, B) energy values over T steps for B chains.\n    ESS = T / (1 + 2 * sum_{k=1}^{inf} rho_k)\n    \"\"\"\n    T = chain.shape[0]\n    x = chain.mean(1)  # (T,) average energy per step\n    x = x - x.mean()\n    rho_sum = 0.0\n    var = (x ** 2).mean().item()\n    if var == 0:\n        return float(T)\n    for k in range(1, min(max_lag + 1, T)):\n        rho_k = (x[:-k] * x[k:]).mean().item() / var\n        if rho_k < 0:  # cut off at first negative autocorrelation\n            break\n        rho_sum += rho_k\n    return T / (1.0 + 2.0 * rho_sum)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Comparison of EBM Sampling Methods"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Method"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Exact stationary dist."}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cost per step"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When to use"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "ULA / SGLD", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No (biased)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1 energy eval"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "EBM training; speed more important than exactness"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "MALA", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (MH corrected)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2 energy evals"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When exact samples needed; moderate dimension"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "HMC", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (MH corrected)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "L energy evals"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fast mixing in high-d; energy net must be cheap"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Persistent SGLD", "marks": [{"type": "code"}]}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No (biased)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "k evals/step, amortised"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Standard EBM training on images; most common choice"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Step Size and Mixing Trade-offs"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The choice of step size η controls the bias–variance trade-off in Langevin chains:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Large η: fast exploration, but the Euler discretisation introduces large bias (stationary distribution drifts from p_θ). Gradient clipping (limiting ‖∇E‖ per element) compensates by bounding how far each step moves."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Small η: near-exact stationary distribution, but slow mixing — the chain mixes in O(1/η) steps, so total time is the same. In practice η ≈ 1e-2 with n_steps ≈ 60 works for 32×32 images."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Noise scale: setting noise_scale = √η gives the theoretically correct Brownian noise. Using a smaller noise_scale (as in Du & Mordatch, 2019) produces smoother samples at the cost of more bias — acceptable during training."}]}]
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Mixing time} \\approx \\frac{1}{\\eta \\cdot \\lambda_{\\min}}, \\quad \\text{Bias} \\approx \\eta \\cdot \\|\\nabla^2 E\\|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where λ_min is the smallest eigenvalue of the Hessian ∇²E at the mode. This shows that EBMs with “sharper” distributions (large λ_min) can use a larger η without excessive bias — a useful intuition for per-dataset tuning."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Connection to Score-Based Models"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Langevin dynamics for EBMs and score-based diffusion models share the same update rule. The score function is defined as:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "s_\\theta(x) = \\nabla_x \\log p_\\theta(x) = -\\nabla_x E_\\theta(x)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Score-based models (Song & Ermon, 2019) train s_θ(x) ≈ ∇_x log p_data(x) directly via denoising score matching, bypassing the partition function entirely. EBMs define s_θ implicitly as −∇_x E_θ. Both use the same Langevin sampler; the difference is whether the score comes from an explicit energy function or is directly parameterised. This duality explains why modern diffusion models can be interpreted as either score-based or EBM-based."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Mental model: SGLD is gradient descent on E_θ(x) with added Gaussian noise. The noise keeps the chain from collapsing to a single energy minimum and allows it to explore the full distribution. Larger noise → more exploration, less bias correction; smaller noise → sharper samples, higher bias. The persistent replay buffer is simply a cache of past exploration progress — without it, each training step would waste 60 gradient evaluations re-burning in from random noise."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Langevin dynamics is gradient descent on E_θ plus Brownian noise. The step size η controls the bias–speed trade-off: smaller η → less bias, slower mixing."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "MALA wraps Langevin proposals with Metropolis–Hastings to remove discretisation bias at the cost of double the energy evaluations per step."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "HMC explores large distances via leapfrog Hamiltonian dynamics, achieving fast mixing in high dimensions, but at L energy evaluations per proposal."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The persistent replay buffer amortises MCMC mixing cost: chains are resumed across training steps rather than cold-started, reducing the effective n_steps needed per update."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The EBM score s_θ(x) = −∇_x E_θ(x) connects EBMs to score-based diffusion models — both use the same Langevin sampler and differ only in how the score is trained."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}

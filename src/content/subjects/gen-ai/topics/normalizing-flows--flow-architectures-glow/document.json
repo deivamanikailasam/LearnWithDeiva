@@ -1,0 +1,349 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Glow (Generative Flow with Invertible 1×1 Convolutions, Kingma & Dhariwal, 2018) is the architecture that demonstrated normalising flows could generate realistic 256×256 human faces, manipulate facial attributes by moving in latent space, and perform image interpolation — all with exact likelihoods. Glow improves on RealNVP with three innovations: activation normalization (ActNorm), learned invertible 1×1 convolutions for channel permutation, and the same affine coupling layers. Together, these three components form a single Glow step, stacked K times per scale across L scales."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Three Components of a Glow Step"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each step in a Glow block performs three transforms in sequence: ActNorm → Invertible 1×1 Conv → Affine Coupling. All three are invertible with tractable log-determinants."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "1. ActNorm: Activation Normalisation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ActNorm is an invertible per-channel scale-and-bias layer that replaces batch normalisation (which is not invertible without storing the batch statistics). It performs:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "y_{c,h,w} = s_c \\cdot x_{c,h,w} + b_c"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The parameters s ∈ ℝᶜ and b ∈ ℝᶜ are initialised data-dependently: at first batch, s = 1/std(x_c) and b = −mean(x_c)/std(x_c), so the first batch has exactly zero mean and unit variance per channel. After initialisation, s and b are learnable."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log|\\det J_{\\text{ActNorm}}| = H \\cdot W \\cdot \\sum_c \\log|s_c|"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\n\nclass ActNorm(nn.Module):\n    \"\"\"Glow activation normalisation: per-channel scale and bias.\"\"\"\n    def __init__(self, C: int):\n        super().__init__()\n        self.scale = nn.Parameter(torch.ones(1, C, 1, 1))\n        self.bias  = nn.Parameter(torch.zeros(1, C, 1, 1))\n        self.initialized = False\n\n    def _initialize(self, x: torch.Tensor):\n        \"\"\"Data-dependent initialisation on the first forward pass.\"\"\"\n        with torch.no_grad():\n            # Per-channel mean and std over (B, H, W)\n            mean = x.mean(dim=(0, 2, 3), keepdim=True)   # (1, C, 1, 1)\n            std  = x.std(dim=(0, 2, 3), keepdim=True).clamp(min=1e-6)\n            self.scale.data.copy_(1.0 / std)\n            self.bias.data.copy_(-mean / std)\n        self.initialized = True\n\n    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:\n        if not self.initialized:\n            self._initialize(x)\n        y = self.scale * x + self.bias\n        H, W = x.size(2), x.size(3)\n        log_det = H * W * self.scale.abs().log().sum()   # scalar\n        return y, log_det.expand(x.size(0))              # (B,)\n\n    def inverse(self, y: torch.Tensor) -> torch.Tensor:\n        return (y - self.bias) / self.scale"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "2. Invertible 1×1 Convolution"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "RealNVP uses fixed channel permutations between coupling layers (e.g. reverse order), which is rigid and limits what the coupling layers can learn. Glow replaces this with a learned C×C weight matrix W applied as a 1×1 convolution — equivalent to a linear mix of all channels at each spatial location. The log-det is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\log|\\det J_{1\\times1}| = H \\cdot W \\cdot \\log|\\det W|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Computing |det W| naively is O(C³). With LU decomposition W = P·L·U (P = permutation, L = lower triangular with 1s on diagonal, U = upper triangular), the determinant reduces to the product of U's diagonal: |det W| = ∏ᵢ |Uᵢᵢ|. This gives log|det W| = ∑ᵢ log|Uᵢᵢ| in O(C)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class Invertible1x1Conv(nn.Module):\n    \"\"\"Glow invertible 1x1 convolution with LU decomposition for O(C) log-det.\"\"\"\n    def __init__(self, C: int):\n        super().__init__()\n        # Initialise W as a random orthogonal matrix (det ±1)\n        W_init, _ = torch.linalg.qr(torch.randn(C, C))\n        # LU decomposition: W = P @ L @ U\n        P, L, U = torch.linalg.lu(W_init)\n        self.register_buffer(\"P\", P)         # fixed permutation\n        # Learnable: lower L (below diag), upper U (above diag), log|diag U|\n        self.L_lower = nn.Parameter(torch.tril(L, diagonal=-1))\n        self.U_upper = nn.Parameter(torch.triu(U, diagonal=1))\n        self.log_diag_u = nn.Parameter(U.diagonal().abs().log())\n        self.sign_u     = nn.Parameter(U.diagonal().sign(), requires_grad=False)\n        self.C = C\n\n    def _W(self) -> torch.Tensor:\n        eye = torch.eye(self.C, device=self.L_lower.device)\n        L = torch.tril(self.L_lower, diagonal=-1) + eye\n        U = torch.triu(self.U_upper, diagonal=1) + torch.diag(self.sign_u * self.log_diag_u.exp())\n        return self.P @ L @ U\n\n    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:\n        # x: (B, C, H, W)\n        W = self._W()\n        # Apply W as a 1x1 conv: equivalent to einsum over channel dim\n        y = torch.nn.functional.conv2d(x, W.view(self.C, self.C, 1, 1))\n        H, W_size = x.size(2), x.size(3)\n        log_det = H * W_size * self.log_diag_u.sum()   # O(C)\n        return y, log_det.expand(x.size(0))\n\n    def inverse(self, y: torch.Tensor) -> torch.Tensor:\n        W = self._W()\n        W_inv = torch.linalg.inv(W)\n        return torch.nn.functional.conv2d(y, W_inv.view(self.C, self.C, 1, 1))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "3. Affine Coupling (with Zero-Initialisation)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Glow uses the same affine coupling as RealNVP, but initialises the last convolutional layer of the s/t network to zero. This ensures every Glow step is the identity transformation at the start of training — the model starts as an identity flow and gradually learns to warp the distribution. Without this, training with many layers is unstable."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Full Glow Architecture"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class GlowStep(nn.Module):\n    \"\"\"One step of Glow: ActNorm -> Inv1x1Conv -> AffineCoupling.\"\"\"\n    def __init__(self, C: int, H: int, W: int, hidden: int = 512):\n        super().__init__()\n        self.actnorm = ActNorm(C)\n        self.inv1x1  = Invertible1x1Conv(C)\n        # Affine coupling: first C//2 channels condition the rest\n        self.coupling = AffineCouplingImage(C, H, W, hidden=hidden)\n\n    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:\n        x, ld1 = self.actnorm(x)\n        x, ld2 = self.inv1x1(x)\n        x, ld3 = self.coupling(x)\n        return x, ld1 + ld2 + ld3\n\n    def inverse(self, y: torch.Tensor) -> torch.Tensor:\n        y = self.coupling.inverse(y)\n        y = self.inv1x1.inverse(y)\n        y = self.actnorm.inverse(y)\n        return y\n\n\nclass GlowBlock(nn.Module):\n    \"\"\"One scale of Glow: squeeze + K steps + split.\"\"\"\n    def __init__(self, C: int, H: int, W: int, K: int = 32, hidden: int = 512):\n        super().__init__()\n        C_sq = C * 4   # after squeeze: 4x channels, H/2 x W/2\n        self.steps = nn.ModuleList([\n            GlowStep(C_sq, H//2, W//2, hidden) for _ in range(K)\n        ])\n        self.C_out = C_sq // 2   # channels that continue to next scale\n\n    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:\n        x = squeeze(x)                              # (B, 4C, H/2, W/2)\n        log_det = torch.zeros(x.size(0), device=x.device)\n        for step in self.steps:\n            x, ld = step(x)\n            log_det = log_det + ld\n        z = x[:, :self.C_out]    # factored-out half -> modelled by prior\n        x = x[:, self.C_out:]   # remaining half -> next scale\n        return x, z, log_det\n\n    def inverse(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:\n        y = torch.cat([z, x], dim=1)   # recombine factored-out channels\n        for step in reversed(self.steps):\n            y = step.inverse(y)\n        return unsqueeze(y)\n\n\nclass Glow(nn.Module):\n    \"\"\"Full Glow model: L scales, each with K steps.\"\"\"\n    def __init__(self, C: int = 3, H: int = 64, W: int = 64, L: int = 3, K: int = 32):\n        super().__init__()\n        self.blocks = nn.ModuleList()\n        c, h, w = C, H, W\n        for _ in range(L):\n            self.blocks.append(GlowBlock(c, h, w, K=K))\n            c, h, w = c * 2, h // 2, w // 2   # half channels factored out means same C, but next scale has C*4/2=C*2\n\n    def log_prob(self, x: torch.Tensor) -> torch.Tensor:\n        log_det_total = torch.zeros(x.size(0), device=x.device)\n        z_list = []\n        for block in self.blocks:\n            x, z, ld = block(x)\n            z_list.append(z)\n            log_det_total = log_det_total + ld\n        z_list.append(x)   # final remaining activations\n        # Prior log-prob: all z ~ N(0,I)\n        log_prior = sum(D.Normal(0, 1).log_prob(z).sum(dim=(1,2,3)) for z in z_list)\n        return log_prior + log_det_total"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Latent Space Manipulation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because Glow provides exact inversion (encode → latent z) and generation (latent z → image), its latent space supports controlled manipulations. Given a labelled dataset, an attribute direction can be found by computing the mean latent code for images with and without the attribute, then moving along their difference:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "z_{\\text{edited}} = z + \\alpha \\cdot \\frac{\\bar{z}_{\\text{attr}} - \\bar{z}_{\\text{no-attr}}}{\\|\\bar{z}_{\\text{attr}} - \\bar{z}_{\\text{no-attr}}\\|}"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def find_attribute_direction(\n    model: Glow,\n    images_pos: torch.Tensor,   # (N, C, H, W) images WITH attribute\n    images_neg: torch.Tensor,   # (N, C, H, W) images WITHOUT attribute\n) -> list[torch.Tensor]:\n    \"\"\"\n    Compute attribute direction in Glow latent space.\n    Returns a list of mean latent difference tensors (one per scale).\n    \"\"\"\n    model.eval()\n    with torch.no_grad():\n        z_pos = model.encode(images_pos)   # list of latent tensors per scale\n        z_neg = model.encode(images_neg)\n\n    directions = []\n    for zp, zn in zip(z_pos, z_neg):\n        mean_diff = zp.mean(0) - zn.mean(0)   # attribute direction\n        directions.append(mean_diff / mean_diff.norm())\n    return directions\n\n\ndef edit_attribute(\n    model: Glow,\n    image: torch.Tensor,       # (1, C, H, W) input image\n    direction: list[torch.Tensor],\n    alpha: float = 2.0,\n) -> torch.Tensor:             # (1, C, H, W) edited image\n    \"\"\"Move the encoded image in the attribute direction and decode.\"\"\"\n    model.eval()\n    with torch.no_grad():\n        z_list = model.encode(image)\n        z_edited = [z + alpha * d for z, d in zip(z_list, direction)]\n        return model.decode(z_edited)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why Glow Matters Beyond Normalising Flows"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Glow's contributions extend beyond the normalising flow literature:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "ActNorm"
+                  },
+                  {
+                    "type": "text",
+                    "text": " is now widely used in any deep model that needs per-channel normalisation without batch statistics — useful in small-batch or online settings."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Invertible 1×1 convolutions"
+                  },
+                  {
+                    "type": "text",
+                    "text": " appear in i-ResNets, RevNets, and other architectures that require memory-efficient training via invertibility."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{"type": "bold"}],
+                    "text": "Zero-init of final layers"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for residual-style modules became standard practice: a module that starts as identity is easier to train because the initial gradient w.r.t. the skip path is clean."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [{"type": "bold"}],
+                "text": "Mental model."
+              },
+              {
+                "type": "text",
+                "text": " Each Glow step is like three operations on a deck of cards: ActNorm normalises the suit distribution so each suit appears equally often (data-dependent init); the 1×1 conv cuts the deck in a learnable way — not just reversing, but any linear mix of positions; and the coupling layer deals the cards in pairs where one card's position determines how the other is placed. The three operations together can arbitrarily reorder the deck while keeping exact track of how the probabilities change."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Each Glow step = ActNorm + Invertible 1×1 Conv + Affine Coupling — three invertible components each with O(C) or O(H·W·C) log-determinants."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ActNorm replaces batch norm with data-dependent per-channel scale/bias initialisation; it has log-det = H·W·∑ log|sᵢ|."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Invertible 1×1 convolutions learn which channel permutation to apply; LU decomposition reduces log-det from O(C³) to O(C) by extracting it as the sum of log|diag(U)|."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Zero-initialising the last layer of the s/t network ensures every Glow step starts as the identity — making deep (L×K) flows stable to train from scratch."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exact invertibility enables attribute editing: encode image → compute attribute direction in latent space → move α steps → decode, producing interpretable and continuous face attribute manipulation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,359 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Latent diffusion models run the diffusion process in the compressed latent space of a pretrained autoencoder rather than in pixel space. A 512×512 RGB image has 786,432 dimensions; after a VAE with 8× spatial compression and 4 latent channels the corresponding latent has only 4,096 dimensions — a 192× reduction. This compression removes perceptually redundant high-frequency detail from the diffusion process while preserving the semantic content the diffusion model needs to learn. The result is dramatically faster training and inference, enabling high-resolution image generation at practical compute budgets. Stable Diffusion is the canonical example: its VAE compresses to 64×64×4 latents, its U-Net denoises in that space, and the decoder expands back to 512×512 pixels. The decoder, trained separately with perceptual and adversarial losses, recovers the fine-grained visual detail that was abstracted away during compression."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Two-Stage Training Pipeline" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Latent diffusion training has two fully separate stages that share no parameters:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Stage 1: Train the autoencoder." },
+                  { "type": "text", "text": " Train encoder E and decoder D jointly to compress images to latents and reconstruct them with high perceptual fidelity. Use reconstruction loss + perceptual (LPIPS) loss + KL regularization (VAE) or codebook (VQ-VAE) + PatchGAN discriminator for sharpness. This stage is compute-heavy but only done once." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Stage 2: Train the latent diffusion model." },
+                  { "type": "text", "text": " Freeze E and D. For each training image x, compute z = E(x), then train a U-Net to denoise noised versions of z. The conditioning (text, class labels) is injected via cross-attention. The encoder is never updated during this stage." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The KL-Regularized Autoencoder (VAE)" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Stable Diffusion VAE uses KL regularization to keep the latent distribution close to a unit Gaussian, which makes the latent space compatible with Gaussian diffusion. The encoder outputs a mean μ and log-variance log σ², and the KL penalty prevents the latent space from collapsing or becoming arbitrarily large:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{VAE}} = \\mathcal{L}_{\\text{rec}}(x, \\hat{x}) + \\mathcal{L}_{\\text{perc}}(x, \\hat{x}) + \\lambda_{\\text{KL}}\\, D_{\\text{KL}}\\!\\left(q_\\phi(z|x)\\ \\|\\  \\mathcal{N}(0,I)\\right) + \\lambda_{\\text{adv}}\\, \\mathcal{L}_{\\text{adv}}"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\nclass VAEEncoder(nn.Module):\n    \"\"\"\n    Encoder for latent diffusion VAE.\n    Compresses (B, 3, H, W) → (B, 2*latent_ch, H/f, W/f)\n    where the 2 channels encode mean and log-variance for reparameterization.\n    Stable Diffusion: H=512, f=8, latent_ch=4 → output (B, 8, 64, 64)\n    \"\"\"\n\n    def __init__(self, in_ch: int = 3, base_ch: int = 128,\n                 ch_mults: tuple = (1, 2, 4, 4),\n                 latent_ch: int = 4, n_res: int = 2):\n        super().__init__()\n        self.conv_in = nn.Conv2d(in_ch, base_ch, 3, padding=1)\n\n        downs = []\n        in_c  = base_ch\n        for mult in ch_mults:\n            out_c = base_ch * mult\n            for _ in range(n_res):\n                downs.append(ResBlockSimple(in_c, out_c))\n                in_c = out_c\n            downs.append(nn.Conv2d(in_c, in_c, 3, stride=2, padding=1))\n        self.downs = nn.Sequential(*downs)\n\n        self.mid   = nn.Sequential(\n            ResBlockSimple(in_c, in_c),\n            SelfAttnSimple(in_c),\n            ResBlockSimple(in_c, in_c),\n        )\n        self.norm_out = nn.GroupNorm(32, in_c)\n        # Output 2*latent_ch: latent_ch for μ, latent_ch for log σ²\n        self.conv_out = nn.Conv2d(in_c, 2 * latent_ch, 1)\n\n    def forward(self, x: torch.Tensor):\n        h = self.conv_in(x)\n        h = self.downs(h)\n        h = self.mid(h)\n        h = self.conv_out(F.silu(self.norm_out(h)))\n        mean, log_var = h.chunk(2, dim=1)\n        log_var = log_var.clamp(-30.0, 20.0)\n        return mean, log_var\n\n    def encode(self, x: torch.Tensor) -> torch.Tensor:\n        \"\"\"Reparameterized sample z ~ q(z|x).\"\"\"\n        mean, log_var = self.forward(x)\n        std = (0.5 * log_var).exp()\n        eps = torch.randn_like(std)\n        return mean + std * eps,  mean, log_var\n\n\nclass ResBlockSimple(nn.Module):\n    def __init__(self, in_ch, out_ch):\n        super().__init__()\n        self.net  = nn.Sequential(\n            nn.GroupNorm(32, in_ch), nn.SiLU(),\n            nn.Conv2d(in_ch, out_ch, 3, padding=1),\n            nn.GroupNorm(32, out_ch), nn.SiLU(),\n            nn.Conv2d(out_ch, out_ch, 3, padding=1),\n        )\n        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()\n    def forward(self, x):\n        return self.net(x) + self.skip(x)\n\n\nclass SelfAttnSimple(nn.Module):\n    def __init__(self, ch):\n        super().__init__()\n        self.norm = nn.GroupNorm(32, ch)\n        self.qkv  = nn.Conv2d(ch, ch * 3, 1)\n        self.proj = nn.Conv2d(ch, ch, 1)\n    def forward(self, x):\n        B, C, H, W = x.shape\n        h = self.norm(x)\n        q, k, v = self.qkv(h).chunk(3, dim=1)\n        q = q.view(B, C, -1).permute(0, 2, 1)\n        k = k.view(B, C, -1).permute(0, 2, 1)\n        v = v.view(B, C, -1).permute(0, 2, 1)\n        import torch.nn.functional as F\n        a = F.scaled_dot_product_attention(q, k, v)\n        a = a.permute(0, 2, 1).view(B, C, H, W)\n        return x + self.proj(a)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Perceptual and Adversarial Losses" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pixel-level reconstruction losses (L1, L2) produce blurry images because they optimize for expected pixel value, not perceptual sharpness. The VAE decoder is trained with additional losses that capture higher-level visual quality:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torchvision.models as models\n\n\nclass VGGPerceptualLoss(nn.Module):\n    \"\"\"LPIPS-style perceptual loss using VGG16 feature maps.\"\"\"\n\n    def __init__(self, device=\"cuda\"):\n        super().__init__()\n        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features\n        # Layers: relu1_2, relu2_2, relu3_3\n        self.slices = nn.ModuleList([\n            vgg[:4].eval(),    # relu1_2\n            vgg[4:9].eval(),   # relu2_2\n            vgg[9:16].eval(),  # relu3_3\n        ])\n        for p in self.parameters():\n            p.requires_grad_(False)\n        self.register_buffer(\"mean\", torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))\n        self.register_buffer(\"std\",  torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))\n\n    def normalize(self, x: torch.Tensor) -> torch.Tensor:\n        return (x * 0.5 + 0.5 - self.mean) / self.std    # [-1,1] → ImageNet norm\n\n    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:\n        p, t = self.normalize(pred), self.normalize(target)\n        loss  = torch.tensor(0.0, device=pred.device)\n        for slice_ in self.slices:\n            p  = slice_(p);  t  = slice_(t)\n            loss = loss + F.l1_loss(p, t)\n        return loss\n\n\ndef vae_loss(\n    x: torch.Tensor,\n    x_hat: torch.Tensor,\n    mean: torch.Tensor,\n    log_var: torch.Tensor,\n    discriminator_loss: torch.Tensor = None,\n    lambda_kl: float = 1e-6,\n    lambda_perc: float = 1.0,\n    lambda_adv: float = 0.5,\n    perceptual_fn = None,\n) -> torch.Tensor:\n    \"\"\"Full VAE loss used in LDM autoencoder training.\"\"\"\n    rec    = F.l1_loss(x_hat, x)\n    kl     = -0.5 * (1 + log_var - mean.pow(2) - log_var.exp()).mean()\n    perc   = perceptual_fn(x_hat, x) if perceptual_fn is not None else 0.0\n    adv    = discriminator_loss if discriminator_loss is not None else 0.0\n    return rec + lambda_kl * kl + lambda_perc * perc + lambda_adv * adv"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Latent Scaling" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The VAE latent z = E(x) does not naturally have unit variance — its empirical standard deviation depends on the KL coefficient λ_KL and dataset. Before passing z to the diffusion model, it must be scaled so the diffusion model's Gaussian noise schedule makes sense. Stable Diffusion uses a fixed scaling factor derived from the standard deviation of the latent codes over the training set:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "z_{\\text{scaled}} = \\frac{z}{\\sigma_{\\text{data}}}, \\quad \\sigma_{\\text{data}} \\approx 0.18215 \\text{ (SD v1)}"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "class LatentDiffusionInterface:\n    \"\"\"\n    Handles encoding/decoding and latent scaling for a latent diffusion model.\n    Encapsulates the SD convention: z_scaled = z / scaling_factor.\n    \"\"\"\n\n    # Stable Diffusion v1/v2 scaling factor\n    # Calibrated so std(z_scaled) ≈ 1 on LAION-5B\n    SD_SCALING_FACTOR = 0.18215\n\n    def __init__(self, vae_encoder, vae_decoder,\n                 scaling_factor: float = SD_SCALING_FACTOR,\n                 device: str = \"cuda\"):\n        self.encoder = vae_encoder.to(device).eval()\n        self.decoder = vae_decoder.to(device).eval()\n        self.sf      = scaling_factor\n        self.device  = device\n\n    @torch.no_grad()\n    def encode(self, x: torch.Tensor) -> torch.Tensor:\n        \"\"\"\n        x: (B, 3, H, W) in [-1, 1]\n        Returns z_scaled: (B, 4, H/8, W/8)  ready for diffusion\n        \"\"\"\n        z, _, _ = self.encoder.encode(x.to(self.device))\n        return z * self.sf\n\n    @torch.no_grad()\n    def decode(self, z_scaled: torch.Tensor) -> torch.Tensor:\n        \"\"\"\n        z_scaled: (B, 4, H/8, W/8)  — output of diffusion model\n        Returns x_hat: (B, 3, H, W) in [-1, 1]\n        \"\"\"\n        z     = z_scaled / self.sf\n        x_hat = self.decoder(z)\n        return x_hat.clamp(-1, 1)\n\n    def training_step(self, x: torch.Tensor, diffusion_model, noise_scheduler):\n        \"\"\"One latent diffusion training step.\"\"\"\n        z = self.encode(x)                         # (B, 4, H/8, W/8)\n        t = torch.randint(0, 1000, (x.shape[0],), device=self.device)\n        eps = torch.randn_like(z)\n        z_t = noise_scheduler.q_sample(z, t, eps)  # noised latent\n        eps_pred = diffusion_model(z_t, t)          # U-Net predicts noise in latent\n        return F.mse_loss(eps_pred, eps)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Stable Diffusion Architecture Summary" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Component" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Architecture" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Input → Output" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Role" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Text encoder" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "CLIP ViT-L/14" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "text tokens → (77, 768)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Text conditioning" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "VAE encoder" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "KL-VAE (f=8)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "(3, 512, 512) → (4, 64, 64)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Image → latent" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Latent U-Net" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "U-Net + CrossAttn" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "(4, 64, 64) + (77, 768) → (4, 64, 64)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Denoise latent" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "VAE decoder" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "KL-VAE (f=8)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "(4, 64, 64) → (3, 512, 512)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Latent → image" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why Latent Space — Not Just Speed" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The compression is not just a speed trick. The VAE's KL regularization forces the latent space to be smooth and disentangled — nearby latent codes produce similar images. This makes the diffusion model's job easier: the manifold of valid latents is a well-shaped Gaussian ball rather than the fractal surface of natural images in pixel space. The diffusion model learns to navigate a semantically organized space where 'add more beard' corresponds to a smooth linear direction, rather than the tangled pixel relationships of the original image."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Concretely, LDMs achieve better FID than pixel-space models at equivalent compute because:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The high-frequency detail (textures, sharp edges) is handled by the separately-trained decoder with perceptual and adversarial losses — which are better suited for this than the diffusion MSE objective." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The diffusion model focuses entirely on semantic content: object placement, composition, color relationships — which are captured in the low-frequency components preserved by the latent." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Smaller spatial dimensions allow larger effective batch sizes and more gradient steps per unit compute, improving convergence." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Full Inference Pipeline" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "@torch.no_grad()\ndef stable_diffusion_inference(\n    unet,\n    text_encoder,\n    vae_decoder,\n    tokenizer,\n    prompt: str,\n    negative_prompt: str = \"\",\n    n_steps: int = 50,\n    guidance_scale: float = 7.5,\n    height: int = 512,\n    width:  int = 512,\n    latent_channels: int = 4,\n    scaling_factor: float = 0.18215,\n    device: str = \"cuda\",\n) -> torch.Tensor:\n    \"\"\"\n    Simplified Stable Diffusion inference:\n    text → latent noise → denoised latent → pixel image.\n    \"\"\"\n    from transformers import CLIPTokenizer\n\n    B = 1\n    H_lat, W_lat = height // 8, width // 8\n\n    # 1. Encode text\n    def encode_text(text: str):\n        tokens  = tokenizer(text, padding=\"max_length\", max_length=77,\n                            truncation=True, return_tensors=\"pt\").input_ids.to(device)\n        return text_encoder(tokens).last_hidden_state     # (1, 77, 768)\n\n    text_emb = encode_text(prompt)          # (1, 77, 768)\n    uncond   = encode_text(negative_prompt) # (1, 77, 768)\n    context  = torch.cat([uncond, text_emb])  # (2, 77, 768) for CFG\n\n    # 2. Initialize latent noise\n    latents = torch.randn(B, latent_channels, H_lat, W_lat, device=device)\n    # Scale to match scheduler's starting noise level (sigma_max for DDIM at T=1)\n    latents = latents * noise_scheduler.init_noise_sigma\n\n    # 3. Denoising loop (DDIM, 50 steps)\n    for t in noise_scheduler.timesteps:  # decreasing from T to 0\n        # Expand for classifier-free guidance\n        latent_input = torch.cat([latents, latents])    # (2, 4, 64, 64)\n        t_batch      = torch.tensor([t, t], device=device)\n\n        # Predict noise for unconditional and conditional\n        noise_pred = unet(latent_input, t_batch, encoder_hidden_states=context)\n        uncond_pred, text_pred = noise_pred.chunk(2)\n\n        # Classifier-free guidance: boost text direction\n        guided_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)\n\n        # DDIM step\n        latents = noise_scheduler.step(guided_pred, t, latents).prev_sample\n\n    # 4. Decode latent to image\n    latents = latents / scaling_factor\n    image   = vae_decoder(latents)           # (1, 3, 512, 512) in [-1, 1]\n    image   = (image * 0.5 + 0.5).clamp(0, 1)  # → [0, 1]\n    return image"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of latent diffusion as a two-person team. The first person (the VAE) is a compression artist: they sketch a scene down to its essential shapes, colors, and composition on a small canvas, discarding the pixel-perfect textures. The second person (the diffusion U-Net) is a story planner: they work only with the small abstract sketches, learning to generate and refine them from scratch according to a text prompt. To produce the final image, the first person takes the diffusion model's final sketch and expands it back to full detail — using separately trained artistic skills (perceptual and adversarial losses) to fill in the textures. Neither person needs to handle full-resolution detail at the planning stage, which is why the system is fast. The sketch canvas (latent space) is smooth and semantically organized because the VAE's KL regularization keeps it Gaussian-shaped — making the diffusion model's job of navigating from noise to meaning much easier than if it operated on raw pixels."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Latent diffusion moves the diffusion process from pixel space (H×W×3) to latent space (H/f × W/f × C_lat), reducing dimensionality by f²×3/C_lat — typically 48× for Stable Diffusion's f=8, C=4." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The two-stage pipeline trains the VAE independently first, then freezes it while training the latent U-Net. The decoder is never fine-tuned during diffusion training." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The VAE uses perceptual (LPIPS/VGG), adversarial (PatchGAN), and KL losses — not just pixel-level L1/L2 — so the decoded images are sharp and perceptually high-quality despite the compression." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Latent scaling (divide by σ_data ≈ 0.18215 for SD v1) is required to center the latent distribution at unit variance before applying the Gaussian noise schedule." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The quality benefit goes beyond speed: the VAE's smooth, semantically-structured latent space is easier for diffusion to navigate than raw pixel space, resulting in better FID at equivalent compute." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

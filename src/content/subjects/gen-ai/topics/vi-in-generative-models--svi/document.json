@@ -1,0 +1,193 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "From Batch to Stochastic Variational Inference" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Classical mean-field variational inference iterates over the entire dataset to compute each gradient update — unacceptably slow for large N. Stochastic Variational Inference (SVI) applies stochastic gradient descent to the ELBO, estimating the gradient from mini-batches rather than the full dataset. This makes VI applicable to datasets with millions of observations."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because the ELBO factorises over data points (under a mean-field assumption with local latent variables), the gradient with respect to global parameters θ can be estimated from a mini-batch of size M:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\nabla_\\theta \\mathcal{L} \\approx \\frac{N}{M} \\sum_{i \\in \\mathcal{B}} \\nabla_\\theta \\mathcal{L}_i"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The N/M scaling factor corrects for the fact that each mini-batch covers only M of the N data points. The estimator is unbiased when the mini-batch is sampled uniformly."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Local and Global Variables" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "SVI distinguishes two kinds of latent variables:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Local variables" }, { "type": "text", "text": " zᵢ — one per data point (e.g. the latent code for observation xᵢ in a VAE). Their variational parameters φᵢ can be updated from the single corresponding observation." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Global variables" }, { "type": "text", "text": " β — shared across all data points (e.g. topic distributions in an LDA model). Their variational parameters require aggregation over the full dataset, which SVI approximates via mini-batch scaling." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "SVI Algorithm" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The standard SVI update for a model with global parameter θ and per-point latent zᵢ:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sample a mini-batch B ⊂ {1, …, N} of size M." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "For each i ∈ B, optimise the local variational parameters φᵢ to convergence (or one step) holding θ fixed." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Compute the scaled mini-batch gradient ∇θ L ≈ (N/M) Σ_{i∈B} ∇θ Lᵢ." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Update θ with an SGD-style step (Adam, RMSProp, etc.)." }] }]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader\n\nclass SVITrainer:\n    \"\"\"\n    Minimal SVI trainer for a VAE-style model with amortised local inference.\n    The encoder plays the role of the local variational parameters.\n    \"\"\"\n    def __init__(self, vae, dataset, batch_size=128, lr=1e-3):\n        self.vae    = vae\n        self.N      = len(dataset)               # total dataset size\n        self.loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)\n        self.M      = batch_size\n        self.optim  = torch.optim.Adam(vae.parameters(), lr=lr)\n\n    def elbo_minibatch(self, x):\n        \"\"\"ELBO for one mini-batch, scaled to full-dataset equivalent.\"\"\"\n        x_recon, mu, log_var = self.vae(x)\n        recon = self.vae.recon_loss(x_recon, x)         # E_q[log p(x|z)]\n        kl    = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=1).mean()\n        # Scale: each mini-batch is an estimate of the full-data ELBO\n        scale = self.N / len(x)              # N/M correction\n        return scale * recon + kl            # global structure penalised at scale N\n\n    def step(self, x):\n        self.optim.zero_grad()\n        loss = self.elbo_minibatch(x)\n        loss.backward()                      # stochastic gradient of ELBO\n        self.optim.step()\n        return loss.item()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Natural Gradient SVI" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For exponential-family variational distributions, the natural gradient of the ELBO — the gradient in the space of sufficient statistics, preconditioned by the Fisher information matrix — has a particularly simple closed form. Natural gradient SVI converges faster than standard gradient SVI because it accounts for the curvature of the parameter space."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\tilde{\\nabla}_\\lambda \\mathcal{L} = \\mathcal{F}^{-1} \\nabla_\\lambda \\mathcal{L}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where F is the Fisher information matrix of q(z; λ) and λ are the natural parameters. For a Gaussian q, the natural gradient update for the mean λ₁ = Σ⁻¹μ and precision λ₂ = -½Σ⁻¹ simplifies to a coordinate update that resembles an EM step. In practice, Adam's adaptive learning rates approximate some of this preconditioning without requiring an explicit Fisher computation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "SVI in Practice: Pyro" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Pyro's SVI interface encapsulates the SVI loop cleanly.\n# pip install pyro-ppl\nimport pyro\nimport pyro.distributions as dist\nfrom pyro.infer import SVI, Trace_ELBO\nfrom pyro.optim import Adam\n\ndef model(data):\n    \"\"\"Generative model: z ~ N(0,1), x ~ N(z, 0.1).\"\"\"\n    z = pyro.sample(\"z\", dist.Normal(0., 1.).expand([data.shape[0]]).to_event(1))\n    with pyro.plate(\"data\", data.shape[0]):\n        pyro.sample(\"x\", dist.Normal(z, 0.1), obs=data)\n\ndef guide(data):\n    \"\"\"Variational distribution: q(z|x) = N(mu_q, sigma_q).\"\"\"\n    mu_q    = pyro.param(\"mu_q\",    torch.zeros(data.shape[0]))\n    sigma_q = pyro.param(\"sigma_q\", torch.ones(data.shape[0]),\n                         constraint=dist.constraints.positive)\n    pyro.sample(\"z\", dist.Normal(mu_q, sigma_q).to_event(1))\n\nsvi = SVI(model, guide, Adam({\"lr\": 0.01}), loss=Trace_ELBO())\ndata = torch.randn(200, 10)\nfor step in range(500):\n    loss = svi.step(data)\n    if step % 100 == 0:\n        print(f\"Step {step}: ELBO loss = {loss:.2f}\")"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Variance Control in SVI" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Mini-batch gradient estimates add noise. Two standard tools reduce variance:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Reparametrisation:" }, { "type": "text", "text": " replacing z ~ q(z|x) with z = g(φ, ε) gives a pathwise gradient estimate that is orders of magnitude lower variance than the score function (REINFORCE) estimator." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Control variates:" }, { "type": "text", "text": " subtracting a baseline b from the reward f(z) in the score function estimator leaves the gradient unbiased while reducing variance. Common baselines are the sample mean or a learned neural baseline." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Larger mini-batches:" }, { "type": "text", "text": " variance scales as 1/M. Doubling M halves the variance but also doubles the compute per step. The ideal M balances gradient variance against throughput." }] }]
+          }
+        ]
+      }
+    ]
+  }
+}
