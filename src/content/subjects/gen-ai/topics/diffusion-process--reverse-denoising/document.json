@@ -1,0 +1,498 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reverse denoising process is the generative half of a diffusion model: starting from pure Gaussian noise x_T, the model iteratively predicts and removes noise over T timesteps to recover a clean image x_0. While the forward process is fixed and defined analytically, the reverse process is parameterized by a neural network that must learn to invert the corruption. The key insight that makes this tractable is that the true reverse conditional q(x_{t-1}|x_t) depends on the entire dataset, but when conditioned on x_0 it becomes a tractable Gaussian posterior. The neural network learns to approximate this posterior — in practice by predicting the noise ε that was added at timestep t — and iteratively applies that approximation to walk from noise back to data."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The True Reverse Posterior" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The forward process defines q(x_t|x_{t-1}), but generating images requires running it in reverse: given x_t, recover x_{t-1}. The true reverse conditional q(x_{t-1}|x_t) is intractable because it requires integrating over all possible x_0. However, when we condition on x_0 (which we know during training), the posterior becomes a tractable Gaussian:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "q(x_{t-1} \\mid x_t, x_0) = \\mathcal{N}\\!\\left(x_{t-1};\\ \\tilde{\\mu}_t(x_t, x_0),\\ \\tilde{\\beta}_t \\mathbf{I}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This posterior is derived from Bayes' theorem applied to the forward process transitions. Using the Markov property and the closed-form marginals q(x_t|x_0) = N(√ᾱ_t x_0, (1-ᾱ_t)I) from the forward process, the posterior mean and variance are:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\tilde{\\mu}_t(x_t, x_0) = \\frac{\\sqrt{\\bar{\\alpha}_{t-1}}\\,\\beta_t}{1 - \\bar{\\alpha}_t}\\, x_0 + \\frac{\\sqrt{\\alpha_t}\\,(1 - \\bar{\\alpha}_{t-1})}{1 - \\bar{\\alpha}_t}\\, x_t"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\tilde{\\beta}_t = \\frac{1 - \\bar{\\alpha}_{t-1}}{1 - \\bar{\\alpha}_t}\\,\\beta_t"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The posterior variance β̃_t is fully determined by the noise schedule — it is not learned. The model only needs to learn the mean. During inference, x_0 is unknown, so the network must predict it (or equivalently, predict the noise ε that produced x_t from x_0)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Noise Prediction Parameterization" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DDPM parameterizes the network to predict the noise ε rather than directly predicting x_0 or the mean μ̃. This is an architectural choice that empirically gives better results. Given ε-prediction, we can recover x_0 and then compute μ_θ:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{x}_0 = \\frac{x_t - \\sqrt{1-\\bar{\\alpha}_t}\\,\\varepsilon_\\theta(x_t, t)}{\\sqrt{\\bar{\\alpha}_t}}"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mu_\\theta(x_t, t) = \\frac{1}{\\sqrt{\\alpha_t}} \\left( x_t - \\frac{\\beta_t}{\\sqrt{1 - \\bar{\\alpha}_t}}\\, \\varepsilon_\\theta(x_t, t) \\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The learned reverse process p_θ(x_{t-1}|x_t) = N(x_{t-1}; μ_θ(x_t, t), σ_t² I) where σ_t² is typically set to β̃_t (the posterior variance) or β_t (the forward variance). The simplified DDPM training objective follows directly:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{simple}} = \\mathbb{E}_{t, x_0, \\varepsilon}\\left[\\|\\varepsilon - \\varepsilon_\\theta(\\sqrt{\\bar{\\alpha}_t}\\,x_0 + \\sqrt{1-\\bar{\\alpha}_t}\\,\\varepsilon,\\; t)\\|^2\\right]"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "DDPM Sampling Loop" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sampling from a DDPM runs the reverse chain from T down to 0. At each step, the network predicts the noise in x_t, computes the denoised mean, then adds back a small amount of noise (unless t=0). The variance term ensures stochasticity — without it, the process collapses to a deterministic path:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\n\nclass DiffusionReverseProcess:\n    \"\"\"DDPM reverse (sampling) process.\"\"\"\n\n    def __init__(self, forward_process, model: nn.Module, device=\"cuda\"):\n        self.fp = forward_process          # DiffusionForwardProcess instance\n        self.model = model\n        self.device = device\n\n        # Pre-compute posterior variance β̃_t and its log\n        betas = forward_process.betas\n        alpha_bars = forward_process.alpha_bars\n        alpha_bars_prev = torch.cat([torch.ones(1, device=device), alpha_bars[:-1]])\n\n        self.posterior_variance = betas * (1.0 - alpha_bars_prev) / (1.0 - alpha_bars)\n        # Clamp for numerical stability at t=0 (posterior_variance[0] = 0)\n        self.posterior_log_variance = torch.log(\n            self.posterior_variance.clamp(min=1e-20)\n        )\n        # Posterior mean coefficients\n        self.coef_x0 = torch.sqrt(alpha_bars_prev) * betas / (1.0 - alpha_bars)\n        self.coef_xt = (\n            torch.sqrt(forward_process.alphas) * (1.0 - alpha_bars_prev)\n            / (1.0 - alpha_bars)\n        )\n\n    @torch.no_grad()\n    def predict_x0_from_eps(self, x_t: torch.Tensor, t: torch.Tensor,\n                             eps: torch.Tensor) -> torch.Tensor:\n        \"\"\"Recover x̂_0 from predicted noise ε.\"\"\"\n        sqrt_ab   = self.fp.sqrt_alpha_bar[t].view(-1, 1, 1, 1)\n        sqrt_1mab = self.fp.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1)\n        return (x_t - sqrt_1mab * eps) / sqrt_ab\n\n    @torch.no_grad()\n    def q_posterior_mean(self, x0: torch.Tensor, x_t: torch.Tensor,\n                          t: torch.Tensor) -> torch.Tensor:\n        \"\"\"Posterior mean μ̃_t(x_t, x_0) — the ground-truth reverse mean.\"\"\"\n        coef_x0 = self.coef_x0[t].view(-1, 1, 1, 1)\n        coef_xt = self.coef_xt[t].view(-1, 1, 1, 1)\n        return coef_x0 * x0 + coef_xt * x_t\n\n    @torch.no_grad()\n    def p_sample(self, x_t: torch.Tensor, t: int) -> torch.Tensor:\n        \"\"\"One reverse step: x_t -> x_{t-1}.\"\"\"\n        batch = x_t.shape[0]\n        t_tensor = torch.full((batch,), t, device=self.device, dtype=torch.long)\n\n        # Predict noise, recover x̂_0, compute posterior mean\n        eps_pred = self.model(x_t, t_tensor)\n        x0_pred  = self.predict_x0_from_eps(x_t, t_tensor, eps_pred)\n        x0_pred  = x0_pred.clamp(-1.0, 1.0)   # stabilise; optional\n        mu = self.q_posterior_mean(x0_pred, x_t, t_tensor)\n\n        if t == 0:\n            return mu   # no noise at final step\n\n        # Sample: x_{t-1} = μ_θ + σ_t * z\n        log_var = self.posterior_log_variance[t]\n        noise   = torch.randn_like(x_t)\n        return mu + (0.5 * log_var).exp() * noise\n\n    @torch.no_grad()\n    def sample(self, shape: tuple, return_intermediates: bool = False):\n        \"\"\"Full reverse chain: x_T ~ N(0,I) -> x_0.\"\"\"\n        T = len(self.fp.betas)\n        x = torch.randn(*shape, device=self.device)\n        intermediates = [x]\n\n        for t in reversed(range(T)):\n            x = self.p_sample(x, t)\n            if return_intermediates and t % 100 == 0:\n                intermediates.append(x.clone())\n\n        return (x, intermediates) if return_intermediates else x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "DDIM: Deterministic Accelerated Sampling" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DDPM requires T=1000 forward passes to generate one image — far too slow for practical use. DDIM (Denoising Diffusion Implicit Models, Song et al. 2020) derives a non-Markovian reverse process with the same marginals as DDPM but that can skip timesteps. DDIM can generate quality images in 50–200 steps with the same model weights, no retraining needed."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The DDIM update rule introduces a parameter η that interpolates between stochastic (η=1, recovers DDPM) and deterministic (η=0) sampling:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "x_{t-1} = \\sqrt{\\bar{\\alpha}_{t-1}}\\,\\hat{x}_0 + \\sqrt{1 - \\bar{\\alpha}_{t-1} - \\sigma_t^2}\\,\\varepsilon_\\theta(x_t, t) + \\sigma_t\\, z"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\sigma_t = \\eta \\sqrt{\\frac{1 - \\bar{\\alpha}_{t-1}}{1 - \\bar{\\alpha}_t}} \\sqrt{1 - \\frac{\\bar{\\alpha}_t}{\\bar{\\alpha}_{t-1}}}"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "@torch.no_grad()\ndef ddim_sample(\n    model: nn.Module,\n    forward_process,\n    shape: tuple,\n    timesteps: int = 50,\n    eta: float = 0.0,          # 0 = deterministic, 1 = DDPM-like\n    device: str = \"cuda\",\n) -> torch.Tensor:\n    \"\"\"\n    DDIM sampling using a sub-sequence of timesteps.\n    Uses the same model trained with DDPM — no retraining required.\n    \"\"\"\n    T = len(forward_process.betas)\n    # Evenly spaced sub-sequence: e.g. T=1000, timesteps=50 → step every 20\n    step = T // timesteps\n    seq  = list(reversed(range(0, T, step)))     # [999, 979, ..., 19]\n    seq_prev = seq[1:] + [-1]                    # [979, ..., -1]\n\n    alpha_bars = forward_process.alpha_bars\n\n    x = torch.randn(*shape, device=device)\n\n    for t, t_prev in zip(seq, seq_prev):\n        t_tensor = torch.full((shape[0],), t, device=device, dtype=torch.long)\n\n        ab_t    = alpha_bars[t]\n        ab_prev = alpha_bars[t_prev] if t_prev >= 0 else torch.tensor(1.0, device=device)\n\n        eps   = model(x, t_tensor)\n        x0_hat = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()\n        x0_hat = x0_hat.clamp(-1.0, 1.0)\n\n        # Compute σ_t\n        sigma = eta * ((1 - ab_prev) / (1 - ab_t)).sqrt() * (1 - ab_t / ab_prev).sqrt()\n\n        # Direction pointing to x_t\n        dir_xt = (1 - ab_prev - sigma ** 2).clamp(min=0).sqrt() * eps\n\n        noise = sigma * torch.randn_like(x) if sigma > 0 else 0.0\n        x = ab_prev.sqrt() * x0_hat + dir_xt + noise\n\n    return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Time Embedding: Telling the Network Which Step It Is" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The denoising network ε_θ(x_t, t) receives both the noisy image x_t and the timestep t as inputs. Without knowing t, the network cannot tell whether x_t is lightly noised (t small) or heavily noised (t large), and the amount of noise to remove differs dramatically. The standard approach is a sinusoidal embedding of t followed by projection to a hidden dimension, matching the positional encoding used in Transformers:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\nimport torch\nimport torch.nn as nn\n\n\nclass SinusoidalTimeEmbedding(nn.Module):\n    \"\"\"Transformer-style positional encoding for diffusion timesteps.\"\"\"\n\n    def __init__(self, dim: int):\n        super().__init__()\n        self.dim = dim\n        # Two-layer MLP projects raw sinusoidal features to embedding dim\n        self.proj = nn.Sequential(\n            nn.Linear(dim, dim * 4),\n            nn.SiLU(),\n            nn.Linear(dim * 4, dim),\n        )\n\n    def forward(self, t: torch.Tensor) -> torch.Tensor:\n        # t: (B,) integer timesteps\n        device = t.device\n        half = self.dim // 2\n        freqs = torch.exp(\n            -math.log(10000) * torch.arange(half, device=device) / (half - 1)\n        )  # (dim/2,)\n        args = t[:, None].float() * freqs[None, :]   # (B, dim/2)\n        emb  = torch.cat([args.sin(), args.cos()], dim=-1)  # (B, dim)\n        return self.proj(emb)                               # (B, dim)\n\n\nclass ResidualBlock(nn.Module):\n    \"\"\"Basic residual block that injects time embedding via scale-shift.\"\"\"\n\n    def __init__(self, in_ch: int, out_ch: int, time_dim: int):\n        super().__init__()\n        self.conv1 = nn.Sequential(nn.GroupNorm(8, in_ch), nn.SiLU(),\n                                   nn.Conv2d(in_ch, out_ch, 3, padding=1))\n        self.time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_ch * 2))\n        self.conv2 = nn.Sequential(nn.GroupNorm(8, out_ch), nn.SiLU(),\n                                   nn.Conv2d(out_ch, out_ch, 3, padding=1))\n        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()\n\n    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:\n        h = self.conv1(x)\n        # scale-shift conditioning: split time projection into (scale, shift)\n        scale, shift = self.time_mlp(t_emb).unsqueeze(-1).unsqueeze(-1).chunk(2, dim=1)\n        h = h * (1 + scale) + shift\n        h = self.conv2(h)\n        return h + self.skip(x)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Training vs Inference Relationship" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "There is an important asymmetry between training and inference:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Aspect" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Training" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Inference (Sampling)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "x_0 availability" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Known (from dataset)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Unknown (being generated)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Timestep t" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sampled uniformly ∈ [1, T]" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Iterated T → 0 (or subseq)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "x_t source" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "q_sample(x_0, t) in one shot" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "p_sample chain T → 0" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ε ground truth" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "The noise we injected (known)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ε_θ output (approximate)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Cost (per image)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1 forward pass" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "T forward passes (DDPM) or 50–200 (DDIM)" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training is cheap per step: sample a random t, add noise in one shot via the reparameterization trick, compute MSE against the predicted noise. Inference is expensive: the model must be applied T times (DDPM) or at least 50–200 times (DDIM) sequentially, because each step's output is the next step's input."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Prediction Targets: ε, x_0, and v" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Three parameterizations have emerged for what the network predicts:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "ε-prediction (DDPM default)." },
+                  { "type": "text", "text": " Network predicts the noise ε. Works well in practice; the training signal is balanced across timesteps with L_simple." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "x_0-prediction." },
+                  { "type": "text", "text": " Network directly predicts the clean image x̂_0. Equivalent to ε-prediction (you can convert between them), but training can be less stable at high noise levels because the target is harder to predict from a heavily corrupted image." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "v-prediction (Progressive Distillation)." },
+                  { "type": "text", "text": " Predicts v = √ᾱ_t ε - √(1-ᾱ_t) x_0, a weighted combination. Used in Imagen and Progressive Distillation — it is numerically stable across all noise levels and is the standard for distillation and fast samplers." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def convert_predictions(model_output, x_t, t, alpha_bars):\n    \"\"\"Convert between ε, x_0, and v parameterizations.\"\"\"\n    ab  = alpha_bars[t].view(-1, 1, 1, 1)\n    sab = ab.sqrt()\n    s1m = (1 - ab).sqrt()\n\n    # If model predicts ε:\n    def from_eps(eps):\n        x0  = (x_t - s1m * eps) / sab          # recover x_0\n        v   = sab * eps - s1m * x0             # convert to v\n        return {\"x0\": x0, \"v\": v}\n\n    # If model predicts v:\n    def from_v(v):\n        x0  = sab * x_t - s1m * v              # recover x_0\n        eps = s1m * x_t + sab * v              # recover ε\n        return {\"x0\": x0, \"eps\": eps}\n\n    # If model predicts x_0:\n    def from_x0(x0):\n        eps = (x_t - sab * x0) / s1m           # recover ε\n        v   = sab * eps - s1m * x0             # convert to v\n        return {\"eps\": eps, \"v\": v}\n\n    return from_eps, from_v, from_x0"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Failure Modes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Blurry samples at low step counts." },
+                  { "type": "text", "text": " DDPM with fewer than ~500 steps degrades noticeably. DDIM is the fix for reduced-step quality; consistency models go further." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Numerical instability of sqrtm." },
+                  { "type": "text", "text": " The posterior variance β̃_t is 0 at t=0, causing log(0) = -inf. Always clamp before taking the log: " },
+                  { "type": "text", "marks": [{ "type": "code" }], "text": ".clamp(min=1e-20)" },
+                  { "type": "text", "text": "." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Unclamped x̂_0 causes drift." },
+                  { "type": "text", "text": " The x̂_0 estimate from ε-prediction can exceed [-1,1] especially at high noise levels, amplifying errors over the chain. Clamping stabilizes sampling at a slight cost to sample diversity." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Wrong data range." },
+                  { "type": "text", "text": " Diffusion models assume x_0 ∈ [-1,1]. If your data loader returns [0,1] or [0,255], the noise schedule is calibrated wrongly and the model will not converge. Always normalize to [-1,1] before training." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Forgetting to use EMA weights at evaluation." },
+                  { "type": "text", "text": " The instantaneous model weights oscillate during training. FID and IS reported from the training checkpoint (rather than EMA model) are typically 10–30% worse. Always evaluate with EMA weights." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Think of the forward process as a conveyor belt that incrementally buries an image under Gaussian dust until it disappears. The reverse process is a restorer who, at each station, looks at the partially uncovered image and brushes away a small layer of dust. The restorer does not know the original image — she must guess from what is currently visible. The trick is that when dust is Gaussian and deposited Markovially, the distribution of what lies beneath at each step is also Gaussian (the posterior), and the restorer only needs to predict its mean. The DDPM training objective trains the restorer by showing her partially buried images and measuring how well she identifies the dust layer — not the buried image directly."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The true reverse step q(x_{t-1}|x_t) is intractable, but the posterior q(x_{t-1}|x_t, x_0) is a Gaussian with closed-form mean and variance." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Training ε_θ to predict noise (ε-prediction) and then computing the posterior mean from that prediction is the standard DDPM parameterization." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "DDPM sampling runs T sequential model calls; DDIM reduces this to 50–200 with no retraining by using a non-Markovian sub-sequence of timesteps." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Time embedding (sinusoidal + MLP) is essential: without it, the network cannot distinguish lightly noised from heavily noised inputs." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Always train and evaluate on x_0 ∈ [-1,1], clamp intermediate x̂_0 estimates, log-clamp posterior variance, and evaluate with EMA model weights." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
