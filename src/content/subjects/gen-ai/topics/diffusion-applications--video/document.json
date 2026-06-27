@@ -1,0 +1,444 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Video generation with diffusion models extends image diffusion to four dimensions: height, width, and time. The core challenge is temporal consistency — frames must be spatially coherent with each other, not just individually plausible. This requires the model to learn long-range temporal dependencies across frames, which naive frame-by-frame generation fails to do. The key architectural innovation is factorized space-time attention: first attend spatially within each frame, then attend temporally across frames."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why Video Is Harder Than Images"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "An image diffusion model denoises a 3D tensor "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "[C, H, W]"
+          },
+          {
+            "type": "text",
+            "text": ". A video adds a temporal axis, making the input "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "[C, T, H, W]"
+          },
+          {
+            "type": "text",
+            "text": " where "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "T"
+          },
+          {
+            "type": "text",
+            "text": " is the number of frames. Processing this naively with 3D convolutions or full 4D attention is computationally prohibitive — full attention across all spatial and temporal positions scales as "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "O(T²H²W²)"
+          },
+          {
+            "type": "text",
+            "text": ". For a 16-frame, 64×64 clip, that is ~67M attention pairs per head. For 256×256, it is ~4 billion."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Beyond compute, temporal consistency introduces semantic constraints: an object moving behind an occluder must re-appear correctly, lighting must evolve plausibly, and motion must be physically coherent. These constraints are non-local in time, requiring the model to attend across all frames rather than just adjacent ones."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Factorized Space-Time Attention"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Video Diffusion Models paper (Ho et al., 2022) introduces factorized attention: each block first applies spatial attention (within each frame independently) then temporal attention (across frames at each spatial position). This reduces the complexity from "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "O(T²H²W²)"
+          },
+          {
+            "type": "text",
+            "text": " to "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "O(T·H²W² + T²·HW)"
+          },
+          {
+            "type": "text",
+            "text": " — a dramatic saving while preserving the ability to model both kinds of dependency."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\n\nclass SpatialAttention(nn.Module):\n    \"\"\"Standard self-attention over spatial positions, independent per frame.\"\"\"\n\n    def __init__(self, dim: int, num_heads: int = 8):\n        super().__init__()\n        self.norm = nn.LayerNorm(dim)\n        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [B, T, H*W, C]\n        B, T, N, C = x.shape\n        # Merge batch and time: attend spatially within each frame\n        x_flat = x.view(B * T, N, C)\n        h = self.norm(x_flat)\n        h, _ = self.attn(h, h, h)\n        return x + h.view(B, T, N, C)\n\n\nclass TemporalAttention(nn.Module):\n    \"\"\"Self-attention over the time axis at each spatial position.\"\"\"\n\n    def __init__(self, dim: int, num_heads: int = 8):\n        super().__init__()\n        self.norm = nn.LayerNorm(dim)\n        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [B, T, N, C]  where N = H*W\n        B, T, N, C = x.shape\n        # Merge batch and spatial: attend temporally at each location\n        x_t = x.permute(0, 2, 1, 3).reshape(B * N, T, C)   # [B*N, T, C]\n        h = self.norm(x_t)\n        h, _ = self.attn(h, h, h)\n        h = h.view(B, N, T, C).permute(0, 2, 1, 3)           # [B, T, N, C]\n        return x + h\n\n\nclass SpaceTimeBlock(nn.Module):\n    \"\"\"Factorized spatial-then-temporal transformer block.\"\"\"\n\n    def __init__(self, dim: int, num_heads: int = 8):\n        super().__init__()\n        self.spatial_attn = SpatialAttention(dim, num_heads)\n        self.temporal_attn = TemporalAttention(dim, num_heads)\n        self.norm = nn.LayerNorm(dim)\n        self.ffn = nn.Sequential(\n            nn.Linear(dim, dim * 4),\n            nn.GELU(),\n            nn.Linear(dim * 4, dim),\n        )\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [B, T, H*W, C]\n        x = self.spatial_attn(x)   # within each frame\n        x = self.temporal_attn(x)  # across frames\n        x = x + self.ffn(self.norm(x))\n        return x"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Video Diffusion U-Net"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The video U-Net adapts the image diffusion U-Net by inserting temporal attention after each spatial attention block. 2D spatial convolutions are either kept as-is (treating T as a batch dimension) or replaced with pseudo-3D convolutions (a 2D conv followed by a 1D temporal conv) to capture local motion."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class Pseudo3DConv(nn.Module):\n    \"\"\"Spatial 2D conv + temporal 1D conv — captures local motion cheaply.\"\"\"\n\n    def __init__(self, in_ch: int, out_ch: int, spatial_k: int = 3, temporal_k: int = 3):\n        super().__init__()\n        self.spatial = nn.Conv2d(in_ch, out_ch, spatial_k, padding=spatial_k // 2)\n        self.temporal = nn.Conv1d(out_ch, out_ch, temporal_k, padding=temporal_k // 2)\n        self.norm = nn.GroupNorm(min(8, out_ch), out_ch)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        # x: [B, C, T, H, W]\n        B, C, T, H, W = x.shape\n        # Spatial pass: treat T as batch\n        x_s = x.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)  # [B*T, C, H, W]\n        x_s = self.spatial(x_s)                                    # [B*T, C', H, W]\n        Co = x_s.shape[1]\n        x_s = x_s.view(B, T, Co, H, W).permute(0, 2, 1, 3, 4)   # [B, C', T, H, W]\n        # Temporal pass: treat spatial as batch\n        x_t = x_s.permute(0, 3, 4, 1, 2).reshape(B * H * W, Co, T)  # [B*H*W, C', T]\n        x_t = self.temporal(x_t)                                       # [B*H*W, C', T]\n        x_t = x_t.view(B, H, W, Co, T).permute(0, 3, 4, 1, 2)       # [B, C', T, H, W]\n        return F.silu(self.norm(x_t.reshape(B * T, Co, H, W))).view(B, Co, T, H, W)\n\n\nclass VideoResBlock(nn.Module):\n    \"\"\"ResBlock for video: pseudo-3D conv + AdaGN time conditioning.\"\"\"\n\n    def __init__(self, in_ch: int, out_ch: int, time_emb_dim: int = 256):\n        super().__init__()\n        self.conv1 = Pseudo3DConv(in_ch, out_ch)\n        self.conv2 = Pseudo3DConv(out_ch, out_ch)\n        self.time_proj = nn.Linear(time_emb_dim, out_ch * 2)  # scale + shift\n        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()\n        self.norm1 = nn.GroupNorm(min(8, in_ch), in_ch)\n        self.norm2 = nn.GroupNorm(min(8, out_ch), out_ch)\n\n    def forward(\n        self,\n        x: torch.Tensor,        # [B, C, T, H, W]\n        t_emb: torch.Tensor,    # [B, time_emb_dim]\n    ) -> torch.Tensor:\n        B, C, T, H, W = x.shape\n        # Spatial norms apply per-frame: reshape\n        h = x.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)\n        h = F.silu(self.norm1(h)).view(B, T, C, H, W).permute(0, 2, 1, 3, 4)\n        h = self.conv1(h)\n        # AdaGN conditioning\n        scale, shift = self.time_proj(t_emb).chunk(2, dim=-1)  # [B, out_ch] each\n        scale = scale.view(B, -1, 1, 1, 1)\n        shift = shift.view(B, -1, 1, 1, 1)\n        Co = h.shape[1]\n        h_flat = h.permute(0, 2, 1, 3, 4).reshape(B * T, Co, H, W)\n        h_normed = self.norm2(h_flat).view(B, T, Co, H, W).permute(0, 2, 1, 3, 4)\n        h = h_normed * (1 + scale) + shift\n        h = F.silu(h)\n        h = self.conv2(h)\n        # Skip connection\n        skip = x.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)\n        skip = self.skip(skip).view(B, T, -1, H, W).permute(0, 2, 1, 3, 4)\n        return h + skip"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Training Objective"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Video diffusion training uses the same "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "ε"
+          },
+          {
+            "type": "text",
+            "text": "-prediction objective as image DDPM, but the noise is added jointly to all frames with the same timestep "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "t"
+          },
+          {
+            "type": "text",
+            "text": ". The forward process corrupts each frame independently (i.i.d. noise per frame), while the reverse model must learn to denoise them jointly to achieve temporal coherence."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def video_diffusion_loss(\n    model,\n    video: torch.Tensor,      # [B, C, T, H, W] in [-1, 1]\n    alphas_bar: torch.Tensor, # [T_steps]\n    t_emb_fn,                 # timestep -> embedding\n    text_emb: torch.Tensor,   # [B, L, D] text conditioning\n    device: torch.device,\n) -> torch.Tensor:\n    B, C, T, H, W = video.shape\n    # Sample a single diffusion timestep per clip\n    t = torch.randint(0, len(alphas_bar), (B,), device=device)\n    ab = alphas_bar[t].view(B, 1, 1, 1, 1)  # broadcast over [C, T, H, W]\n\n    # Add i.i.d. Gaussian noise to every frame\n    eps = torch.randn_like(video)\n    x_t = ab.sqrt() * video + (1 - ab).sqrt() * eps\n\n    # Predict noise (model sees all frames jointly)\n    t_emb = t_emb_fn(t)                        # [B, emb_dim]\n    eps_pred = model(x_t, t_emb, text_emb)     # [B, C, T, H, W]\n    return F.mse_loss(eps_pred, eps)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Conditioning for Video Generation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Text-to-video models (Make-A-Video, CogVideoX) add text conditioning via cross-attention from frame features to text embeddings, identically to text-to-image. Image-to-video models (Stable Video Diffusion) additionally condition on a single reference frame — its CLIP or VAE encoding is injected via cross-attention or channel concatenation to anchor appearance across all generated frames."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "class ImageConditionedVideoModel(nn.Module):\n    \"\"\"\n    Image-to-video: generate T frames conditioned on a reference image.\n    The reference image feature is cross-attended by every frame.\n    \"\"\"\n\n    def __init__(self, dim: int = 512, num_heads: int = 8, num_frames: int = 16):\n        super().__init__()\n        self.num_frames = num_frames\n        # Encode reference image into a context embedding\n        self.img_encoder = nn.Sequential(\n            nn.Conv2d(3, dim, 4, stride=4),   # rough patchify\n            nn.Flatten(2),                     # [B, dim, N_patches]\n        )\n        # Cross-attention: each frame attends to reference image patches\n        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)\n        self.norm_q = nn.LayerNorm(dim)\n        self.norm_kv = nn.LayerNorm(dim)\n\n    def forward(\n        self,\n        x: torch.Tensor,        # [B, C, T, H, W] noisy video\n        ref_img: torch.Tensor,  # [B, 3, H, W] reference frame\n        t_emb: torch.Tensor,    # [B, dim]\n    ) -> torch.Tensor:\n        B, C, T, H, W = x.shape\n        # Encode reference image: [B, dim, N] → [B, N, dim]\n        ref_feat = self.img_encoder(ref_img).permute(0, 2, 1)  # [B, N_patches, dim]\n\n        # For each frame, cross-attend to reference features\n        # Flatten spatial: [B, T, H*W, C] reshape for cross-attn\n        x_flat = x.permute(0, 2, 3, 4, 1).reshape(B * T, H * W, C)\n        ref_expanded = ref_feat.unsqueeze(1).expand(-1, T, -1, -1).reshape(B * T, -1, C)\n\n        q = self.norm_q(x_flat)\n        kv = self.norm_kv(ref_expanded)\n        attended, _ = self.cross_attn(q, kv, kv)\n        x_flat = x_flat + attended   # residual\n\n        return x_flat.view(B, T, H, W, C).permute(0, 4, 1, 2, 3)  # [B, C, T, H, W]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Long Video Generation: Autoregressive Extension"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A base video diffusion model generates a fixed number of frames (e.g., 16). To produce longer videos, the standard approach is autoregressive extension: the last "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "italic"}],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " frames from the previous clip are treated as conditioning context for the next clip. The model is trained with these context frames provided as clean frames (not noised), concatenated channel-wise with the noisy target frames."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def autoregressive_video_extension(\n    model,\n    initial_frames: torch.Tensor,  # [B, C, k, H, W] conditioning frames (clean)\n    text_emb: torch.Tensor,\n    alphas_bar: torch.Tensor,\n    betas: torch.Tensor,\n    n_clips: int = 4,\n    T_frames: int = 16,            # frames to generate per clip\n    k_context: int = 4,            # overlap frames from previous clip\n    ddim_steps: int = 50,\n    device: torch.device = torch.device('cpu'),\n) -> torch.Tensor:\n    \"\"\"\n    Extend a video by generating n_clips clips, each conditioned on the\n    last k_context frames of the previous clip.\n    \"\"\"\n    all_frames = [initial_frames]\n    context = initial_frames[:, :, -k_context:]  # [B, C, k, H, W]\n\n    for clip_idx in range(n_clips):\n        B, C, _, H, W = context.shape\n        # Start from pure noise for T_frames new frames\n        x = torch.randn(B, C, T_frames, H, W, device=device)\n\n        # DDIM-style sampling\n        timesteps = torch.linspace(len(alphas_bar) - 1, 0, ddim_steps, dtype=torch.long)\n        for t_idx, t in enumerate(timesteps):\n            t_batch = torch.full((B,), t, device=device, dtype=torch.long)\n            ab_t = alphas_bar[t]\n\n            # Concatenate context (clean) and noisy target along time axis\n            # Model receives [k_context clean | T_frames noisy] frames\n            model_input = torch.cat([context, x], dim=2)  # [B, C, k+T, H, W]\n            eps_pred = model(model_input, t_batch, text_emb)\n            # Only use prediction for the T_frames noisy frames\n            eps_pred = eps_pred[:, :, k_context:]  # [B, C, T, H, W]\n\n            # DDIM update for x\n            x0_pred = (x - (1 - ab_t).sqrt() * eps_pred) / ab_t.sqrt()\n            x0_pred = x0_pred.clamp(-1, 1)\n            if t_idx < len(timesteps) - 1:\n                ab_prev = alphas_bar[timesteps[t_idx + 1]]\n                x = ab_prev.sqrt() * x0_pred + (1 - ab_prev).sqrt() * eps_pred\n            else:\n                x = x0_pred\n\n        all_frames.append(x)\n        context = x[:, :, -k_context:]  # update context for next clip\n\n    return torch.cat(all_frames, dim=2)  # [B, C, k + n_clips*T, H, W]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Architecture Comparison"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Resolution / Frames"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Temporal mechanism"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Conditioning"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Video Diffusion Models (Ho 2022)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "64×64 / 16f"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Factorized space-time attention"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Unconditional / class"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Make-A-Video (Meta 2022)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "256×256 / 16f"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pseudo-3D conv + temporal attn"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Text (CLIP)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Stable Video Diffusion"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "576×1024 / 25f"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Temporal conv + temporal attn"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Image (CLIP + VAE)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CogVideoX"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "480×720 / 49f"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "3D full attention (DiT-based)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Text (T5)"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Practical Considerations"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Latent video diffusion:"},
+                  {"type": "text", "text": " Generating in pixel space at high resolution is impractical. Most modern models (SVD, CogVideoX) use a video VAE that encodes "
+                  },
+                  {"type": "text", "marks": [{"type": "code"}], "text": "[C, T, H, W]"},
+                  {"type": "text", "text": " into a lower-dimensional latent "
+                  },
+                  {"type": "text", "marks": [{"type": "code"}], "text": "[C', T/t, H/f, W/f]"},
+                  {"type": "text", "text": " using spatial factor f=8 and temporal factor t=4."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Motion magnitude conditioning:"},
+                  {"type": "text", "text": " SVD conditions on a scalar \"motion bucket ID\" that controls how much motion to generate — low values produce nearly-static outputs, high values produce large motion."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Causal temporal attention:"},
+                  {"type": "text", "text": " For autoregressive streaming video, replacing full temporal attention with causal (lower-triangular mask) attention enables real-time generation where future frames do not attend to past."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "marks": [{"type": "bold"}], "text": "Training data:"},
+                  {"type": "text", "text": " Video models require large-scale video-text datasets (WebVid, HD-VILA, Panda-70M). Training from scratch is extremely expensive (~$1M+); most work fine-tunes or adapts pre-trained image diffusion models by inflating 2D convolutions to pseudo-3D."}
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Mental Model"}]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Image diffusion generates a single canvas; video diffusion generates a stack of canvases that must cohere as if painted in sequence. Factorized attention solves this by first ensuring each canvas is internally consistent (spatial attention), then ensuring the stack tells a coherent story (temporal attention). Pseudo-3D convolutions add cheap local motion awareness, while autoregressive extension stitches clips by anchoring each new clip to the clean end of the previous one."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Factorized space-time attention (spatial within frames, temporal across frames) reduces complexity from O(T²H²W²) to O(T·H²W² + T²·HW), making video diffusion tractable."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Pseudo-3D convolutions (2D spatial + 1D temporal) capture local motion at low cost and allow inflating image model weights to video models."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "The forward process adds i.i.d. noise to all frames at the same timestep; the model must jointly denoise them, enforcing temporal consistency through shared attention."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Autoregressive extension generates long videos by conditioning each new clip on the final k clean frames of the previous clip."}
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {"type": "text", "text": "Modern video diffusion models (SVD, CogVideoX) operate in a video latent space with joint spatial (f=8) and temporal (t=4) compression to make high-resolution generation feasible."}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
