@@ -1,0 +1,718 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Beta-VAE is a minimal modification of the standard VAE that scales the KL divergence term in the ELBO by a factor β > 1. The extra pressure on the approximate posterior to match the prior forces the latent code to become more compressed and, as a consequence, more disentangled — individual dimensions of z tend to capture single independent factors of variation rather than entangled combinations. The cost is reduced reconstruction quality; β-VAE is therefore a conscious trade-off between the fidelity of reconstruction and the interpretability and independence of the latent representation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "The Beta-VAE Objective" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The standard ELBO is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\text{VAE}} = \\mathbb{E}_{q_\\phi(z|x)}[\\log p_\\theta(x|z)] - \\mathrm{KL}(q_\\phi(z|x)\\|p(z))"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "β-VAE (Higgins et al., 2017) replaces this with:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\beta} = \\mathbb{E}_{q_\\phi(z|x)}[\\log p_\\theta(x|z)] - \\beta\\, \\mathrm{KL}(q_\\phi(z|x)\\|p(z)), \\qquad \\beta > 1"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When β = 1 the objective is the standard ELBO. When β > 1, each nat of KL is penalised more heavily than each nat of reconstruction loss. The optimiser responds by shrinking posterior variances toward 1 and means toward 0, reducing the information capacity of z. Under an information-bottleneck interpretation, the β-VAE learns to encode only those factors that are maximally informative about x given the available channel capacity."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why β > 1 Encourages Disentanglement" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Disentanglement means that each latent dimension z_j responds to exactly one underlying generative factor (e.g. pose, colour, scale) and is independent of the others. The KL term for an isotropic Gaussian prior decomposes dimension-by-dimension:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathrm{KL}(q_\\phi(z|x)\\|p(z)) = \\sum_{j=1}^{d} \\mathrm{KL}\\bigl(\\mathcal{N}(\\mu_j, \\sigma_j^2)\\,\\|\\,\\mathcal{N}(0,1)\\bigr)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With β > 1, the model faces a stricter information bottleneck. To reconstruct x well under this constraint it learns to allocate each generative factor to a separate dimension — entanglement (multiple factors sharing a dimension) wastes capacity. There is no formal guarantee of perfect disentanglement, but empirically β-VAE achieves substantially better disentanglement than β = 1 on standard benchmarks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Implementation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "β-VAE requires only changing one hyperparameter in the loss function:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n\ndef kl_diagonal_gaussian(mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:\n    \"\"\"KL(N(mu, sigma^2) || N(0,1)), summed over latent dims, mean over batch.\"\"\"\n    return -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=-1).mean()\n\n\ndef beta_vae_loss(\n    x: torch.Tensor,\n    x_hat_logits: torch.Tensor,\n    mu: torch.Tensor,\n    log_var: torch.Tensor,\n    beta: float = 4.0,\n) -> tuple[torch.Tensor, dict]:\n    \"\"\"\n    β-VAE loss. The only difference from VAE is the `beta` multiplier.\n\n    Args:\n        x: original input, values in [0, 1]\n        x_hat_logits: decoder output before sigmoid\n        mu, log_var: encoder output\n        beta: KL weight (1 = standard VAE; 4-10 for disentanglement)\n\n    Returns:\n        (total_loss, metrics dict)\n    \"\"\"\n    # Reconstruction: binary cross-entropy per pixel, mean over batch\n    recon = F.binary_cross_entropy_with_logits(\n        x_hat_logits, x, reduction='none'\n    ).sum(dim=[1, 2, 3]).mean()\n\n    kl = kl_diagonal_gaussian(mu, log_var)\n\n    total = recon + beta * kl\n    return total, {'recon': recon.item(), 'kl': kl.item(), 'beta_kl': (beta * kl).item()}\n\n\n# Training loop (identical to VAE, just pass a different beta)\ndef train_epoch(model, loader, optimizer, beta=4.0, device='cuda'):\n    model.train()\n    for x, _ in loader:\n        x = x.to(device)\n        x_hat, mu, log_var = model(x)\n        loss, metrics = beta_vae_loss(x, x_hat, mu, log_var, beta=beta)\n        optimizer.zero_grad()\n        loss.backward()\n        optimizer.step()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Choosing β" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "β is a dataset- and task-specific hyperparameter. Typical values range from 2 to 10 for image generation; the original paper used β = 4 on dSprites and β = 6 on 3D Chairs. The following heuristic guides the search:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β value" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Effect" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Symptom" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β = 1" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Standard VAE; best reconstruction" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Latent dims entangled" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β = 2–5" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Mild disentanglement, mild quality drop" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Usually the sweet spot for images" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β = 10–20" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Strong disentanglement, blurry recons" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Many inactive dimensions, poor FID" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β > 20" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Posterior collapse; z ignored by decoder" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Zero active units, constant output" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical sweep: train with β ∈ {1, 2, 4, 8} and evaluate each with disentanglement metric + FID. Plot the Pareto front of disentanglement vs reconstruction quality."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Measuring Disentanglement" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Several quantitative metrics have been proposed. They all require a dataset with ground-truth generative factors (pose, scale, colour, etc.) — available in synthetic benchmarks like dSprites, 3D Shapes, and MPI3D."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "β-VAE metric (Higgins et al.):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Fix one factor, vary others, encode pairs of images, train a linear classifier on the difference of encoded means to predict which factor was fixed. Score = classifier accuracy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "FactorVAE metric (Kim & Mnih, 2018):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " For each generative factor, find the latent dimension with lowest variance. A linear classifier on the argmin predicts the fixed factor."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "MIG (Mutual Information Gap, Chen et al.):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Measures the gap between the first and second highest mutual information between a latent dimension and each generative factor. Higher gap = better disentanglement."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "DCI (Eastwood & Williams, 2018):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Three complementary scores: Disentanglement (one factor per dim), Completeness (one dim per factor), and Informativeness (how well factors can be predicted from z)."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Computing MIG in PyTorch (sketch — requires ground-truth factors)\nimport torch\nfrom sklearn.metrics import mutual_info_score\nimport numpy as np\n\n\ndef compute_mig(encoded_means: np.ndarray,\n                factors: np.ndarray,\n                n_bins: int = 20) -> float:\n    \"\"\"\n    Mutual Information Gap.\n\n    Args:\n        encoded_means: (N, z_dim) posterior means\n        factors: (N, n_factors) discrete ground-truth factor values\n        n_bins: number of bins for discretising continuous z dims\n\n    Returns:\n        MIG score in [0, 1]; higher is more disentangled.\n    \"\"\"\n    n, z_dim = encoded_means.shape\n    n_factors = factors.shape[1]\n\n    # Discretise z dimensions for MI estimation\n    z_discrete = np.apply_along_axis(\n        lambda col: np.digitize(col, np.histogram(col, bins=n_bins)[1][:-1]),\n        axis=0, arr=encoded_means\n    )\n\n    mig_scores = []\n    for f_idx in range(n_factors):\n        f = factors[:, f_idx]\n        mi = np.array([mutual_info_score(f, z_discrete[:, j])\n                       for j in range(z_dim)])\n        mi_sorted = np.sort(mi)[::-1]     # descending\n        h_f = -np.sum(np.bincount(f.astype(int)) / n *\n                      np.log(np.bincount(f.astype(int)) / n + 1e-10))\n        mig_scores.append((mi_sorted[0] - mi_sorted[1]) / (h_f + 1e-10))\n\n    return float(np.mean(mig_scores))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "β-TCVAE: Decomposing the KL" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Chen et al. (2018) showed that the KL term in the ELBO can be decomposed into three components with different effects on disentanglement:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathrm{KL}(q_\\phi(z|x)\\|p(z)) = \\underbrace{\\mathbb{E}[\\log q_\\phi(z|x) - \\log q_\\phi(z)]}_\\text{MI: encoder-latent info} + \\underbrace{\\mathbb{E}[\\log q_\\phi(z) - \\prod_j q_\\phi(z_j)]}_\\text{TC: total correlation} + \\underbrace{\\mathbb{E}\\!\\left[\\sum_j\\log q_\\phi(z_j) - \\log p(z_j)\\right]}_\\text{DW: dimension-wise KL}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The total correlation (TC) term measures statistical dependence between latent dimensions — it is exactly what disentanglement metrics try to minimise. β-TCVAE penalises only the TC term with a large β:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathcal{L}_{\\beta\\text{-TCVAE}} = \\mathbb{E}[\\log p_\\theta(x|z)] - \\alpha\\cdot\\mathrm{MI} - \\beta\\cdot\\mathrm{TC} - \\gamma\\cdot\\mathrm{DW}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With α = γ = 1 and β > 1, the model achieves better disentanglement than β-VAE at the same β value because it only penalises the entanglement-inducing part of the KL, not the reconstruction-relevant mutual information."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Beta-VAE vs β-TCVAE vs FactorVAE" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Model" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "What it penalises" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Advantage over β-VAE" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β-VAE" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Full KL × β" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Baseline; simplest" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "β-TCVAE" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Total correlation term × β" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Better disentanglement at same reconstruction quality" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "FactorVAE" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "TC via density-ratio discriminator" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Avoids Monte-Carlo TC estimation bias" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Ada-GVAE" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Selectively fixes dimensions per sample pair" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Explicit supervision from image pairs" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Annealed β for Better Initialisation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Starting with a high β often causes posterior collapse before the decoder has learned to reconstruct anything. A common fix is to anneal β from 0 to its target value over the first portion of training:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "def anneal_beta(step: int, warmup_steps: int, beta_target: float) -> float:\n    \"\"\"\n    Linearly anneal β from 0 to beta_target over warmup_steps.\n    After warmup, β = beta_target.\n    \"\"\"\n    return beta_target * min(1.0, step / warmup_steps)\n\n\n# Example: anneal β from 0 to 4 over 10,000 steps\nglobal_step = 0\nfor epoch in range(num_epochs):\n    for x, _ in train_loader:\n        beta = anneal_beta(global_step, warmup_steps=10_000, beta_target=4.0)\n        x_hat, mu, log_var = model(x.to(device))\n        loss, _ = beta_vae_loss(x.to(device), x_hat, mu, log_var, beta=beta)\n        optimizer.zero_grad()\n        loss.backward()\n        optimizer.step()\n        global_step += 1"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Limitations of β-VAE" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Reconstruction-disentanglement trade-off is hard."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Any β > 1 degrades reconstruction quality. For applications that require both sharp reconstructions and disentangled z, β-VAE alone is insufficient."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "No guarantee of disentanglement."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Locatello et al. (2019) proved that disentangled representations cannot be learnt without inductive biases beyond the β-VAE objective — any disentanglement that does occur is dependent on the data distribution, architecture, and random seed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Metrics require ground-truth factors."
+                  },
+                  {
+                    "type": "text",
+                    "text": " MIG, FactorVAE metric, and DCI all need labelled generative factors, which are available only in synthetic datasets. Evaluating disentanglement on real-world datasets (faces, natural images) requires proxy tasks."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Setting β too high from the start."
+                  },
+                  {
+                    "type": "text",
+                    "text": " A β of 10+ without annealing almost always causes posterior collapse on the first epoch. Anneal β linearly over 5,000–20,000 steps."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Evaluating disentanglement only visually."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Walking individual latent dimensions looks impressive but is not a reliable indicator of disentanglement. Use quantitative metrics on a controlled dataset."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Not monitoring active units."
+                  },
+                  {
+                    "type": "text",
+                    "text": " As β increases, some dimensions collapse. Track Var_x[μ_j(x)] for each j. Dimensions with variance < 0.01 are inactive and contribute nothing to generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [{ "type": "bold" }],
+                    "text": "Mixing up the KL units."
+                  },
+                  {
+                    "type": "text",
+                    "text": " If the reconstruction loss is in nats (NLL) and the KL is also in nats, the β interpretation is clean. If the reconstruction uses MSE but you compare to β values from papers that used BCE, the scale differs and the same β will have a very different effect."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always anneal β from 0 over the first 10–20% of training steps to avoid immediate posterior collapse."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor both reconstruction quality (per-pixel loss) and disentanglement (active units, MIG if feasible) — do not optimise one at the expense of the other without knowing the cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "If you need sharp reconstructions, try β-TCVAE or FactorVAE — they achieve higher disentanglement at the same reconstruction quality by targeting only the TC component."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Report β explicitly when comparing models — a \"VAE with KL weight\" reported without β makes reproduction impossible."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Mental Model" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of the latent space as a filing cabinet and z as a folder label. In a standard VAE the folder can be as complex as needed — it can reference multiple attributes simultaneously (\"blond wavy hair, glasses, old\"). With a large β, you impose a rule: each folder can only have one label at most. To reconstruct a face with all those attributes, the filing system must put each attribute in a separate folder. The decoder then assembles the face by looking up each folder separately. The rule costs some filing accuracy (reconstruction quality) but makes the organisation transparent and structured (disentanglement). The total correlation decomposition reveals exactly what β-VAE does to achieve this: it taxes the cost of labelling multiple things in a single folder."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "β-VAE multiplies the KL term by β > 1, tightening the information bottleneck and encouraging each latent dimension to capture one independent factor of variation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reconstruction quality decreases as β increases — the optimal β is a Pareto trade-off point on the disentanglement–reconstruction frontier."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "β-TCVAE improves on β-VAE by penalising only the total correlation component of the KL, achieving better disentanglement at equivalent reconstruction quality."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Disentanglement is not guaranteed — Locatello et al. proved it requires additional inductive biases. β-VAE improves the odds but not the certainty."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always anneal β from 0 and monitor active units; a drop to near-zero active units signals posterior collapse, at which point lowering β or slowing the annealing schedule is the fix."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
