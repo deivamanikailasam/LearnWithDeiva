@@ -1,0 +1,261 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPT — Generative Pre-trained Transformer — is the architecture behind OpenAI's model family and is the template for virtually every large autoregressive language model in use today: LLaMA, Mistral, Falcon, Qwen, and many others are all GPT-style decoder-only transformers. The defining choices are simple: use only the transformer decoder stack, apply a causal (left-to-right) attention mask, and train with next-token prediction loss. Everything else — scale, context length, tokeniser — is tuned across versions. Understanding GPT at the architectural level is essential because these choices determine what the model can and cannot do."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Core Architectural Choices"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Decoder-only. "},
+              {"type": "text", "text": "GPT discards the encoder half of the original Transformer (Vaswani et al. 2017). There is no cross-attention to an encoder; every layer is a self-attention block with a causal mask. This makes the architecture simpler and well-matched to generation tasks."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Causal (autoregressive) attention. "},
+              {"type": "text", "text": "Position t can attend only to positions 1…t. This is enforced by masking the upper triangle of the attention weight matrix to −∞ before softmax, so each token's representation depends only on past tokens — exactly what next-token prediction requires."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Pre-Layer Normalisation (Pre-LN). "},
+              {"type": "text", "text": "GPT-2 moved LayerNorm before each sub-layer (attention and FFN) rather than after. Pre-LN makes training more stable at large scale; residual streams remain at a controlled magnitude."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Learned positional embeddings. "},
+              {"type": "text", "text": "GPT-1/2 used learned absolute position embeddings. GPT-3 kept this; later GPT-style models (LLaMA, Mistral) replaced them with Rotary Position Embeddings (RoPE), which generalise better to long contexts."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "GPT Block in Code"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single GPT transformer block consists of masked multi-head self-attention followed by a position-wise feed-forward network, with residual connections and Pre-LN around each:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\nimport torch\nimport torch.nn as nn\nfrom torch import Tensor\n\n\nclass CausalSelfAttention(nn.Module):\n    def __init__(self, d_model: int, n_heads: int, max_len: int = 2048):\n        super().__init__()\n        assert d_model % n_heads == 0\n        self.n_heads = n_heads\n        self.head_dim = d_model // n_heads\n        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)\n        self.proj = nn.Linear(d_model, d_model, bias=False)\n        # Causal mask: upper triangle is -inf so future tokens are invisible.\n        mask = torch.triu(torch.ones(max_len, max_len), diagonal=1).bool()\n        self.register_buffer(\"causal_mask\", mask)\n\n    def forward(self, x: Tensor) -> Tensor:  # x: (B, T, d_model)\n        B, T, C = x.shape\n        qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim)\n        q, k, v = qkv.unbind(dim=2)          # each (B, T, H, head_dim)\n        q = q.transpose(1, 2)                # (B, H, T, head_dim)\n        k = k.transpose(1, 2)\n        v = v.transpose(1, 2)\n\n        scale  = math.sqrt(self.head_dim)\n        scores = torch.matmul(q, k.transpose(-2, -1)) / scale  # (B, H, T, T)\n        scores = scores.masked_fill(self.causal_mask[:T, :T], float(\"-inf\"))\n        weights = torch.softmax(scores, dim=-1)\n        out = torch.matmul(weights, v)        # (B, H, T, head_dim)\n        out = out.transpose(1, 2).reshape(B, T, C)\n        return self.proj(out)\n\n\nclass GPTBlock(nn.Module):\n    \"\"\"One GPT transformer block: Pre-LN, causal attention, Pre-LN, FFN.\"\"\"\n    def __init__(self, d_model: int, n_heads: int, ffn_factor: int = 4):\n        super().__init__()\n        self.ln1 = nn.LayerNorm(d_model)\n        self.attn = CausalSelfAttention(d_model, n_heads)\n        self.ln2 = nn.LayerNorm(d_model)\n        self.ffn  = nn.Sequential(\n            nn.Linear(d_model, ffn_factor * d_model),\n            nn.GELU(),\n            nn.Linear(ffn_factor * d_model, d_model),\n        )\n\n    def forward(self, x: Tensor) -> Tensor:\n        x = x + self.attn(self.ln1(x))   # residual + attention\n        x = x + self.ffn(self.ln2(x))    # residual + FFN\n        return x\n\n\nclass GPT(nn.Module):\n    \"\"\"Minimal GPT: token + position embeddings → N blocks → LM head.\"\"\"\n    def __init__(self, vocab_size: int, d_model: int, n_heads: int, n_layers: int, max_len: int = 2048):\n        super().__init__()\n        self.token_emb = nn.Embedding(vocab_size, d_model)\n        self.pos_emb   = nn.Embedding(max_len, d_model)   # learned absolute positions\n        self.blocks    = nn.Sequential(*[GPTBlock(d_model, n_heads) for _ in range(n_layers)])\n        self.ln_f      = nn.LayerNorm(d_model)             # final Pre-LN before LM head\n        self.lm_head   = nn.Linear(d_model, vocab_size, bias=False)\n        self.token_emb.weight = self.lm_head.weight        # weight tying\n\n    def forward(self, idx: Tensor) -> Tensor:              # idx: (B, T) token ids\n        B, T = idx.shape\n        positions = torch.arange(T, device=idx.device).unsqueeze(0)  # (1, T)\n        x = self.token_emb(idx) + self.pos_emb(positions)\n        x = self.blocks(x)\n        x = self.ln_f(x)\n        return self.lm_head(x)                             # (B, T, vocab_size) — logits\n\n\n# GPT-2 small: 117M params\nmodel = GPT(vocab_size=50257, d_model=768, n_heads=12, n_layers=12)\nn_params = sum(p.numel() for p in model.parameters())\nprint(f\"{n_params / 1e6:.0f}M parameters\")\n# 85M parameters (weight tying saves ~38M vs un-tied)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The GPT Family: Scale Over Versions"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Params"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Layers"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "d_model"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Context"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Key advance"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-1 (2018)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "117M"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "12"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "768"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "512"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pretraining + task-specific fine-tuning"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-2 (2019)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1.5B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "48"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1600"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1024"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pre-LN, zero-shot task transfer"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-3 (2020)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "175B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "96"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "12288"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2048"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Few-shot in-context learning at scale"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-4 (2023)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Undisclosed (MoE)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Undisclosed"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Undisclosed"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "128k"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RLHF, multimodal input, long context"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Autoregressive Generation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPT generates one token at a time. At each step, the entire history (prompt + previously generated tokens) is re-run through all layers to produce the next token's logit distribution. Sampling from that distribution yields the next token, which is appended and the process repeats:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n\ndef generate(\n    model: GPT,\n    prompt_ids: list[int],\n    max_new_tokens: int = 50,\n    temperature: float = 1.0,\n    top_k: int = 0,\n) -> list[int]:\n    \"\"\"\n    Autoregressive generation: sample one token at a time.\n\n    temperature < 1  → sharper distribution (more predictable)\n    temperature > 1  → flatter distribution (more random)\n    top_k > 0        → restrict sampling to top-k tokens\n    \"\"\"\n    model.eval()\n    ids = list(prompt_ids)\n\n    with torch.no_grad():\n        for _ in range(max_new_tokens):\n            context = torch.tensor([ids], dtype=torch.long)  # (1, T)\n            logits  = model(context)[:, -1, :]               # (1, vocab) — last position only\n\n            if temperature != 1.0:\n                logits = logits / temperature\n\n            if top_k > 0:\n                # Zero out all but the top-k logits.\n                values, _ = torch.topk(logits, top_k)\n                logits[logits < values[:, -1:]] = float(\"-inf\")\n\n            probs   = F.softmax(logits, dim=-1)\n            next_id = torch.multinomial(probs, num_samples=1).item()\n            ids.append(next_id)\n\n    return ids  # prompt_ids + generated token ids\n\n\n# Key property: the model re-processes the FULL context each step.\n# KV-cache (used in practice) avoids recomputing past key/value pairs,\n# reducing per-step compute from O(T²) to O(T) after the first pass.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why Causal Masking Matters"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The causal mask is what makes next-token prediction self-supervised: the label at position t is the input at position t+1, which the model cannot see during forward pass. This property also makes GPT trivially parallelisable during training — you pass the whole sequence once and compute the loss at every position simultaneously:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\n\n\ndef gpt_loss(model: GPT, input_ids: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Standard causal language modelling loss.\n    input_ids: (B, T) — the model sees positions 0..T-2 and predicts 1..T-1.\n    \"\"\"\n    logits = model(input_ids[:, :-1])          # (B, T-1, vocab_size) — shift right\n    targets = input_ids[:, 1:].contiguous()    # (B, T-1) — shift left\n    loss = nn.functional.cross_entropy(\n        logits.reshape(-1, logits.size(-1)),   # (B*(T-1), vocab)\n        targets.reshape(-1),                   # (B*(T-1),)\n    )\n    return loss\n\n\n# During one forward pass:\n# position 0 predicts position 1\n# position 1 predicts position 2\n# ...\n# position T-2 predicts position T-1\n# All T-1 predictions in ONE forward pass — efficient training.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "GPT vs Other Architectures"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Property"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT (decoder-only)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "BERT (encoder-only)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "T5 (encoder-decoder)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Attention type"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Causal (left-to-right)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Bidirectional (full)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Bidirectional enc / Causal dec"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Training objective"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Next-token prediction (CLM)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Masked token prediction (MLM)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Span-corruption + reconstruction"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best for"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Generation, few-shot prompting"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Classification, NLU tasks"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Seq2seq (translation, summarisation)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Can generate open-ended text"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes — natively"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Not naturally"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes, via decoder"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "GPT's decoder-only design is a deliberate simplification: remove the encoder, mask future tokens, train on next-token prediction. That simplicity turned out to be the correct bet — it scales cleanly, requires no task-specific architecture changes, and produces models whose generality surprised even their creators. Every major open-weight LLM built after 2020 is a GPT-style decoder."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
