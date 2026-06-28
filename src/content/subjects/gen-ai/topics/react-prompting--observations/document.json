@@ -1,0 +1,111 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In the ReAct loop, an observation is the environment's response to the model's action — the actual output of a tool call, API response, database query, or calculation result. The observation is injected back into the conversation as a user-role message so the model can read it before planning its next step. How you format, truncate, and label observations has a direct impact on the model's ability to reason over them: a poorly formatted observation forces the model to parse structure rather than reason about content."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Observation Formatting Rules"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Rule"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Bad practice"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Good practice"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Label the observation"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Injecting raw tool output with no prefix"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prefix with \"Observation:\" so the model recognises the turn boundary"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Truncate long results"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Injecting a full HTML page or a 10 000-token API response"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Summarise or extract the relevant part before injecting"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Signal errors clearly"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Passing an empty string or None on tool failure"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "\"Observation: Error — tool returned no results. Try a different query.\""}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Keep structure simple"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Injecting raw JSON with nested objects the model must parse"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Flatten to a single sentence or key-value list the model can read directly"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Observation Injection in a Multi-Turn ReAct Loop"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport re\n\nclient = anthropic.Anthropic()\n\n# Simulated tools\n\ndef search(query: str) -> str:\n    db = {\n        \"population of tokyo\": \"Tokyo's population is approximately 13.96 million in the city proper (2023).\",\n        \"population of delhi\": \"Delhi's population is approximately 32.9 million in the metropolitan area (2023).\",\n        \"population of new york\": \"New York City's population is approximately 8.3 million (2023).\",\n    }\n    for k, v in db.items():\n        if all(w in query.lower() for w in k.split()):\n            return v\n    return \"No result found for query: \" + query\n\n\ndef calc(expr: str) -> str:\n    try:\n        safe = re.sub(r\"[^0-9+\\-*/().\\s]\", \"\", expr)\n        return str(eval(safe))  # noqa: S307 — demo only\n    except Exception as e:\n        return f\"Calculation error: {e}\"\n\n\ndef format_observation(tool: str, result: str, max_chars: int = 300) -> str:\n    \"\"\"Format a tool result as an observation, truncating if needed.\"\"\"\n    if not result or result.strip() == \"\":\n        return f\"Observation: {tool} returned no output. Try rephrasing your query.\"\n    truncated = result[:max_chars]\n    if len(result) > max_chars:\n        truncated += \" [truncated]\"\n    return f\"Observation: {truncated}\"\n\n\ndef dispatch(action_text: str) -> str:\n    m = re.match(r\"(search|calc)\\[(.+?)\\]\", action_text.strip(), re.IGNORECASE)\n    if not m:\n        return \"Observation: Unrecognised action. Use search[query] or calc[expression].\"\n    tool, arg = m.group(1).lower(), m.group(2)\n    result = search(arg) if tool == \"search\" else calc(arg)\n    return format_observation(tool, result)\n\n\nSYSTEM = (\n    \"Solve the question by alternating Thought / Action / Observation steps.\\n\"\n    \"Actions: search[query] or calc[expression].\\n\"\n    \"End with: Final Answer: <value>\"\n)\n\n\ndef react(question: str, max_steps: int = 8) -> str:\n    messages = [{\"role\": \"user\", \"content\": question}]\n    for _ in range(max_steps):\n        resp = client.messages.create(\n            model=\"claude-haiku-4-5-20251001\",\n            max_tokens=300,\n            temperature=0.0,\n            system=SYSTEM,\n            messages=messages,\n            stop_sequences=[\"Observation:\"],\n        )\n        model_turn = resp.content[0].text.strip()\n        messages.append({\"role\": \"assistant\", \"content\": model_turn})\n        print(f\"Model: {model_turn}\")\n\n        if \"Final Answer:\" in model_turn:\n            m = re.search(r\"Final Answer:\\s*(.+)\", model_turn)\n            return m.group(1).strip() if m else model_turn\n\n        action_match = re.search(r\"Action:\\s*(.+)\", model_turn)\n        if not action_match:\n            break\n\n        observation = dispatch(action_match.group(1))\n        print(f\"Env:   {observation}\")\n        messages.append({\"role\": \"user\", \"content\": observation})\n\n    return \"[no final answer reached]\"\n\n\nresult = react(\"How many more people live in Delhi than in New York City?\")\nprint(f\"\\nFinal: {result}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Handling Observation Errors Gracefully"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def safe_observation(tool_fn, arg: str, tool_name: str) -> str:\n    \"\"\"\n    Wrap any tool call so that exceptions produce a well-formed\n    error observation instead of crashing the loop.\n    \"\"\"\n    try:\n        result = tool_fn(arg)\n        if not result or result.strip() == \"\":\n            raise ValueError(\"empty result\")\n        return f\"Observation: {result[:300]}\"\n    except Exception as e:\n        return (\n            f\"Observation: {tool_name} failed with error '{e}'. \"\n            f\"Consider a different query or approach.\"\n        )\n\n\n# Example: tool that raises on unknown input\ndef strict_search(query: str) -> str:\n    data = {\"capital of france\": \"Paris\"}\n    if query.lower() not in data:\n        raise KeyError(f\"'{query}' not in knowledge base\")\n    return data[query.lower()]\n\n\n# Safe wrapping — loop can continue even after tool failure\nprint(safe_observation(strict_search, \"capital of france\", \"search\"))\nprint(safe_observation(strict_search, \"capital of mars\",   \"search\"))\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Observations are the grounding mechanism of ReAct: they replace recalled knowledge with retrieved knowledge at each reasoning step. The critical implementation detail is that observations must be injected in a form the model can immediately read and reason over — not raw API JSON, not full HTML pages, not silent empty strings. A well-formatted observation with a clear prefix, bounded length, and explicit error messaging keeps the ReAct loop on track even when individual tool calls fail."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
