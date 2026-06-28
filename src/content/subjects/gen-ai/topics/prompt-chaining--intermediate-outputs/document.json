@@ -1,0 +1,116 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Intermediate outputs are the values produced at each step of a prompt chain and passed as inputs to the next step. How you format, validate, and propagate these outputs determines the reliability of the entire chain. A malformed intermediate output — wrong JSON schema, truncated text, unexpected label — silently corrupts every downstream step. The discipline of intermediate output management means: enforce a fixed schema at every step boundary, validate before passing forward, and handle failures at each step rather than discovering them at the end."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Output Format Options at Step Boundaries"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Format"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pros"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cons"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use when"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Plain text"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Easy to produce; model rarely fails to emit it"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hard to parse; fields may be missing or reordered"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Next step reads the text as-is (e.g. editorial chain)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "JSON object"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Parseable; named fields; validates schema"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model may add markdown fences or extra commentary"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Structured extraction; next step uses individual fields"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prefix-forced output"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Forces the model to start with the required format"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Requires assistant prefill support"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "JSON output where you prefix with \"{\" in assistant turn"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Single value / label"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Trivial to parse; use stop sequences to enforce"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Limited to short outputs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Classification, yes/no, single numeric value"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Validating and Retrying Intermediate JSON"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\nimport re\n\nclient = anthropic.Anthropic()\n\nREQUIRED_KEYS = {\"title\", \"summary\", \"sentiment\", \"score\"}\n\n\ndef extract_json(text: str) -> dict | None:\n    \"\"\"Strip markdown fences and parse JSON; return None on failure.\"\"\"\n    cleaned = re.sub(r\"```(?:json)?\\n?\", \"\", text).strip().rstrip(\"`\")\n    try:\n        return json.loads(cleaned)\n    except json.JSONDecodeError:\n        return None\n\n\ndef validate(data: dict) -> list[str]:\n    \"\"\"Return a list of missing required keys.\"\"\"\n    return [k for k in REQUIRED_KEYS if k not in data]\n\n\ndef call_with_retry(\n    prompt: str,\n    max_attempts: int = 3,\n) -> dict:\n    \"\"\"Call the model and retry with an error message if JSON is invalid.\"\"\"\n    history = [{\"role\": \"user\", \"content\": prompt}]\n\n    for attempt in range(1, max_attempts + 1):\n        resp = client.messages.create(\n            model=\"claude-haiku-4-5-20251001\",\n            max_tokens=300,\n            temperature=0.0,\n            messages=history,\n        ).content[0].text.strip()\n\n        data = extract_json(resp)\n        if data is not None:\n            missing = validate(data)\n            if not missing:\n                return data\n            error_msg = f\"Missing keys: {missing}. Return complete JSON with all required keys.\"\n        else:\n            error_msg = \"Response was not valid JSON. Return only a JSON object, no other text.\"\n\n        # Add model response and correction request to history\n        history.append({\"role\": \"assistant\", \"content\": resp})\n        history.append({\"role\": \"user\", \"content\": error_msg})\n        print(f\"  Attempt {attempt} failed: {error_msg}\")\n\n    raise ValueError(f\"Could not get valid JSON after {max_attempts} attempts\")\n\n\nTEXT = \"\"\"\nThe new restaurant opened last week and the food was absolutely outstanding —\nespecially the pasta. Service was a bit slow but the ambiance made up for it.\n\"\"\"\n\nPROMPT = (\n    f\"Analyse this review and return a JSON object with exactly these keys: \"\n    f\"title (string, 5 words max), summary (string, 1 sentence), \"\n    f\"sentiment (Positive/Negative/Neutral), score (integer 1-10).\\n\\nReview: {TEXT}\"\n)\n\nresult = call_with_retry(PROMPT)\nprint(\"\\nValidated output:\", json.dumps(result, indent=2))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Propagating Context Selectively"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef call(prompt: str, max_tokens: int = 300) -> str:\n    return client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=max_tokens,\n        temperature=0.3,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    ).content[0].text.strip()\n\n\n# Long raw article (abbreviated for example)\nARTICLE = \"\"\"Scientists at MIT announced a breakthrough in battery technology.\nThe new lithium-sulfur cells offer energy density three times that of current\nlithium-ion batteries, potentially extending EV range to 1,000 km on a single\ncharge. The research was published in Nature Energy. Commercial availability\nis expected within 5 years pending manufacturing scale-up.\"\"\"\n\n# Step 1: extract only the facts needed by downstream steps\nfacts = call(\n    f\"From this article extract: (1) the key claim in one sentence, \"\n    f\"(2) the publication venue, (3) the timeline. \"\n    f\"Return as three labelled lines.\\n\\n{ARTICLE}\"\n)\nprint(\"Step 1 (facts):\\n\", facts, \"\\n\")\n\n# Step 2: only pass the extracted facts (not the full article)\n# This keeps the downstream prompt focused and avoids context bloat\nheadline = call(\n    f\"Write a news headline (under 12 words) based on these facts:\\n{facts}\"\n)\nprint(\"Step 2 (headline):\", headline, \"\\n\")\n\ntweet = call(\n    f\"Write a tweet (under 280 chars) based on these facts:\\n{facts}\\n\"\n    \"Include the timeline and a relevant emoji.\"\n)\nprint(\"Step 3 (tweet):\", tweet)\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The most important intermediate output discipline is selective propagation: pass only the fields each downstream step actually needs, not the entire context from all previous steps. Passing full context accumulates tokens quadratically across a chain and forces each step to reason over information it does not use. Extract the relevant fields at each step boundary, validate them, and pass the smallest necessary payload to the next call. This keeps each step fast, cheap, and focused."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

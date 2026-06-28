@@ -1,0 +1,188 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reasoning steps are the intermediate computations a model produces between the question and the final answer. The quality of those steps — their granularity, sequencing, and alignment with the actual problem structure — determines whether CoT prompting helps or misleads. A poorly designed step sequence can produce plausible-looking but wrong reasoning: the model fills in steps without genuinely reducing uncertainty at each one. Designing reasoning steps means choosing decompositions where each step's output is necessary input for the next, and where each step is small enough that the model cannot skip the hard part."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Step Granularity: How Fine to Slice"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Granularity"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Risk"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When it's right"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Too coarse (1–2 big steps)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Each \"step\" still contains the hard sub-problem; model hand-waves through it"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Simple two-part problems where each part is straightforward"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Well-matched (3–6 steps)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low — each step carries a single sub-computation; errors are localisable"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Most multi-step arithmetic, scheduling, logical deduction"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Too fine (10+ trivial steps)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Adds token cost without improving accuracy; model may lose the overall goal"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Formal proof verification where each inference rule matters"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Designing Explicit Step Templates"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef ask(prompt: str, max_tokens: int = 500) -> str:\n    resp = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=max_tokens,\n        temperature=0.0,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    return resp.content[0].text.strip()\n\n\nPROBLEM = (\n    \"A factory produces 240 widgets per hour with 6 machines. \"\n    \"Two machines break down. How many hours does it take the remaining \"\n    \"machines to produce 1200 widgets?\"\n)\n\n# Approach A: free-form CoT (model chooses its own steps)\nprint(\"=== Free-form CoT ===\")\nprint(ask(f\"{PROBLEM}\\nLet's think step by step.\"))\nprint()\n\n# Approach B: explicitly templated steps for this problem class\nSTEP_TEMPLATE = \"\"\"{problem}\n\nSolve this using the following steps:\nStep 1: Find the output rate per machine.\nStep 2: Find the number of machines still working.\nStep 3: Find the combined output rate of the remaining machines.\nStep 4: Calculate the hours needed to reach the target.\nStep 5: State the final answer.\n\"\"\"\n\nprint(\"=== Templated Steps ===\")\nprint(ask(STEP_TEMPLATE.format(problem=PROBLEM)))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Naming Intermediate Values"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Giving intermediate results explicit names in the step template prevents the model from re-deriving them or implicitly rounding. This is especially important when one sub-result is used in multiple later steps."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\nPROBLEM = (\n    \"Alice earns $85,000/year. She saves 15% of her income. \"\n    \"Her rent is $1,400/month. How much does she have left after rent \"\n    \"and savings each month?\"\n)\n\n# Without named intermediates — model may recompute or drift\nVAGUE = f\"\"\"{PROBLEM}\nThink step by step.\"\"\"\n\n# With named intermediates — each value is labelled for reuse\nNAMED = f\"\"\"{PROBLEM}\n\nStep 1: Compute monthly_income = annual_income / 12.\nStep 2: Compute monthly_savings = monthly_income × 0.15.\nStep 3: Compute monthly_rent = 1400 (given).\nStep 4: Compute remainder = monthly_income − monthly_savings − monthly_rent.\nStep 5: Report remainder.\"\"\"\n\nresp_vague = client.messages.create(\n    model=\"claude-haiku-4-5-20251001\",\n    max_tokens=400,\n    temperature=0.0,\n    messages=[{\"role\": \"user\", \"content\": VAGUE}],\n).content[0].text.strip()\n\nresp_named = client.messages.create(\n    model=\"claude-haiku-4-5-20251001\",\n    max_tokens=400,\n    temperature=0.0,\n    messages=[{\"role\": \"user\", \"content\": NAMED}],\n).content[0].text.strip()\n\nprint(\"Vague:\")\nprint(resp_vague)\nprint()\nprint(\"Named intermediates:\")\nprint(resp_named)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Chaining Steps Across API Calls"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For long reasoning chains or problems where step outputs need validation before proceeding, execute each step as a separate API call. This lets you check or correct intermediate values before they propagate."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef step(prompt: str, context: str = \"\") -> str:\n    full = f\"{context}\\n\\n{prompt}\".strip() if context else prompt\n    return client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=200,\n        temperature=0.0,\n        messages=[{\"role\": \"user\", \"content\": full}],\n    ).content[0].text.strip()\n\n\nPROBLEM = (\n    \"A car's fuel tank holds 55 litres. It gets 12.5 km/litre. \"\n    \"The car has already driven 320 km on a full tank. \"\n    \"How far can it still travel before the tank is empty?\"\n)\n\n# Step 1: total range on a full tank\ns1 = step(\n    \"What is the total range of the car on a full tank? \"\n    \"Give only the number in km.\",\n    context=PROBLEM,\n)\nprint(f\"Step 1 (total range): {s1}\")\n\n# Step 2: fuel used so far → remaining range\ns2 = step(\n    f\"The total range is {s1} km. The car has already driven 320 km. \"\n    \"How many km can it still travel? Give only the number.\"\n)\nprint(f\"Step 2 (remaining range): {s2}\")\n\n# Step 3: sanity-check the answer\ns3 = step(\n    f\"The remaining range is {s2} km. \"\n    \"Is this answer reasonable given the problem? \"\n    \"Reply YES or NO with one sentence of explanation.\"\n)\nprint(f\"Step 3 (sanity check): {s3}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Step Design Principles"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Principle"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "What it means in practice"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "One sub-computation per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Each step should reduce exactly one unknown; combined steps hide errors"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Steps feed forward"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Step N's output must appear as named input in step N+1"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Avoid restating the problem"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Step 1 should not begin \"First, I understand that…\"; it should compute something"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Final step is explicit"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "\"State the final answer\" or \"Final answer: <value>\" prevents trailing reasoning after the answer"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Match step count to complexity"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "A 2-variable problem doesn't need 8 steps; extra steps encourage filler"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The test of a well-designed reasoning step sequence is whether each step's output is both necessary and sufficient input for the next. If a step can be skipped without affecting the final answer, it adds tokens without adding correctness. If two steps could be merged without hiding any computation, merge them. The step structure should reflect the problem's genuine dependency graph, not a surface-level paraphrase of the question."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

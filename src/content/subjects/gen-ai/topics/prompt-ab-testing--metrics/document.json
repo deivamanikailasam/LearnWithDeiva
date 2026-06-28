@@ -1,0 +1,120 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing the right metric for a prompt A/B test determines whether the winner is actually better or just appears to be. A single aggregate score (\"overall helpfulness: 3.8 vs 4.1\") hides which dimension improved and may mask regressions on other dimensions. Good metric design means defining what you are optimising before you run the test, splitting the score into dimensions so regressions are visible, and distinguishing between primary metrics (must improve) and guardrail metrics (must not regress)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Metric Types for Prompt Evaluation"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Metric type"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Examples"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Role in A/B test"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Primary metric"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Helpfulness score, task completion rate, correctness"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Must improve for variant B to be declared winner"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Guardrail metric"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Safety score, over-refusal rate, latency p95"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Must not regress beyond a threshold; blocks ship if violated"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Dimension score"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Correctness, completeness, actionability (each 1–5)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Diagnoses which aspect of quality changed"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cost/latency metric"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tokens per call, median latency, cost per 1k requests"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tracks operational impact of the prompt change"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Multi-Metric Evaluation Framework"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\nimport time\n\nclient = anthropic.Anthropic()\n\n\ndef run_and_measure(\n    system: str,\n    user: str,\n    max_tokens: int = 300,\n    model: str = \"claude-haiku-4-5-20251001\",\n) -> dict:\n    \"\"\"Run a prompt and return the response plus latency and token usage.\"\"\"\n    t0 = time.perf_counter()\n    response = client.messages.create(\n        model=model,\n        max_tokens=max_tokens,\n        temperature=0.0,\n        system=system,\n        messages=[{\"role\": \"user\", \"content\": user}],\n    )\n    elapsed_ms = (time.perf_counter() - t0) * 1000\n    return {\n        \"text\": response.content[0].text.strip(),\n        \"input_tokens\":  response.usage.input_tokens,\n        \"output_tokens\": response.usage.output_tokens,\n        \"latency_ms\":    round(elapsed_ms),\n    }\n\n\ndef score_dimension(question: str, answer: str, dimension: str) -> int:\n    prompt = (\n        f\"Rate the answer on '{dimension}' (1=very poor, 5=excellent). \"\n        f\"Output ONLY an integer 1–5.\\n\\nQuestion: {question}\\nAnswer: {answer}\"\n    )\n    raw = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=5,\n        temperature=0.0,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    ).content[0].text.strip()\n    try:\n        return max(1, min(5, int(raw[0])))\n    except (ValueError, IndexError):\n        return 3\n\n\nEVAL_SET = [\n    {\"question\": \"How do I cancel my subscription?\"},\n    {\"question\": \"I was charged twice this month.\"},\n    {\"question\": \"How do I add a second user to my account?\"},\n]\n\nPRIMARY_DIMS   = [\"helpfulness\", \"correctness\"]\nGUARDRAIL_DIMS = [\"safety\"]  # must not drop below threshold\n\n\ndef evaluate_prompt(system: str, eval_set: list[dict]) -> dict:\n    \"\"\"Return per-dimension scores and operational metrics averaged over eval set.\"\"\"\n    dim_scores: dict[str, list[int]] = {d: [] for d in PRIMARY_DIMS + GUARDRAIL_DIMS}\n    tokens_in, tokens_out, latencies = [], [], []\n\n    for ex in eval_set:\n        result = run_and_measure(system, ex[\"question\"])\n        tokens_in.append(result[\"input_tokens\"])\n        tokens_out.append(result[\"output_tokens\"])\n        latencies.append(result[\"latency_ms\"])\n\n        for dim in PRIMARY_DIMS + GUARDRAIL_DIMS:\n            dim_scores[dim].append(score_dimension(ex[\"question\"], result[\"text\"], dim))\n\n    n = len(eval_set)\n    return {\n        **{dim: round(sum(scores) / n, 2) for dim, scores in dim_scores.items()},\n        \"avg_input_tokens\":  round(sum(tokens_in) / n),\n        \"avg_output_tokens\": round(sum(tokens_out) / n),\n        \"median_latency_ms\": sorted(latencies)[n // 2],\n    }\n\n\nPROMPT_A = \"You are a customer support agent. Answer questions helpfully.\"\nPROMPT_B = (\n    \"You are a concise customer support agent. \"\n    \"Answer in 1–2 sentences. Be specific and actionable.\"\n)\n\nresults = {}\nfor label, prompt in [(\"A\", PROMPT_A), (\"B\", PROMPT_B)]:\n    results[label] = evaluate_prompt(prompt, EVAL_SET)\n\n# Report with primary vs guardrail breakdown\nprint(f\"{'Metric':<22} {'A':>6} {'B':>6} {'Delta':>8}\")\nprint(\"-\" * 46)\nfor dim in PRIMARY_DIMS:\n    a, b = results[\"A\"][dim], results[\"B\"][dim]\n    flag = \" ← PRIMARY\"\n    print(f\"{dim:<22} {a:>6.2f} {b:>6.2f} {b - a:>+8.2f}{flag}\")\nfor dim in GUARDRAIL_DIMS:\n    a, b = results[\"A\"][dim], results[\"B\"][dim]\n    flag = \" ← GUARDRAIL\" + (\" ⚠ REGRESSED\" if b < a - 0.3 else \"\")\n    print(f\"{dim:<22} {a:>6.2f} {b:>6.2f} {b - a:>+8.2f}{flag}\")\nprint(\"-\" * 46)\nfor key in [\"avg_output_tokens\", \"median_latency_ms\"]:\n    a, b = results[\"A\"][key], results[\"B\"][key]\n    print(f\"{key:<22} {a:>6}  {b:>6}  {b - a:>+8}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Declaring a Winner"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A variant wins when it improves the primary metric and does not violate any guardrail thresholds. The delta threshold for declaring a winner should be pre-defined — a 0.1/5 improvement in a noisy LLM-scored metric is not a reliable signal, while a 0.5/5 improvement across 30+ examples is."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def declare_winner(\n    results: dict,\n    primary: str,\n    guardrails: dict[str, float],  # metric → min acceptable value\n    min_delta: float = 0.2,\n) -> str:\n    \"\"\"\n    Declare a winner based on primary metric improvement and guardrail checks.\n    Returns 'A', 'B', or 'no_winner' with a reason.\n    \"\"\"\n    score_a = results[\"A\"][primary]\n    score_b = results[\"B\"][primary]\n    delta = score_b - score_a\n\n    # Check guardrails for B\n    for metric, threshold in guardrails.items():\n        if results[\"B\"][metric] < threshold:\n            return f\"no_winner: B violates guardrail '{metric}' ({results['B'][metric]:.2f} < {threshold})\"\n\n    if delta >= min_delta:\n        return f\"B (primary metric '{primary}' improved by {delta:+.2f})\"\n    elif delta <= -min_delta:\n        return f\"A (B regressed primary metric '{primary}' by {delta:+.2f})\"\n    else:\n        return f\"no_winner: delta {delta:+.2f} below threshold {min_delta}\"\n\n\nwinner = declare_winner(\n    results,\n    primary=\"helpfulness\",\n    guardrails={\"safety\": 4.0},\n    min_delta=0.2,\n)\nprint(f\"\\nVerdict: {winner}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Define your primary metric and guardrail thresholds before you run the test — not after you see the results. Post-hoc metric selection is the easiest way to accidentally ship a regression: if Prompt B is better on helpfulness but worse on safety, and you only notice the helpfulness improvement, you ship a less safe prompt. A one-page test plan written before the run (primary metric, guardrail list, minimum delta to declare a winner, eval set size) is the single highest-leverage practice in prompt A/B testing."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,170 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Automatic Prompt Engineer (APE), introduced by Zhou et al. (2022), is a method that uses an LLM to generate candidate task instructions, scores each one against a labelled evaluation set, and selects the highest-scoring instruction as the optimised prompt. APE treats prompt optimisation as a black-box search problem: generate many instruction candidates, evaluate them empirically, keep the best. Unlike DSPy (which compiles a full program), APE focuses on finding the best single instruction string for a task."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "APE in Three Steps"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Step"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "What happens"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Output"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1. Propose"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Show the LLM input/output examples from the training set; ask it to infer and write N candidate instructions"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "N candidate instruction strings"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2. Score"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prepend each candidate instruction to each evaluation example; run the LLM; compute the metric"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Score for each candidate"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "3. Select"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Return the instruction with the highest score as the optimised prompt"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best instruction string"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Implementing APE"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef call(prompt: str, max_tokens: int = 500, temperature: float = 0.0) -> str:\n    return client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=max_tokens,\n        temperature=temperature,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    ).content[0].text.strip()\n\n\n# ---------------------------------------------------------------------------\n# Step 1: Propose — generate N candidate instructions from examples\n# ---------------------------------------------------------------------------\ndef propose_instructions(\n    examples: list[dict],\n    n: int = 5,\n) -> list[str]:\n    \"\"\"\n    examples: list of {\"input\": ..., \"output\": ...} dicts from the training set.\n    Returns a list of N candidate instruction strings.\n    \"\"\"\n    demo_block = \"\\n\".join(\n        f\"Input: {ex['input']}\\nOutput: {ex['output']}\" for ex in examples[:4]\n    )\n    prompt = (\n        f\"Here are input/output examples for a task:\\n\\n{demo_block}\\n\\n\"\n        f\"Infer what task is being performed and write {n} distinct one-sentence \"\n        f\"instructions that an LLM should receive to complete this task. \"\n        f\"Output one instruction per line, numbered 1–{n}.\"\n    )\n    raw = call(prompt, max_tokens=400, temperature=0.7)\n    lines = [l.lstrip(\"0123456789. \").strip() for l in raw.splitlines() if l.strip()]\n    return lines[:n]\n\n\n# ---------------------------------------------------------------------------\n# Step 2: Score — evaluate each candidate on the eval set\n# ---------------------------------------------------------------------------\ndef score_instruction(\n    instruction: str,\n    eval_examples: list[dict],\n    exact_match: bool = True,\n) -> float:\n    \"\"\"\n    Run each eval example through: instruction + '\\n\\nInput: {x}' → prediction.\n    Return the fraction of examples where the prediction matches the gold output.\n    \"\"\"\n    correct = 0\n    for ex in eval_examples:\n        prediction = call(\n            f\"{instruction}\\n\\nInput: {ex['input']}\",\n            max_tokens=50,\n        ).strip().lower()\n        gold = ex[\"output\"].strip().lower()\n        if exact_match:\n            correct += int(prediction == gold)\n        else:\n            correct += int(gold in prediction)\n    return correct / len(eval_examples) if eval_examples else 0.0\n\n\n# ---------------------------------------------------------------------------\n# Step 3: Select — return the best-scoring instruction\n# ---------------------------------------------------------------------------\ndef ape(\n    train_examples: list[dict],\n    eval_examples: list[dict],\n    n_candidates: int = 5,\n) -> dict:\n    candidates = propose_instructions(train_examples, n=n_candidates)\n    scored = [\n        {\"instruction\": c, \"score\": score_instruction(c, eval_examples, exact_match=False)}\n        for c in candidates\n    ]\n    scored.sort(key=lambda x: x[\"score\"], reverse=True)\n    return {\"best\": scored[0], \"all\": scored}\n\n\n# ---------------------------------------------------------------------------\n# Example: find the best instruction for a sentiment classification task\n# ---------------------------------------------------------------------------\nTRAIN = [\n    {\"input\": \"I love this product!\", \"output\": \"positive\"},\n    {\"input\": \"Terrible experience, would not recommend.\", \"output\": \"negative\"},\n    {\"input\": \"It works as expected, nothing special.\", \"output\": \"neutral\"},\n    {\"input\": \"Absolutely fantastic, exceeded all expectations!\", \"output\": \"positive\"},\n]\n\nEVAL = [\n    {\"input\": \"Good value for money.\", \"output\": \"positive\"},\n    {\"input\": \"Broke after two days.\", \"output\": \"negative\"},\n    {\"input\": \"Decent but not outstanding.\", \"output\": \"neutral\"},\n]\n\nresult = ape(TRAIN, EVAL, n_candidates=4)\nprint(f\"Best instruction (score {result['best']['score']:.0%}):\")\nprint(f\"  {result['best']['instruction']}\")\nprint()\nprint(\"All candidates:\")\nfor r in result[\"all\"]:\n    print(f\"  [{r['score']:.0%}] {r['instruction'][:80]}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Iterative APE: Resample from Top Candidates"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The original APE paper also describes an iterative variant: take the top-K instructions from round 1, use them as seeds to generate more candidates, score those, and repeat. This exploits the observation that good instructions can suggest better paraphrases."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def iterative_ape(\n    train_examples: list[dict],\n    eval_examples: list[dict],\n    rounds: int = 2,\n    n_candidates: int = 4,\n    top_k: int = 2,\n) -> str:\n    \"\"\"\n    Round 1: generate from examples.\n    Round 2+: generate paraphrases of the top-K survivors.\n    Returns the best instruction found.\n    \"\"\"\n    # Round 1\n    candidates = propose_instructions(train_examples, n=n_candidates)\n    scored = sorted(\n        [{\"instruction\": c, \"score\": score_instruction(c, eval_examples, exact_match=False)}\n         for c in candidates],\n        key=lambda x: x[\"score\"], reverse=True,\n    )\n    best_so_far = scored[0]\n\n    for _ in range(rounds - 1):\n        seeds = [s[\"instruction\"] for s in scored[:top_k]]\n        seed_block = \"\\n\".join(f\"- {s}\" for s in seeds)\n        paraphrase_prompt = (\n            f\"Here are good task instructions:\\n{seed_block}\\n\\n\"\n            f\"Write {n_candidates} variations that preserve the meaning but use \"\n            f\"different wording. Output one per line.\"\n        )\n        raw = call(paraphrase_prompt, max_tokens=400, temperature=0.7)\n        new_candidates = [l.lstrip(\"- \").strip() for l in raw.splitlines() if l.strip()]\n        new_scored = sorted(\n            [{\"instruction\": c, \"score\": score_instruction(c, eval_examples, exact_match=False)}\n             for c in new_candidates[:n_candidates]],\n            key=lambda x: x[\"score\"], reverse=True,\n        )\n        if new_scored and new_scored[0][\"score\"] > best_so_far[\"score\"]:\n            best_so_far = new_scored[0]\n        scored = new_scored\n\n    return best_so_far[\"instruction\"]\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "APE vs DSPy"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Dimension"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "APE"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DSPy"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "What is optimised"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Single instruction string"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Full multi-step program (instructions + few-shot demos per step)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Search method"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Generate-and-score (black-box)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Bootstrap (few-shot selection) or gradient-based (with weights)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Setup cost"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low — implement in ~50 lines with any LLM client"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Higher — requires DSPy library, signature definitions"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multi-step support"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Requires manual application per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Native — optimises each module in the pipeline"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best for"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Single-call tasks needing a better instruction without framework overhead"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Complex pipelines where multiple steps benefit from co-optimisation"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "APE is the lowest-friction entry point to automatic prompt optimisation: it requires only a handful of labelled examples, a scoring function, and a way to call an LLM. The cost scales with N candidates × M eval examples, so keep both small in early experiments. APE's weakness is that it optimises only the instruction string; if the bottleneck is few-shot example selection or chain-of-thought structure, DSPy's richer search space will outperform it."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

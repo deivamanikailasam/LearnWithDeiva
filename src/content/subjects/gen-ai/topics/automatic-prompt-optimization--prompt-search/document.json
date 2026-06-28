@@ -1,0 +1,170 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt search treats the space of all possible prompt strings as a search space and applies search algorithms to find high-scoring prompts without requiring gradient information. Unlike APE (which generates candidates from LLM inference) or DSPy (which bootstraps from examples), prompt search methods — including random search, hill climbing, and beam search over prompt edits — explore the prompt space more systematically. The unifying idea is: define a neighbourhood of prompt mutations, score candidates, and move toward higher-scoring regions."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Search Strategies Compared"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strategy"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "How it works"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strength"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Weakness"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Random search"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sample N random prompt variants; return the best"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Simple, parallelisable, no local optima"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Inefficient; misses fine-grained improvement"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hill climbing"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Start from a seed; mutate; accept only improvements"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Efficient near the optimum; exploits good starting points"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gets stuck in local optima"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Beam search"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Keep top-K prompts at each step; expand each; keep new top-K"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Explores multiple paths; avoids premature convergence"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Costs K× more LLM calls per step"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLM-guided mutation"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Ask the LLM to produce targeted edits based on failure cases"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Semantically meaningful mutations; fast convergence"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Requires failure analysis; more complex pipeline"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Hill Climbing on Prompts"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef call(prompt: str, max_tokens: int = 200, temperature: float = 0.0) -> str:\n    return client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=max_tokens,\n        temperature=temperature,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    ).content[0].text.strip()\n\n\ndef mutate(prompt: str, n: int = 3) -> list[str]:\n    \"\"\"Ask the LLM to produce N paraphrased or improved variants of the prompt.\"\"\"\n    raw = call(\n        f\"Rewrite this instruction {n} times, each time making a small change \"\n        f\"(clarify wording, add a constraint, specify the format, change the tone). \"\n        f\"Output one variant per line, no numbering.\\n\\n{prompt}\",\n        max_tokens=400,\n        temperature=0.7,\n    )\n    return [l.strip() for l in raw.splitlines() if l.strip()][:n]\n\n\ndef score(prompt: str, eval_examples: list[dict]) -> float:\n    \"\"\"Fraction of eval examples where gold output is contained in the prediction.\"\"\"\n    hits = 0\n    for ex in eval_examples:\n        prediction = call(f\"{prompt}\\n\\nInput: {ex['input']}\", max_tokens=80)\n        hits += int(ex[\"output\"].lower() in prediction.lower())\n    return hits / len(eval_examples) if eval_examples else 0.0\n\n\ndef hill_climb(\n    seed_prompt: str,\n    eval_examples: list[dict],\n    steps: int = 4,\n    n_mutations: int = 3,\n) -> dict:\n    current = seed_prompt\n    current_score = score(current, eval_examples)\n    history = [{\"step\": 0, \"prompt\": current, \"score\": current_score}]\n\n    for step in range(1, steps + 1):\n        candidates = mutate(current, n=n_mutations)\n        best_candidate = current\n        best_score = current_score\n\n        for c in candidates:\n            s = score(c, eval_examples)\n            if s > best_score:\n                best_score = s\n                best_candidate = c\n\n        current = best_candidate\n        current_score = best_score\n        history.append({\"step\": step, \"prompt\": current[:80], \"score\": current_score})\n\n        if current_score == 1.0:\n            break  # perfect score — stop early\n\n    return {\"best_prompt\": current, \"best_score\": current_score, \"history\": history}\n\n\n# Example: improve a vague seed prompt for a classification task\nEVAL = [\n    {\"input\": \"The package arrived damaged.\", \"output\": \"negative\"},\n    {\"input\": \"Fast shipping, great product!\", \"output\": \"positive\"},\n    {\"input\": \"It does what it says.\", \"output\": \"neutral\"},\n]\n\nresult = hill_climb(\n    seed_prompt=\"Classify this.\",\n    eval_examples=EVAL,\n    steps=3,\n    n_mutations=3,\n)\n\nfor h in result[\"history\"]:\n    print(f\"Step {h['step']} ({h['score']:.0%}): {h['prompt']}\")\nprint(f\"\\nFinal prompt: {result['best_prompt']}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "LLM-Guided Mutation from Failure Cases"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Instead of random paraphrasing, mutation can be guided by showing the LLM exactly which examples the current prompt gets wrong. The LLM then proposes a targeted edit to fix those failures — a semantically meaningful neighbourhood move."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef call(prompt: str, max_tokens: int = 300, temperature: float = 0.0) -> str:\n    return client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=max_tokens,\n        temperature=temperature,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    ).content[0].text.strip()\n\n\ndef find_failures(\n    prompt: str, eval_examples: list[dict]\n) -> list[dict]:\n    \"\"\"Return examples where the prompt produces the wrong answer.\"\"\"\n    failures = []\n    for ex in eval_examples:\n        prediction = call(f\"{prompt}\\n\\nInput: {ex['input']}\", max_tokens=60)\n        if ex[\"output\"].lower() not in prediction.lower():\n            failures.append({\n                \"input\": ex[\"input\"],\n                \"expected\": ex[\"output\"],\n                \"got\": prediction[:80],\n            })\n    return failures\n\n\ndef failure_guided_mutation(prompt: str, failures: list[dict]) -> str:\n    \"\"\"Ask the LLM to edit the prompt to fix the observed failures.\"\"\"\n    failure_block = \"\\n\".join(\n        f\"  Input: {f['input']}\\n  Expected: {f['expected']}\\n  Got: {f['got']}\"\n        for f in failures\n    )\n    return call(\n        f\"This instruction produces wrong outputs on these cases:\\n{failure_block}\\n\\n\"\n        f\"Current instruction:\\n{prompt}\\n\\n\"\n        \"Rewrite the instruction to fix these failures. Output ONLY the new instruction.\",\n        temperature=0.3,\n    )\n\n\nEVAL = [\n    {\"input\": \"The package arrived damaged.\", \"output\": \"negative\"},\n    {\"input\": \"Fast shipping, great product!\", \"output\": \"positive\"},\n    {\"input\": \"It does what it says.\", \"output\": \"neutral\"},\n    {\"input\": \"I've been waiting 3 weeks and nothing.\", \"output\": \"negative\"},\n]\n\nprompt = \"Classify this.\"\nfor step in range(3):\n    failures = find_failures(prompt, EVAL)\n    print(f\"Step {step + 1}: {len(failures)} failure(s)\")\n    if not failures:\n        break\n    prompt = failure_guided_mutation(prompt, failures)\n    print(f\"  New prompt: {prompt[:100]}\")\n\nprint(f\"\\nFinal prompt: {prompt}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Choosing a Search Strategy"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Scenario"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Recommended strategy"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No good starting prompt; exploring broad space"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Random search or APE first, then hill climb from the best"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Good starting prompt, small targeted failures"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Failure-guided mutation"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multiple competing candidate families to explore in parallel"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Beam search (K=2 or 3)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Budget is tight; want best result for fewest LLM calls"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hill climbing from a hand-crafted seed"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Prompt search scales the prompt-tuning effort proportionally to call count: more budget, better results. The practical constraint is that every candidate evaluation costs real LLM calls, so the eval set should be small (10–30 examples) and the scoring function cheap to compute. Use failure-guided mutation when you have a specific failure mode to fix; use random or beam search when you're exploring a new task with no strong prior on what a good instruction looks like."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

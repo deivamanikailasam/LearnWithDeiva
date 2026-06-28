@@ -1,0 +1,183 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-sample prompting generates the same prompt multiple times with non-zero temperature, then aggregates the results. The core insight from Wang et al. (2022) is that sampling diverse reasoning paths and taking a majority vote over their final answers is significantly more accurate than any single greedy decoding. The reasoning paths vary — some take different intermediate steps, some make different arithmetic errors — but correct answers cluster at the majority while wrong answers scatter. This technique requires no additional prompt engineering; the only changes are temperature > 0 and N calls instead of one."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Basic Multi-Sample with Majority Vote"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport re\nfrom collections import Counter\n\nclient = anthropic.Anthropic()\n\n\ndef sample_answer(problem: str, temperature: float = 0.7) -> str:\n    resp = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=400,\n        temperature=temperature,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": f\"{problem}\\nThink step by step, then write 'Final answer: <value>' on the last line.\",\n        }],\n    )\n    text = resp.content[0].text.strip()\n    match = re.search(r\"Final answer:\\s*(.+)\", text, re.IGNORECASE)\n    return match.group(1).strip() if match else text.split()[-1]\n\n\ndef self_consistent_answer(problem: str, n: int = 5) -> dict:\n    answers = [sample_answer(problem) for _ in range(n)]\n    counts = Counter(answers)\n    majority, votes = counts.most_common(1)[0]\n    return {\n        \"majority\": majority,\n        \"votes\": votes,\n        \"n\": n,\n        \"all_answers\": answers,\n        \"confidence\": votes / n,\n    }\n\n\nproblems = [\n    \"A shop buys items for $12 and sells them at a 35% markup. What is the selling price?\",\n    \"If a sequence starts 2, 6, 18, 54 — what is the 6th term?\",\n]\n\nfor p in problems:\n    result = self_consistent_answer(p, n=5)\n    print(f\"Problem: {p}\")\n    print(f\"Answers: {result['all_answers']}\")\n    print(f\"Majority: {result['majority']} ({result['votes']}/{result['n']} votes, {result['confidence']:.0%} confidence)\")\n    print()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Choosing N: Accuracy vs Cost"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "N (samples)"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cost multiplier"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Typical accuracy gain over single sample"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When to use"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1×"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Baseline"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Simple tasks or latency-critical paths"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "3"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "3×"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~5–10 percentage points on arithmetic benchmarks"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Good default; quick wins on multi-step problems"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "5"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "5×"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~10–15 percentage points; diminishing beyond this"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High-stakes one-shot tasks where accuracy matters"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "10–40"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "10–40×"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Near-ceiling on benchmarks; small marginal gain per extra sample"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Research; cases where fine-tuning is not an option"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Weighted Voting and Confidence Filtering"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Simple majority vote treats all samples equally. A refinement is to weight votes by the model's token-level log-probability (a proxy for confidence) or to discard low-confidence samples before voting."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport re\nfrom collections import Counter\n\nclient = anthropic.Anthropic()\n\n\ndef sample_with_confidence(problem: str, temperature: float = 0.7) -> dict:\n    \"\"\"\n    Sample once and return both the answer and a self-reported confidence.\n    Asking the model to report confidence is a coarse proxy but improves\n    filtering without requiring log-probability access.\n    \"\"\"\n    prompt = (\n        f\"{problem}\\n\"\n        \"Think step by step.\\n\"\n        \"On the second-to-last line write 'Final answer: <value>'.\\n\"\n        \"On the last line write 'Confidence: <High|Medium|Low>'.\"\n    )\n    text = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=400,\n        temperature=temperature,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    ).content[0].text.strip()\n\n    answer_match = re.search(r\"Final answer:\\s*(.+)\", text, re.IGNORECASE)\n    conf_match   = re.search(r\"Confidence:\\s*(High|Medium|Low)\", text, re.IGNORECASE)\n\n    return {\n        \"answer\":     answer_match.group(1).strip() if answer_match else \"\",\n        \"confidence\": conf_match.group(1).lower()   if conf_match  else \"low\",\n        \"trace\":      text,\n    }\n\n\ndef filtered_vote(problem: str, n: int = 6, min_confidence: str = \"medium\") -> str:\n    conf_rank = {\"high\": 2, \"medium\": 1, \"low\": 0}\n    threshold = conf_rank[min_confidence]\n\n    samples = [sample_with_confidence(problem) for _ in range(n)]\n    trusted = [s for s in samples if conf_rank.get(s[\"confidence\"], 0) >= threshold]\n\n    # Fall back to all samples if none meet the threshold\n    pool = trusted if trusted else samples\n    counts = Counter(s[\"answer\"] for s in pool)\n    majority, votes = counts.most_common(1)[0]\n\n    print(f\"Trusted samples: {len(trusted)}/{n}\")\n    print(f\"Vote distribution: {dict(counts)}\")\n    return majority\n\n\nproblem = (\n    \"A cyclist rides at 18 km/h for 45 minutes, then at 24 km/h for 30 minutes. \"\n    \"What is the total distance covered?\"\n)\nresult = filtered_vote(problem, n=6)\nprint(f\"Answer: {result}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "When Multi-Sampling Helps and When It Doesn't"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Task type"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multi-sample benefit"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Reason"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multi-step arithmetic"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Large"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Correct answers converge; arithmetic errors scatter"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Logical reasoning"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Significant"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multiple valid reasoning paths often reach the same conclusion"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Open-ended generation"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None (majority vote undefined)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No single correct answer; answers don't cluster meaningfully"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Factual lookup"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "If the fact is wrong in the model's weights, all samples agree on the wrong answer"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Classification (small label set)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Moderate"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Majority vote over a small label set is well-defined and reduces noise"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Multi-sampling is a compute-for-accuracy trade with a clear cost structure: N samples costs N× the tokens of a single call, with sub-linear accuracy returns past N=5. Use it when a task has a verifiable correct answer, a single wrong answer is costly, and the latency of parallel calls is acceptable. It does not help when errors are systematic (all samples agree on the same wrong answer) — that is a knowledge or prompt framing problem, not a sampling problem."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
