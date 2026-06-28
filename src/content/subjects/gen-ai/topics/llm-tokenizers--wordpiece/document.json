@@ -1,0 +1,355 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "WordPiece is the tokenisation algorithm used by BERT, DistilBERT, ALBERT, and most encoder-only models from Google Research. Like BPE, it builds a subword vocabulary by iteratively merging adjacent symbol pairs — but it selects merges differently. BPE picks the pair with the highest raw frequency; WordPiece picks the pair whose merge most increases the likelihood of the training corpus under a unigram language model. In practice this means WordPiece prefers merges where the two pieces rarely appear independently, capturing linguistically meaningful subwords. The result is BERT's characteristic "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "##"
+          },
+          {
+            "type": "text",
+            "text": " continuation prefix: "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "\"tokenisation\""
+          },
+          {
+            "type": "text",
+            "text": " becomes "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "['token', '##isation']"
+          },
+          {
+            "type": "text",
+            "text": " — the "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "##"
+          },
+          {
+            "type": "text",
+            "text": " signals that the piece is a word continuation, not a word start."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The WordPiece Scoring Rule"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At each step WordPiece scores every candidate pair "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "(A, B)"
+          },
+          {
+            "type": "text",
+            "text": " and merges the one with the highest score:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{score}(A, B) = \\frac{\\text{freq}(AB)}{\\text{freq}(A) \\times \\text{freq}(B)}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Dividing by the product of individual frequencies normalises for popularity: a common pair like "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "(e, d)"
+          },
+          {
+            "type": "text",
+            "text": " scores low because "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "e"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "d"
+          },
+          {
+            "type": "text",
+            "text": " appear frequently on their own. A pair like "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "(##ing, ly)"
+          },
+          {
+            "type": "text",
+            "text": " scores high if "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "ingly"
+          },
+          {
+            "type": "text",
+            "text": " is common but the individual pieces rarely appear apart. This makes WordPiece inherently morphology-aware."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The WordPiece Training Algorithm"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from collections import Counter\n\n\ndef train_wordpiece(\n    corpus: list[str],\n    vocab_size: int,\n    unk_token: str = \"[UNK]\",\n) -> set[str]:\n    \"\"\"\n    Train a WordPiece vocabulary on a list of strings.\n    Returns the final vocabulary (as a set of tokens).\n\n    Unlike BPE which returns merge rules, WordPiece just returns\n    the final vocabulary — encoding applies greedy longest-match.\n    \"\"\"\n    # Initialise: every character is a vocab item.\n    # Word-internal characters get the ## prefix (BERT convention).\n    word_freqs: Counter = Counter()\n    for text in corpus:\n        for word in text.lower().split():\n            word_freqs[word] += 1\n\n    # Split each word into characters; word-internal chars get ## prefix\n    def word_to_pieces(word: str) -> list[str]:\n        return [word[0]] + [\"##\" + ch for ch in word[1:]]\n\n    # Current vocab: all unique characters (with ## prefix for continuations)\n    vocab: set[str] = {unk_token}\n    for word in word_freqs:\n        for piece in word_to_pieces(word):\n            vocab.add(piece)\n\n    # Map word → current piece segmentation\n    segmented: dict[str, list[str]] = {\n        word: word_to_pieces(word) for word in word_freqs\n    }\n\n    while len(vocab) < vocab_size:\n        # Count pairs and individual piece frequencies\n        pair_counts: Counter = Counter()\n        piece_counts: Counter = Counter()\n\n        for word, pieces in segmented.items():\n            freq = word_freqs[word]\n            for piece in pieces:\n                piece_counts[piece] += freq\n            for i in range(len(pieces) - 1):\n                pair_counts[(pieces[i], pieces[i + 1])] += freq\n\n        if not pair_counts:\n            break\n\n        # WordPiece scoring: freq(AB) / (freq(A) * freq(B))\n        best_score = -1.0\n        best_pair: tuple[str, str] | None = None\n        for pair, pair_freq in pair_counts.items():\n            a, b = pair\n            score = pair_freq / (piece_counts[a] * piece_counts[b])\n            if score > best_score:\n                best_score = score\n                best_pair = pair\n\n        if best_pair is None:\n            break\n\n        # Merge the best pair everywhere\n        a, b = best_pair\n        # New piece drops the ## prefix from b if it was a continuation\n        new_piece = a + b.lstrip(\"#\")\n        vocab.add(new_piece)\n\n        new_segmented: dict[str, list[str]] = {}\n        for word, pieces in segmented.items():\n            merged: list[str] = []\n            i = 0\n            while i < len(pieces):\n                if i < len(pieces) - 1 and pieces[i] == a and pieces[i + 1] == b:\n                    merged.append(new_piece)\n                    i += 2\n                else:\n                    merged.append(pieces[i])\n                    i += 1\n            new_segmented[word] = merged\n        segmented = new_segmented\n\n    return vocab\n\n\ncorpus = [\n    \"running runs runner run\",\n    \"swimming swims swimmer swim\",\n    \"helping helps helper help\",\n]\nvocab = train_wordpiece(corpus, vocab_size=40)\nprint(sorted(v for v in vocab if not v.startswith(\"[\")))\n# ['##e', '##el', '##elp', '##er', '##g', '##help', '##im', '##imm', '##immer',\n#  '##imming', '##in', '##ing', '##m', '##mer', '##ming', '##mming', '##n',\n#  '##nn', '##nner', '##nning', '##r', '##run', '##runner', '##running',\n#  '##s', '##swim', '##swimmer', '##swimming', '##un', 'h', 'r', 's', 'w']\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Encoding with WordPiece: Greedy Longest-Match"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "WordPiece encoding does not replay a merge list (as BPE does). Instead it applies greedy longest-match from the front of each word. For each position it tries the longest vocabulary entry that fits; if none fits it emits "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "[UNK]"
+          },
+          {
+            "type": "text",
+            "text": " for the whole word. Word-internal segments are prefixed with "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "##"
+          },
+          {
+            "type": "text",
+            "text": " to distinguish them from word starts."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def wordpiece_encode(\n    text: str,\n    vocab: set[str],\n    unk_token: str = \"[UNK]\",\n    max_chars: int = 100,\n) -> list[str]:\n    \"\"\"\n    Encode a string using greedy longest-match WordPiece.\n    Each word is segmented independently; the result is a flat list of tokens.\n    \"\"\"\n    tokens: list[str] = []\n    for word in text.lower().split():\n        if len(word) > max_chars:\n            tokens.append(unk_token)\n            continue\n\n        # Greedy longest-match on the word\n        sub_tokens: list[str] = []\n        start = 0\n        is_bad = False\n        while start < len(word):\n            end = len(word)\n            found: str | None = None\n            while start < end:\n                substr = word[start:end]\n                if start > 0:\n                    substr = \"##\" + substr\n                if substr in vocab:\n                    found = substr\n                    break\n                end -= 1\n            if found is None:\n                is_bad = True\n                break\n            sub_tokens.append(found)\n            start = end\n\n        tokens.extend([unk_token] if is_bad else sub_tokens)\n    return tokens\n\n\n# In practice: use HuggingFace tokenizers (same algorithm, C++ speed)\nfrom transformers import AutoTokenizer\n\ntokenizer = AutoTokenizer.from_pretrained(\"bert-base-uncased\")\n\nexamples = [\n    \"tokenization\",\n    \"unbelievable\",\n    \"photosynthesis\",\n    \"running\",\n    \"##suffix\",           # ## has special meaning in WordPiece\n]\nfor text in examples:\n    tokens = tokenizer.tokenize(text)\n    print(f\"{text!r:25s} → {tokens}\")\n\n# 'tokenization'            → ['token', '##ization']\n# 'unbelievable'            → ['un', '##believe', '##able']\n# 'photosynthesis'          → ['photo', '##synthesis']\n# 'running'                 → ['running']   (whole word in vocab)\n# '##suffix'                → ['##suffix']  (## is part of the token)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Special Tokens in BERT's WordPiece"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "BERT adds four special tokens to the WordPiece vocabulary that are not produced by the merging algorithm but are reserved for model control:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Token"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "ID"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Purpose"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "[PAD]"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "0"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Batch padding; masked in attention (attention_mask = 0)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "[UNK]"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "100"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Unknown word (word longer than max_chars or contains only out-of-vocab characters)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "[CLS]"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "101"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prepended to every sequence; its hidden state is the sequence representation used for classification"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "[SEP]"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "102"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Appended to every segment; separates sentence A from sentence B in two-sentence tasks (NLI, QA)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "[MASK]"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "103"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Replaces tokens during masked language modelling pretraining (80% of masked positions)"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Practical BERT Tokenisation"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer\nimport torch\n\ntokenizer = AutoTokenizer.from_pretrained(\"bert-base-uncased\")\n\n# Single sentence\nsentence = \"The model tokenises photosynthesis into subwords.\"\nencoding = tokenizer(sentence, return_tensors=\"pt\")\nprint(\"Input IDs:\", encoding[\"input_ids\"])\nprint(\"Tokens:   \", tokenizer.convert_ids_to_tokens(encoding[\"input_ids\"][0]))\n# [CLS] the model token ##ises photo ##synthesis into sub ##words . [SEP]\n\n# Two-sentence encoding for tasks like NLI or QA\npremise    = \"Paris is the capital of France.\"\nhypothesis = \"France has a capital city.\"\nencoding2 = tokenizer(\n    premise,\n    hypothesis,\n    padding=\"max_length\",\n    max_length=32,\n    truncation=True,\n    return_tensors=\"pt\",\n)\nprint(\"Token type IDs:\", encoding2[\"token_type_ids\"])  # 0=sentence A, 1=sentence B\nprint(\"Attention mask:\", encoding2[\"attention_mask\"])  # 1=real token, 0=padding\n\n# Batch encoding — tokenizer handles padding automatically\nsentences = [\n    \"Short.\",\n    \"A much longer sentence that needs more tokens to represent.\",\n]\nbatch = tokenizer(sentences, padding=True, truncation=True, return_tensors=\"pt\")\nprint(\"Batch shape:\", batch[\"input_ids\"].shape)  # (2, max_seq_len_in_batch)\n\n# BERT's vocabulary size: 30,522 (bert-base-uncased)\nprint(f\"Vocab size: {tokenizer.vocab_size}\")\n# WordPiece vocabulary is case-folded in bert-base-uncased:\n# 'Running' and 'running' map to the same token sequence\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "WordPiece vs BPE"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Dimension"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "WordPiece"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "BPE"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Merge criterion"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Likelihood gain: freq(AB) / (freq(A)·freq(B))"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Raw co-occurrence frequency: freq(AB)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Encoding method"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Greedy longest-match (no merge replay)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Replay merge list in training order"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Continuation marker"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "##prefix"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "Ġspace_prefix"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Unknown tokens"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "[UNK] possible for unseen characters"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Byte-level BPE: no UNK ever"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Casing"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "bert-base-uncased folds to lowercase; cased variant preserves case"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Case is preserved in the byte stream"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Primary users"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "BERT, DistilBERT, ALBERT, ELECTRA"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-2/3/4, LLaMA, Mistral, Falcon"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "WordPiece and BPE converge on similar vocabularies in practice — both produce the same intuition that common morphemes like \"##ing\", \"##ed\", \"un##\" deserve their own tokens. The difference is in what gets merged first: BPE rewards raw frequency, so very common character pairs merge early even if the resulting token is not linguistically meaningful. WordPiece rewards mutual information, so it tends to produce morphologically cleaner cuts. For encoder models where the segmentation must be invertible and linguistically useful, WordPiece's scoring is the better fit."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

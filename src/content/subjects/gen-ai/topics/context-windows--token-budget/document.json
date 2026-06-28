@@ -1,0 +1,164 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The token budget is the finite number of tokens a model can process in a single forward pass. Every API call consumes from this budget: system prompt, conversation history, user message, tool definitions, and tool results all count as input tokens; the model's response counts as output tokens. Input and output are additive — a model with a 200K-token context window can handle 199K input tokens and a 1K completion, or 150K input and 50K output, but not 200K input and 10K output simultaneously. Tracking and controlling this budget is essential for reliable production systems."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Counting Tokens Before Sending"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "APIs bill and enforce limits by tokens, not by characters or words. Counting in advance lets you truncate, chunk, or summarise before hitting a "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "context_length_exceeded"
+          },
+          {
+            "type": "text",
+            "text": " error, and lets you estimate cost before committing to a call."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install tiktoken anthropic\nimport tiktoken\nimport anthropic\n\n\ndef count_tokens_openai(text: str, model: str = \"gpt-4o\") -> int:\n    \"\"\"\n    Count tokens for OpenAI models using tiktoken.\n    GPT-4o and GPT-4 use 'o200k_base'; GPT-3.5/GPT-4 (older) use 'cl100k_base'.\n    \"\"\"\n    enc_name = \"o200k_base\" if \"gpt-4o\" in model else \"cl100k_base\"\n    enc = tiktoken.get_encoding(enc_name)\n    return len(enc.encode(text))\n\n\ndef count_tokens_anthropic(messages: list[dict], model: str = \"claude-opus-4-8\") -> int:\n    \"\"\"\n    Count tokens for Anthropic models using the official count_tokens endpoint.\n    This is the only accurate way — Anthropic uses a proprietary tokeniser.\n    Returns the total input token count including message formatting overhead.\n    \"\"\"\n    client = anthropic.Anthropic()\n    response = client.messages.count_tokens(\n        model=model,\n        messages=messages,\n    )\n    return response.input_tokens\n\n\n# Example\ntext = \"Explain the transformer architecture in detail, covering attention, \"\\\n       \"positional encoding, and the feed-forward network.\"\n\nopenai_count = count_tokens_openai(text)\nprint(f\"OpenAI token count: {openai_count}\")\n\nmessages = [{\"role\": \"user\", \"content\": text}]\nanthropic_count = count_tokens_anthropic(messages)\nprint(f\"Anthropic token count: {anthropic_count}\")\n# Counts differ slightly — each provider uses its own tokeniser\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Anatomy of the Token Budget"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a typical chat API call, the total input tokens are the sum of several components. Understanding each helps you identify where budget is going:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import tiktoken\n\nenc = tiktoken.get_encoding(\"cl100k_base\")\n\n\ndef audit_token_budget(\n    system_prompt: str,\n    conversation_history: list[dict],\n    new_user_message: str,\n    tool_definitions: list[dict] | None = None,\n    max_output_tokens: int = 2048,\n    context_limit: int = 128_000,\n) -> dict:\n    \"\"\"\n    Estimate the token budget breakdown for an OpenAI-style API call.\n    Returns a breakdown dict and raises ValueError if the budget is exceeded.\n    \"\"\"\n    import json\n\n    def count(text: str) -> int:\n        return len(enc.encode(text))\n\n    system_tokens = count(system_prompt)\n    history_tokens = sum(\n        count(msg[\"content\"]) + 4  # ~4 overhead tokens per message\n        for msg in conversation_history\n    )\n    user_tokens = count(new_user_message) + 4\n    tool_tokens = count(json.dumps(tool_definitions)) if tool_definitions else 0\n\n    total_input = system_tokens + history_tokens + user_tokens + tool_tokens\n    total_needed = total_input + max_output_tokens\n\n    breakdown = {\n        \"system_tokens\":  system_tokens,\n        \"history_tokens\": history_tokens,\n        \"user_tokens\":    user_tokens,\n        \"tool_tokens\":    tool_tokens,\n        \"total_input\":    total_input,\n        \"max_output\":     max_output_tokens,\n        \"total_needed\":   total_needed,\n        \"remaining\":      context_limit - total_needed,\n        \"over_budget\":    total_needed > context_limit,\n    }\n\n    if breakdown[\"over_budget\"]:\n        raise ValueError(\n            f\"Token budget exceeded: need {total_needed:,}, \"\n            f\"limit is {context_limit:,}\"\n        )\n    return breakdown\n\n\n# Example audit\nbreakdown = audit_token_budget(\n    system_prompt=\"You are a helpful assistant.\",\n    conversation_history=[\n        {\"role\": \"user\",      \"content\": \"What is the capital of France?\"},\n        {\"role\": \"assistant\", \"content\": \"Paris.\"},\n    ],\n    new_user_message=\"Now explain the French Revolution in detail.\",\n    max_output_tokens=1024,\n)\nfor key, value in breakdown.items():\n    print(f\"  {key:20s}: {value}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Managing the Budget in Long Conversations"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-turn conversations accumulate tokens with every exchange. The three standard strategies for keeping a conversation within budget are:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strategy"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "How it works"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Trade-off"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sliding window"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Drop the oldest messages when over budget; always keep system prompt"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Loses early context; model may contradict itself"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Rolling summary"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Summarise the oldest N turns into a compressed \"summary so far\" message"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Adds latency and cost; summary may lose detail"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompt caching"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pin stable content (system prompt, docs) in provider cache; pay reduced rate on cache hits"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Requires cache-aware API support; cache expires"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef sliding_window_chat(\n    history: list[dict],\n    new_message: str,\n    system: str,\n    model: str = \"claude-haiku-4-5-20251001\",\n    max_input_tokens: int = 8000,\n    max_output_tokens: int = 1024,\n) -> tuple[str, list[dict]]:\n    \"\"\"\n    Send a message, trimming oldest turns if the history is too long.\n    Returns (reply_text, updated_history).\n    \"\"\"\n    history = history + [{\"role\": \"user\", \"content\": new_message}]\n\n    # Trim oldest pairs (user+assistant) until within budget\n    while True:\n        token_count = client.messages.count_tokens(\n            model=model,\n            system=system,\n            messages=history,\n        ).input_tokens\n\n        if token_count + max_output_tokens <= max_input_tokens:\n            break\n\n        if len(history) <= 1:\n            # Can't trim further — single message is already too long\n            raise ValueError(\"Single message exceeds token budget\")\n\n        # Drop the oldest user+assistant pair\n        history = history[2:]\n\n    response = client.messages.create(\n        model=model,\n        system=system,\n        messages=history,\n        max_tokens=max_output_tokens,\n    )\n    reply = response.content[0].text\n    history.append({\"role\": \"assistant\", \"content\": reply})\n    return reply, history\n\n\n# Usage\nsystem = \"You are a helpful assistant.\"\nhistory: list[dict] = []\n\nfor user_msg in [\"Hello!\", \"What is BPE?\", \"How does it differ from WordPiece?\"]:\n    reply, history = sliding_window_chat(history, user_msg, system)\n    print(f\"User:      {user_msg}\")\n    print(f\"Assistant: {reply[:80]}...\\n\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Cost Estimation"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# Approximate pricing (USD per million tokens, mid-2025 estimates — check provider pages)\nPRICING = {\n    \"claude-opus-4-8\":          {\"input\": 15.00, \"output\": 75.00},\n    \"claude-sonnet-4-6\":        {\"input\":  3.00, \"output\": 15.00},\n    \"claude-haiku-4-5-20251001\":{\"input\":  0.80, \"output\":  4.00},\n    \"gpt-4o\":                   {\"input\":  2.50, \"output\": 10.00},\n    \"gpt-4o-mini\":              {\"input\":  0.15, \"output\":  0.60},\n}\n\n\ndef estimate_cost(\n    input_tokens: int,\n    output_tokens: int,\n    model: str,\n) -> float:\n    \"\"\"Return estimated cost in USD.\"\"\"\n    if model not in PRICING:\n        raise ValueError(f\"Unknown model: {model}\")\n    p = PRICING[model]\n    return (input_tokens * p[\"input\"] + output_tokens * p[\"output\"]) / 1_000_000\n\n\n# Compare cost for a RAG task: 10K input tokens, 500 output tokens\ninput_tokens  = 10_000\noutput_tokens = 500\n\nprint(f\"{'Model':35s}  {'Cost':>10s}\")\nprint(\"-\" * 48)\nfor model in PRICING:\n    cost = estimate_cost(input_tokens, output_tokens, model)\n    print(f\"{model:35s}  ${cost:>9.4f}\")\n# claude-haiku-4-5-20251001          $0.0101  (cheapest — good for high-volume tasks)\n# gpt-4o-mini                        $0.0018\n# claude-sonnet-4-6                  $0.0375\n# gpt-4o                             $0.0300\n# claude-opus-4-8                    $0.1875  (most capable — reserve for hard tasks)\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The token budget is not just a technical limit — it is a cost envelope. Every token in the context window is paid for at input rates; every token generated is paid for at (typically higher) output rates. The most common budget mistake is accumulating conversation history without pruning it: a 10-turn chat with 500 tokens per turn sends 5,000 tokens of history on the eleventh turn, most of which may be irrelevant. Counting tokens before each call, caching stable prefixes, and trimming or summarising old context are the three levers that keep production API costs predictable."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

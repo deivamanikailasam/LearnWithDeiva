@@ -1,0 +1,259 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The KV cache eliminates redundant computation during autoregressive decoding. Without it, generating the "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "t"
+          },
+          {
+            "type": "text",
+            "text": "-th token requires a full forward pass over all "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "t-1"
+          },
+          {
+            "type": "text",
+            "text": " previous tokens — an O(n²) total cost across all decode steps. With the cache, each step is a single forward pass over one new token that attends to cached keys and values, reducing total decoding cost to O(n). The practical speedup for generating a 512-token response from a 1024-token prompt is not 2× but dramatically higher, because the recomputed prefix dominates the uncached case."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why Speedup Scales with Sequence Length"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without the cache, generating "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "G"
+          },
+          {
+            "type": "text",
+            "text": " tokens from a prompt of length "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "P"
+          },
+          {
+            "type": "text",
+            "text": " requires forward passes over contexts of length "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "P+1, P+2, …, P+G"
+          },
+          {
+            "type": "text",
+            "text": ". The total token-steps processed is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{no-cache cost} = \\sum_{i=1}^{G}(P + i) = G \\cdot P + \\frac{G(G+1)}{2}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With the cache, the prefill processes "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "P"
+          },
+          {
+            "type": "text",
+            "text": " tokens once, then each of the "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "G"
+          },
+          {
+            "type": "text",
+            "text": " decode steps processes exactly 1 new token:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{cache cost} = P + G"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For long prompts or large generation lengths, the speedup ratio "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "(G·P + G²/2) / (P + G)"
+          },
+          {
+            "type": "text",
+            "text": " grows proportionally to "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "G"
+          },
+          {
+            "type": "text",
+            "text": " — generating 1000 tokens is 1000× faster with cache than without (in raw compute terms)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Benchmarking Cache vs No-Cache"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\ntok   = AutoTokenizer.from_pretrained(\"gpt2\")\nmodel = AutoModelForCausalLM.from_pretrained(\"gpt2\").eval()\n\nprompt = \"The history of artificial intelligence begins\" * 5   # ~50 tokens\ninput_ids = tok.encode(prompt, return_tensors=\"pt\")\nMAX_NEW = 100\n\ndef benchmark(use_cache: bool, runs: int = 3) -> float:\n    times = []\n    for _ in range(runs):\n        with torch.no_grad():\n            t0 = time.perf_counter()\n            model.generate(\n                input_ids,\n                max_new_tokens=MAX_NEW,\n                do_sample=False,\n                use_cache=use_cache,\n            )\n            times.append(time.perf_counter() - t0)\n    return sum(times) / len(times)\n\nt_no_cache = benchmark(use_cache=False)\nt_cached   = benchmark(use_cache=True)\n\nprint(f\"Prompt length:     {input_ids.shape[1]} tokens\")\nprint(f\"New tokens:        {MAX_NEW}\")\nprint(f\"No-cache time:     {t_no_cache:.3f}s\")\nprint(f\"With-cache time:   {t_cached:.3f}s\")\nprint(f\"Speedup:           {t_no_cache / t_cached:.1f}×\")\nprint(f\"Tokens/sec (cache): {MAX_NEW / t_cached:.1f}\")\n\n# Validate outputs are identical\nwith torch.no_grad():\n    out_nc = model.generate(input_ids, max_new_tokens=MAX_NEW, do_sample=False, use_cache=False)\n    out_c  = model.generate(input_ids, max_new_tokens=MAX_NEW, do_sample=False, use_cache=True)\nassert (out_nc == out_c).all(), \"outputs differ — logic error\"\nprint(\"Outputs match: True\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Prefill vs Decode Throughput"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The two phases have different performance characteristics. Prefill is "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "bold"}],
+            "text": "compute-bound"
+          },
+          {
+            "type": "text",
+            "text": ": many tokens are processed in parallel with large matrix multiplications that saturate GPU cores. Decode is "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "bold"}],
+            "text": "memory-bandwidth-bound"
+          },
+          {
+            "type": "text",
+            "text": ": each step processes one token but must read the entire model weight and KV cache from GPU HBM. This bottleneck explains why decode tokens/sec is typically much lower than prefill tokens/sec, and why techniques that reduce KV reads (GQA, speculative decoding) improve decode throughput disproportionately."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport time\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\ntok   = AutoTokenizer.from_pretrained(\"gpt2\")\nmodel = AutoModelForCausalLM.from_pretrained(\"gpt2\").eval()\n\n# Measure prefill speed: process N tokens all at once\ndef measure_prefill(n_tokens: int, runs: int = 5) -> float:\n    dummy = torch.randint(0, tok.vocab_size, (1, n_tokens))\n    times = []\n    for _ in range(runs):\n        with torch.no_grad():\n            t0 = time.perf_counter()\n            _ = model(dummy, use_cache=True)\n            times.append(time.perf_counter() - t0)\n    return n_tokens / (sum(times) / len(times))  # tokens/sec\n\n# Measure decode speed: generate one token at a time from a cached prefix\ndef measure_decode(prefix_len: int, n_new: int = 50, runs: int = 3) -> float:\n    prefix = torch.randint(0, tok.vocab_size, (1, prefix_len))\n    times = []\n    for _ in range(runs):\n        with torch.no_grad():\n            t0 = time.perf_counter()\n            model.generate(\n                prefix, max_new_tokens=n_new, do_sample=False, use_cache=True\n            )\n        times.append(time.perf_counter() - t0)\n    # subtract prefill time (first step); approximate as total/n_new\n    return n_new / (sum(times) / len(times))\n\nprint(\"Prefill throughput:\")\nfor n in [64, 256, 512]:\n    tps = measure_prefill(n)\n    print(f\"  {n:4d} tokens: {tps:7.1f} tok/s\")\n\nprint(\"\\nDecode throughput (cached):\")\nfor n in [64, 256, 512]:\n    tps = measure_decode(n)\n    print(f\"  prefix={n:4d}: {tps:7.1f} tok/s\")\n\n# Prefill is typically 5–20× faster than decode on modern hardware\n# because it runs large batched matrix multiplications vs single-token reads\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Speedup Summary"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Setting"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Without cache"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "With cache"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Approx. speedup"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompt 128 tokens, generate 128"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Recomputes 128→256 tokens per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1 new token per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~65×"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompt 1024 tokens, generate 512"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Recomputes 1024→1536 tokens per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1 new token per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~640×"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompt 8K tokens, generate 1K"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Recomputes 8K→9K tokens per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1 new token per step"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~4500×"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The KV cache converts autoregressive generation from a quadratic to a linear algorithm. In practice the measured wall-clock speedup is lower than the theoretical maximum because the decode phase is memory-bandwidth-bound rather than compute-bound — reading the cache from HBM is the bottleneck, not the matmuls. But the cache is still the non-negotiable foundation of production LLM serving: every serious inference framework (vLLM, TensorRT-LLM, DeepSpeed-MII) assumes it. The only reason to disable it is in low-memory environments where the cache itself would exhaust GPU memory before the generation completes."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

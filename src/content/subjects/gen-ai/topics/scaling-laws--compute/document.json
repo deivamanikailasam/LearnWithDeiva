@@ -1,0 +1,190 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Compute is the third axis of the scaling laws and the ultimate budget constraint: you can only train as large a model on as much data as your FLOPs allow. The key insight from Kaplan et al. (2020) and Hoffmann et al. (2022) is that loss decreases predictably as a power law in compute, and that for any given compute budget there is an optimal (N, D) pair — a model size and data size — that minimises the loss. Understanding how FLOPs are counted, what hardware delivers, and how to estimate training costs lets you plan experiments before spending GPU hours."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "FLOPs in a Transformer Forward Pass"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a single forward pass through a transformer, the dominant cost is matrix multiplications. For a model with "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "N"
+          },
+          {
+            "type": "text",
+            "text": " non-embedding parameters and a sequence of "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "T"
+          },
+          {
+            "type": "text",
+            "text": " tokens, the forward pass costs approximately "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "2NT"
+          },
+          {
+            "type": "text",
+            "text": " FLOPs. A full training step (forward + backward) costs roughly "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "6NT"
+          },
+          {
+            "type": "text",
+            "text": " FLOPs — 2 forward, 4 backward (gradient computation is approximately 2× the forward pass)."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "C \\approx 6 \\cdot N \\cdot D \\quad \\text{(total training FLOPs)}"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Estimating Training Cost"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "def training_flops(\n    n_params: float,\n    n_tokens: float,\n    flops_per_token_per_param: float = 6.0,\n) -> float:\n    \"\"\"Total training FLOPs (forward + backward).\"\"\"\n    return flops_per_token_per_param * n_params * n_tokens\n\n\ndef gpu_hours(\n    total_flops: float,\n    gpu_flops_per_sec: float,   # peak theoretical\n    mfu: float = 0.40,          # model FLOP utilisation (typical: 30-50%)\n    n_gpus: int = 1,\n) -> float:\n    \"\"\"Estimated GPU-hours, accounting for hardware efficiency.\"\"\"\n    effective_flops_per_sec = gpu_flops_per_sec * mfu * n_gpus\n    seconds = total_flops / effective_flops_per_sec\n    return seconds / 3600\n\n\n# GPU peak FLOP rates (bf16 tensor cores)\nGPU_TFLOPS = {\n    \"A100 80GB\":  312e12,    # 312 TFLOPS bf16\n    \"H100 80GB\":  989e12,    # 989 TFLOPS bf16\n    \"H200 141GB\": 1979e12,   # 1979 TFLOPS bf16\n    \"RTX 4090\":   165e12,    # 165 TFLOPS bf16\n}\n\n# Representative training runs\nmodels = [\n    # name,         n_params_B, n_tokens_B\n    (\"GPT-2 XL\",         1.5,      10),\n    (\"LLaMA 3 8B\",        8,    15_000),\n    (\"LLaMA 3 70B\",      70,    15_000),\n    (\"GPT-3 175B\",      175,       300),\n    (\"LLaMA 3 405B\",    405,    15_000),\n]\n\nfor name, n_b, d_b in models:\n    flops = training_flops(n_b * 1e9, d_b * 1e9)\n    print(f\"\\n{name} ({n_b}B params, {d_b}B tokens):\")\n    print(f\"  Total FLOPs: {flops:.2e}\")\n    for gpu_name, peak in GPU_TFLOPS.items():\n        hours = gpu_hours(flops, peak, mfu=0.40, n_gpus=1)\n        print(f\"  {gpu_name}: {hours:.0f} GPU-hours  \"\n              f\"({hours/24:.0f} GPU-days)\")\n\n# LLaMA 3 8B: ~3.6e+24 FLOPs\n# H100: ~10,000 GPU-hours (~416 GPU-days) on a single H100\n# With 512 H100s: ~20 hours wall clock\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Model FLOP Utilisation (MFU)"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Peak hardware FLOP rates are never achieved in practice. Model FLOP Utilisation (MFU) measures the fraction of peak FLOPs actually used for model computation, excluding communication overhead, data loading, and kernel launch latency. Typical MFU values:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport time\n\n\ndef measure_mfu(\n    model,\n    input_ids: torch.Tensor,\n    n_params: int,\n    gpu_peak_flops: float,\n    n_warmup: int = 5,\n    n_measure: int = 20,\n) -> float:\n    \"\"\"\n    Estimate MFU by comparing actual throughput to GPU peak.\n    Assumes ~6 FLOPs per parameter per token (forward only = 2, \n    but we use 6 as if measuring a training step).\n    \"\"\"\n    model.eval()\n    seq_len = input_ids.shape[1]\n    batch   = input_ids.shape[0]\n\n    # Warmup\n    for _ in range(n_warmup):\n        with torch.no_grad():\n            _ = model(input_ids)\n    if torch.cuda.is_available():\n        torch.cuda.synchronize()\n\n    t0 = time.perf_counter()\n    for _ in range(n_measure):\n        with torch.no_grad():\n            _ = model(input_ids)\n    if torch.cuda.is_available():\n        torch.cuda.synchronize()\n    elapsed = time.perf_counter() - t0\n\n    tokens_per_sec = (batch * seq_len * n_measure) / elapsed\n    # FLOPs achieved = 2 * N * tokens/sec (forward pass only)\n    flops_achieved = 2 * n_params * tokens_per_sec\n    mfu = flops_achieved / gpu_peak_flops\n    return mfu, tokens_per_sec\n\n\n# Typical MFU benchmarks:\nMFU_REFERENCE = {\n    \"Single GPU, small model (no parallelism)\": (0.35, 0.50),\n    \"Multi-GPU tensor parallelism (8 GPUs)\": (0.40, 0.55),\n    \"Multi-node pipeline parallelism\": (0.25, 0.40),\n    \"Poorly optimised (no Flash Attention)\": (0.10, 0.20),\n}\nprint(\"Typical MFU ranges:\")\nfor scenario, (low, high) in MFU_REFERENCE.items():\n    print(f\"  {scenario}: {low:.0%}–{high:.0%}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Compute-Optimal Frontier"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Compute budget"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Chinchilla-optimal N"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Chinchilla-optimal D"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Approximate equivalent"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1e21 FLOPs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~400M"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~8B tokens"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Small research model"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1e22 FLOPs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~1.3B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~26B tokens"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-3 small era"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1e23 FLOPs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~4B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~85B tokens"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Chinchilla 7B regime"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1e24 FLOPs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~13B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~260B tokens"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT-3 / Chinchilla range"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "1e25 FLOPs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~40B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "~850B tokens"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Frontier model territory"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Compute is the budget; parameters and data are how you spend it. The scaling laws tell you the optimal allocation for a training-compute-optimal model, but real labs increasingly deviate by over-training smaller models to hit inference-cost targets. A 7B model trained on 15T tokens costs the same to query as one trained on 140B tokens — but the over-trained version performs significantly better at inference time. This shift from \"train optimally\" to \"train for cheap inference\" is the dominant design choice in open-weight models since 2023, and it makes compute accounting more nuanced than the original Chinchilla prescription."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Determinism in LLM inference means that the same input always produces the same output. Achieving it requires eliminating every source of randomness in the pipeline: the decoding strategy, GPU floating-point non-determinism, and any dropout or stochastic regularisation at inference time. Determinism matters for reproducible evaluation, regression testing, and debugging — but it comes at the cost of output diversity and, on modern GPU hardware, sometimes at the cost of throughput."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Sources of Non-Determinism"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Source"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When it occurs"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "How to eliminate it"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sampling"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "temperature > 0, top-p, top-k draw from a random distribution"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Set temperature=0 (greedy) or fix a random seed"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPU floating-point order"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Parallel reductions (softmax, matmul) produce different rounding errors across runs when thread scheduling varies"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "torch.use_deterministic_algorithms(True)"}, {"type": "text", "text": " + CUBLAS_WORKSPACE_CONFIG"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Batch size and padding"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Batch padding changes which tokens appear in the attention mask; flash attention tiling differs"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use batch size=1 and consistent padding strategy"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Dropout at inference"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Some older models or custom architectures leave dropout active"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "model.eval()"}, {"type": "text", "text": " disables dropout in PyTorch"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "API model updates"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Provider silently updates the model behind the same model ID"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pin a versioned model ID (e.g. claude-opus-4-8-20250514)"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Achieving Determinism in Local Inference"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import random\nimport numpy as np\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nimport os\n\n\ndef set_deterministic_mode(seed: int = 42) -> None:\n    \"\"\"\n    Set all random seeds and force deterministic GPU algorithms.\n    Call this once before loading the model.\n\n    Note: deterministic mode disables some CUDA optimisations and\n    may reduce throughput by 10–40% on some operations.\n    \"\"\"\n    random.seed(seed)\n    np.random.seed(seed)\n    torch.manual_seed(seed)\n    torch.cuda.manual_seed_all(seed)\n\n    # Force deterministic CUDA kernels where available.\n    # Operations without a deterministic implementation will raise RuntimeError.\n    torch.use_deterministic_algorithms(True)\n\n    # Required for deterministic behaviour with cuBLAS (used in matmul)\n    os.environ[\"CUBLAS_WORKSPACE_CONFIG\"] = \":4096:8\"\n\n    # Disable cuDNN benchmarking (can select different algorithms across runs)\n    torch.backends.cudnn.benchmark = False\n    torch.backends.cudnn.deterministic = True\n\n\nset_deterministic_mode(seed=42)\n\ntok   = AutoTokenizer.from_pretrained(\"gpt2\")\nmodel = AutoModelForCausalLM.from_pretrained(\"gpt2\").eval()   # .eval() disables dropout\n\nprompt = \"The future of AI is\"\ninput_ids = tok.encode(prompt, return_tensors=\"pt\")\n\n# Greedy (temperature=0) — deterministic regardless of seed\nfor _ in range(3):\n    torch.manual_seed(42)    # seed the RNG even for greedy (no-op, but harmless)\n    out = model.generate(input_ids, max_new_tokens=20, do_sample=False)\n    print(tok.decode(out[0], skip_special_tokens=True))\n# Identical output all three times\n\n# Sampling with fixed seed — also reproducible\nfor _ in range(3):\n    torch.manual_seed(42)    # reset before each call\n    out = model.generate(\n        input_ids,\n        max_new_tokens=20,\n        do_sample=True,\n        temperature=0.8,\n        top_p=0.9,\n    )\n    print(tok.decode(out[0], skip_special_tokens=True))\n# Also identical — seed controls the PRNG used for sampling\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Determinism via API Seed Parameters"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Hosted APIs can offer a "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "seed"
+          },
+          {
+            "type": "text",
+            "text": " parameter that seeds the server-side sampling RNG. Most providers document this as \"best effort\" — hardware differences and batching on the server side mean exact reproduction is not guaranteed across different calls or time periods, but within a short window the output is usually stable:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from openai import OpenAI\n\nclient = OpenAI()\n\nprompt = \"Write one sentence describing the colour blue.\"\n\n# Same seed → usually same output (best-effort)\nfor i in range(3):\n    resp = client.chat.completions.create(\n        model=\"gpt-4o-mini\",\n        seed=1234,              # server-side RNG seed (best effort)\n        temperature=0.8,        # still sampling, but seeded\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    print(f\"Run {i+1}:\", resp.choices[0].message.content)\n    # system_fingerprint tells you which model/backend version was used:\n    print(\"  system_fingerprint:\", resp.system_fingerprint)\n    # If system_fingerprint changes between calls, the model was updated.\n\n# For true reproducibility, combine:\n# - seed=<fixed integer>\n# - temperature=0  (greedy)\n# - a pinned model version\nreproducible = client.chat.completions.create(\n    model=\"gpt-4o-mini-2024-07-18\",   # pinned version, not floating alias\n    seed=42,\n    temperature=0,\n    messages=[{\"role\": \"user\", \"content\": prompt}],\n)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Verifying Reproducibility in Evaluation Pipelines"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import hashlib\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nimport torch\n\n\ndef generate_with_hash(\n    model,\n    tokenizer,\n    prompt: str,\n    seed: int = 42,\n    max_new_tokens: int = 50,\n) -> tuple[str, str]:\n    \"\"\"\n    Generate text and return (output_text, sha256_hash).\n    Store the hash in a test fixture to catch regressions.\n    \"\"\"\n    torch.manual_seed(seed)\n    input_ids = tokenizer.encode(prompt, return_tensors=\"pt\")\n    with torch.no_grad():\n        output_ids = model.generate(\n            input_ids,\n            max_new_tokens=max_new_tokens,\n            do_sample=False,   # greedy for maximum stability\n        )\n    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)\n    digest = hashlib.sha256(text.encode()).hexdigest()[:16]\n    return text, digest\n\n\ntok   = AutoTokenizer.from_pretrained(\"gpt2\")\nmodel = AutoModelForCausalLM.from_pretrained(\"gpt2\").eval()\n\ntext, digest = generate_with_hash(model, tok, \"The transformer architecture\")\nprint(f\"Output: {text}\")\nprint(f\"Hash:   {digest}\")\n\n# In a test:\nEXPECTED_HASH = \"<stored from a known-good run>\"\n# assert digest == EXPECTED_HASH, f\"Model output changed! Got {digest}\"\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Practical Guidelines"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "bold"}], "text": "Evaluation benchmarks:"}, {"type": "text", "text": " use temperature=0 + fixed seed. Results must be reproducible to be meaningful."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "bold"}], "text": "Regression tests:"}, {"type": "text", "text": " hash greedy outputs against a golden fixture. A changed hash signals a model or dependency update."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "bold"}], "text": "A/B experiments:"}, {"type": "text", "text": " change exactly one variable (prompt, model, temperature). Hold all seeds constant."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "bold"}], "text": "Production inference:"}, {"type": "text", "text": " expect non-determinism at scale. Different server replicas will batch requests differently. If you need reproducibility per user, store the output, not the seed."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "bold"}], "text": "API model pinning:"}, {"type": "text", "text": " use versioned model IDs (e.g., "}, {"type": "text", "marks": [{"type": "code"}], "text": "claude-opus-4-8-20250514"}, {"type": "text", "text": ") in evaluation and testing. Floating aliases like "}, {"type": "text", "marks": [{"type": "code"}], "text": "claude-opus-4-8"}, {"type": "text", "text": " silently update."}]}]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "GPU floating-point non-determinism is subtle: on modern hardware, parallel reductions (matmul, softmax) produce results that differ by 1–2 ULPs (units in the last place) depending on thread scheduling. This is below human perception for any single output token, but can shift the argmax when two tokens have very similar probabilities — making greedy decoding non-reproducible without deterministic kernel settings. If reproducibility is critical, enforce it explicitly rather than assuming it."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

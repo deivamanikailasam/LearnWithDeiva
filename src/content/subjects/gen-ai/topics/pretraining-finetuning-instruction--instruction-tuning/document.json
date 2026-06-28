@@ -1,0 +1,162 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Instruction tuning is a specific form of supervised fine-tuning where the training examples are formatted as natural-language instructions paired with ideal responses. A base language model predicts the next token plausibly given any context — but it does not reliably follow imperative instructions like \"Summarise this article\" or \"Write a function that reverses a linked list.\" Instruction tuning bridges this gap by exposing the model to thousands of diverse instruction-response pairs, teaching it to interpret and execute instructions as a consistent behaviour pattern rather than treating them as ordinary text to continue."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why a Pretrained Model Doesn't Follow Instructions"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During pretraining, the model learns from a corpus that contains both instructions and their answers, but also contains instructions that are never followed, questions that are never answered, and prompts that lead to tangential continuations. The pretraining objective treats all of this uniformly: predict the next token. The model does not learn that \"Summarise:\" is a special token that should trigger a summarisation behaviour — it learns only that \"Summarise:\" is often followed by a summary. Instruction tuning makes this expectation explicit by constructing a dataset where every example has this structure."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Dataset Formats"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Instruction tuning datasets vary in structure, but all encode the same concept: a user directive followed by a target response. Common formats:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# Format 1: Alpaca-style (single instruction + optional input + output)\nalpaca_example = {\n    \"instruction\": \"Translate the following English text to French.\",\n    \"input\": \"The weather is beautiful today.\",\n    \"output\": \"Le temps est magnifique aujourd'hui.\",\n}\n\n# Format 2: Chat / multi-turn (used by ChatML, Llama-3, Claude)\nchat_example = [\n    {\"role\": \"system\",    \"content\": \"You are a helpful assistant.\"},\n    {\"role\": \"user\",      \"content\": \"What is the capital of Japan?\"},\n    {\"role\": \"assistant\", \"content\": \"The capital of Japan is Tokyo.\"},\n    {\"role\": \"user\",      \"content\": \"And what is the population?\"},\n    {\"role\": \"assistant\", \"content\": \"Tokyo's population is approximately 13.9 million in the city proper.\"},\n]\n\n# Format 3: Prompt + completion (OpenAI / GPT-style legacy)\ncompletion_example = {\n    \"prompt\": \"### Instruction:\\nList three benefits of exercise.\\n\\n### Response:\\n\",\n    \"completion\": \"1. Improved cardiovascular health.\\n2. Enhanced mood through endorphin release.\\n3. Better sleep quality.\",\n}\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Training Loop"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The loss is computed only on the response tokens, not the instruction tokens. This is critical: if the model were penalised for \"wrong\" instruction tokens, it would be optimised to generate different instructions rather than better responses."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer\nfrom datasets import Dataset\n\n\nINSTRUCTION_TEMPLATE = \"### Instruction:\\n{instruction}\\n\\n### Response:\\n\"\n\n\ndef tokenise_for_instruction_tuning(\n    example: dict,\n    tokenizer,\n    max_length: int = 1024,\n) -> dict:\n    \"\"\"\n    Tokenise an instruction-response pair.\n    Loss is computed only on response tokens — instruction tokens get label -100.\n    \"\"\"\n    instruction_text = INSTRUCTION_TEMPLATE.format(\n        instruction=example.get(\"instruction\", \"\") +\n                    (f\"\\n\\nInput: {example['input']}\" if example.get(\"input\") else \"\")\n    )\n    response_text = example[\"output\"] + tokenizer.eos_token\n\n    inst_ids = tokenizer(instruction_text, add_special_tokens=True)[\"input_ids\"]\n    resp_ids = tokenizer(response_text,    add_special_tokens=False)[\"input_ids\"]\n\n    input_ids = (inst_ids + resp_ids)[:max_length]\n    # Mask instruction tokens from the loss\n    labels    = ([-100] * len(inst_ids) + resp_ids)[:max_length]\n\n    # Pad to max_length\n    pad_len   = max_length - len(input_ids)\n    input_ids = input_ids + [tokenizer.pad_token_id] * pad_len\n    labels    = labels    + [-100]                   * pad_len\n    attn_mask = [1] * (max_length - pad_len) + [0] * pad_len\n\n    return {\n        \"input_ids\":      input_ids,\n        \"attention_mask\": attn_mask,\n        \"labels\":         labels,\n    }\n\n\ndef instruction_tune(\n    base_model: str,\n    examples: list[dict],  # [{\"instruction\": ..., \"input\": ..., \"output\": ...}]\n    output_dir: str = \"./instruct-model\",\n):\n    tokenizer = AutoTokenizer.from_pretrained(base_model)\n    tokenizer.pad_token = tokenizer.eos_token\n\n    model = AutoModelForCausalLM.from_pretrained(\n        base_model, torch_dtype=torch.bfloat16, device_map=\"auto\"\n    )\n\n    dataset = Dataset.from_list(examples)\n    dataset = dataset.map(\n        lambda ex: tokenise_for_instruction_tuning(ex, tokenizer),\n        remove_columns=dataset.column_names,\n    )\n\n    args = TrainingArguments(\n        output_dir=output_dir,\n        num_train_epochs=3,\n        per_device_train_batch_size=4,\n        gradient_accumulation_steps=8,\n        learning_rate=2e-5,\n        warmup_ratio=0.03,\n        lr_scheduler_type=\"cosine\",\n        bf16=True,\n        logging_steps=25,\n    )\n    Trainer(model=model, args=args, train_dataset=dataset).train()\n    model.save_pretrained(output_dir)\n    tokenizer.save_pretrained(output_dir)\n    return model\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "What Instruction Tuning Teaches"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Task recognition. "},
+              {"type": "text", "text": "The model learns to identify the task type from the instruction phrasing — \"summarise\", \"translate\", \"classify\", \"generate\" — and activate the appropriate behaviour."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Format adherence. "},
+              {"type": "text", "text": "When the instruction specifies a format (\"return JSON\", \"use bullet points\", \"respond in one sentence\"), the model learns to respect those constraints."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Cross-task generalisation. "},
+              {"type": "text", "text": "The most important finding from FLAN (Wei et al., 2022) and Alpaca: a model instruction-tuned on hundreds of diverse tasks can zero-shot follow instructions for new tasks not seen during tuning. Diversity of tasks in the dataset matters more than the volume of any single task."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Synthetic Data Generation"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Human-authored instruction datasets are expensive to curate. Self-Instruct (Wang et al., 2022) and Alpaca showed that a capable LLM can bootstrap a large instruction dataset by generating new instruction-response pairs from a small set of seed examples. The quality is lower than human-curated data but the scale more than compensates:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\n\nclient = anthropic.Anthropic()\n\nSEED_TASKS = [\n    {\"instruction\": \"Give three tips for staying healthy.\",\n     \"output\": \"1. Exercise regularly. 2. Eat a balanced diet. 3. Get enough sleep.\"},\n    {\"instruction\": \"Explain what photosynthesis is in one sentence.\",\n     \"output\": \"Photosynthesis is the process by which plants use sunlight to convert CO₂ and water into glucose and oxygen.\"},\n]\n\n\ndef generate_instruction_batch(\n    seed_tasks: list[dict], n: int = 20\n) -> list[dict]:\n    \"\"\"\n    Self-Instruct style: generate new instruction-response pairs\n    by prompting a capable model with seed examples.\n    \"\"\"\n    seed_str = \"\\n\".join(\n        f\"{i+1}. Instruction: {t['instruction']}\\n   Output: {t['output']}\"\n        for i, t in enumerate(seed_tasks)\n    )\n    prompt = f\"\"\"Here are {len(seed_tasks)} examples of instruction-output pairs:\n\n{seed_str}\n\nGenerate {n} NEW, diverse instruction-output pairs in the same format.\nReturn a JSON array: [{\"instruction\": \"...\", \"output\": \"...\"}].\nEnsure variety in task type, length, and domain.\"\"\"\n\n    response = client.messages.create(\n        model=\"claude-opus-4-8\",\n        max_tokens=4096,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    text = response.content[0].text\n    # Extract JSON from the response\n    start = text.index(\"[\")\n    end   = text.rindex(\"]\") + 1\n    return json.loads(text[start:end])\n\n\nnew_tasks = generate_instruction_batch(SEED_TASKS, n=20)\nprint(f\"Generated {len(new_tasks)} new instruction pairs\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Instruction Tuning vs. RLHF"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Instruction tuning is supervised — it trains the model to imitate ideal responses from a dataset. RLHF goes further: it trains a reward model on human preference comparisons (\"response A is better than B\") and then uses reinforcement learning to optimise the policy model toward those preferences. In practice, both are used together: instruction tuning first (SFT stage), RLHF second (alignment stage). Instruction tuning is cheaper and more stable; RLHF is more expensive but captures nuanced human preferences that are hard to express as direct demonstrations."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Instruction tuning is the step that turns a text completion engine into an assistant. Without it, the model knows the answers but does not know it is being asked a question."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

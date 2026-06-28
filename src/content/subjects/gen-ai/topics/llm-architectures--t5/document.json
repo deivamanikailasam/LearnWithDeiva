@@ -1,0 +1,222 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "T5 — Text-to-Text Transfer Transformer — is Google's 2020 model that reframes every NLP task as a text-to-text problem. Translation, summarisation, classification, question answering, and even regression are all cast in the same form: take a text string in, produce a text string out. This unified interface is the conceptual contribution: by collapsing task diversity into a single format, T5 can be pretrained once and fine-tuned for anything with identical machinery. The architecture is an encoder-decoder transformer, and the training regime — C4 corpus, span-corruption objective, large-scale multi-task fine-tuning — was the template for later models like Flan-T5 and the UL2 family."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "The Text-to-Text Framework"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every task is expressed as a prefixed input-output pair. The prefix tells the model which task to perform; the output is always free text:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Task"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Input string"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Target string"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Translation"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "translate English to German: The cat sat on the mat."}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "Die Katze saß auf der Matte."}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Summarisation"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "summarize: <long article text>"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "A one-sentence summary."}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sentiment"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "sst2 sentence: The film was brilliant."}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "positive"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Question answering"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "question: Who wrote Hamlet? context: …"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "William Shakespeare"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Encoder-Decoder Architecture"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "T5 uses the full encoder-decoder transformer. The encoder reads the entire input with bidirectional attention and produces contextualised representations. The decoder generates the output autoregressively, attending to both its own previous tokens (causal self-attention) and the encoder's output (cross-attention):"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn as nn\nfrom torch import Tensor\n\n\nclass T5CrossAttention(nn.Module):\n    \"\"\"Decoder cross-attention: queries from decoder, keys/values from encoder.\"\"\"\n    def __init__(self, d_model: int, n_heads: int):\n        super().__init__()\n        self.n_heads  = n_heads\n        self.head_dim = d_model // n_heads\n        self.q   = nn.Linear(d_model, d_model, bias=False)\n        self.kv  = nn.Linear(d_model, 2 * d_model, bias=False)\n        self.out = nn.Linear(d_model, d_model, bias=False)\n\n    def forward(self, decoder_hidden: Tensor, encoder_output: Tensor) -> Tensor:\n        B, Tq, C = decoder_hidden.shape\n        _, Tk, _ = encoder_output.shape\n\n        q  = self.q(decoder_hidden).reshape(B, Tq, self.n_heads, self.head_dim).transpose(1, 2)\n        kv = self.kv(encoder_output).reshape(B, Tk, 2, self.n_heads, self.head_dim)\n        k, v = kv.unbind(dim=2)\n        k = k.transpose(1, 2)\n        v = v.transpose(1, 2)\n\n        scale   = self.head_dim ** -0.5\n        weights = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) * scale, dim=-1)\n        out     = torch.matmul(weights, v).transpose(1, 2).reshape(B, Tq, C)\n        return self.out(out)\n\n\nclass T5DecoderBlock(nn.Module):\n    \"\"\"One T5 decoder block: causal self-attn → cross-attn → FFN, all Pre-LN.\"\"\"\n    def __init__(self, d_model: int, n_heads: int, ffn_dim: int):\n        super().__init__()\n        from torch.nn import LayerNorm\n        # T5 uses RMSNorm; standard LayerNorm is a close substitute here.\n        self.ln1       = LayerNorm(d_model)\n        self.self_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)\n        self.ln2       = LayerNorm(d_model)\n        self.cross_attn = T5CrossAttention(d_model, n_heads)\n        self.ln3       = LayerNorm(d_model)\n        self.ffn       = nn.Sequential(\n            nn.Linear(d_model, ffn_dim, bias=False),\n            nn.ReLU(),\n            nn.Linear(ffn_dim, d_model, bias=False),\n        )\n\n    def forward(\n        self,\n        x: Tensor,\n        encoder_output: Tensor,\n        causal_mask: Tensor | None = None,\n    ) -> Tensor:\n        # 1. Causal self-attention (decoder sees only past tokens)\n        norm_x  = self.ln1(x)\n        sa_out, _ = self.self_attn(norm_x, norm_x, norm_x, attn_mask=causal_mask)\n        x = x + sa_out\n        # 2. Cross-attention to encoder\n        x = x + self.cross_attn(self.ln2(x), encoder_output)\n        # 3. Feed-forward\n        x = x + self.ffn(self.ln3(x))\n        return x\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Pre-Training: Span Corruption"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "T5 does not use BERT's masked-token objective or GPT's next-token objective. Instead it uses span corruption: contiguous spans of tokens are replaced by a single sentinel token (like "
+          },
+          {"type": "text", "marks": [{"type": "code"}], "text": "<extra_id_0>"},
+          {
+            "type": "text",
+            "text": "), and the model must reconstruct the dropped spans in the decoder output. This is more efficient than MLM — each training example exercises the decoder — and produces a better generative model:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import random\nfrom transformers import T5Tokenizer\n\ntokenizer = T5Tokenizer.from_pretrained(\"t5-small\")\n\n\ndef apply_span_corruption(\n    token_ids: list[int],\n    noise_density: float = 0.15,\n    mean_noise_span: int = 3,\n) -> tuple[str, str]:\n    \"\"\"\n    T5-style span corruption.\n    Returns (corrupted_input, target_output) as decoded strings.\n\n    Contiguous runs of masked tokens are collapsed into a single\n    sentinel <extra_id_N> in both input and output.\n    \"\"\"\n    n = len(token_ids)\n    # Decide which positions to mask (Bernoulli with noise_density).\n    mask = [random.random() < noise_density for _ in range(n)]\n\n    input_ids, target_ids = [], []\n    sentinel_id = 0\n    i = 0\n    while i < n:\n        if not mask[i]:\n            input_ids.append(token_ids[i])\n            i += 1\n        else:\n            # Start of a masked span: consume contiguous masked tokens.\n            sentinel_tok = tokenizer.convert_tokens_to_ids(f\"<extra_id_{sentinel_id}>\")\n            input_ids.append(sentinel_tok)\n            target_ids.append(sentinel_tok)\n            while i < n and mask[i]:\n                target_ids.append(token_ids[i])\n                i += 1\n            sentinel_id += 1\n\n    target_ids.append(tokenizer.eos_token_id)\n    return (\n        tokenizer.decode(input_ids, skip_special_tokens=False),\n        tokenizer.decode(target_ids, skip_special_tokens=False),\n    )\n\n\ntext   = \"The quick brown fox jumps over the lazy dog near the river bank.\"\ntok    = tokenizer.encode(text, add_special_tokens=False)\ninput_text, target_text = apply_span_corruption(tok)\nprint(\"Input: \", input_text)\nprint(\"Target:\", target_text)\n# Input:  The quick <extra_id_0> jumps over <extra_id_1> lazy dog <extra_id_2> river bank.\n# Target: <extra_id_0> brown fox <extra_id_1> the <extra_id_2> the <eos>\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Using T5 for Inference"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import T5ForConditionalGeneration, T5Tokenizer\nimport torch\n\nmodel     = T5ForConditionalGeneration.from_pretrained(\"t5-small\")\ntokenizer = T5Tokenizer.from_pretrained(\"t5-small\")\nmodel.eval()\n\n\ndef t5_generate(task_prefix: str, text: str, max_new_tokens: int = 64) -> str:\n    \"\"\"\n    Run any text-to-text task. The prefix routes the model to the right behaviour.\n    \"\"\"\n    input_text = f\"{task_prefix}: {text}\"\n    input_ids  = tokenizer(input_text, return_tensors=\"pt\").input_ids\n    with torch.no_grad():\n        output_ids = model.generate(input_ids, max_new_tokens=max_new_tokens)\n    return tokenizer.decode(output_ids[0], skip_special_tokens=True)\n\n\n# All tasks use the same model, same generate() call — only the prefix differs.\nprint(t5_generate(\"summarize\",\n    \"NASA's Perseverance rover has been collecting rock samples on Mars since 2021, \"\n    \"looking for signs of ancient microbial life.\"))\n\nprint(t5_generate(\"translate English to French\",\n    \"The meeting has been postponed to next Tuesday.\"))\n\nprint(t5_generate(\"cola sentence\",\n    \"The children is playing in the garden.\"))\n# -> 'unacceptable'  (grammatically incorrect)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "T5 vs BERT vs GPT"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Property"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "T5"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "BERT"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "GPT"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Architecture"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Encoder-decoder"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Encoder-only"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Decoder-only"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pre-training objective"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Span corruption"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "MLM + NSP"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Next-token prediction"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Output type"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Generated text (any length)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Representations / labels"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Generated text (open-ended)"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best at"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Seq2seq tasks (translation, summarisation, QA with generation)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Classification, NER, span extraction"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Open-ended generation, in-context learning"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Notable descendants"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Flan-T5, UL2, mT5, BART"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RoBERTa, DeBERTa, ELECTRA"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLaMA, Mistral, GPT-4"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "T5's key insight is not the architecture — encoder-decoder transformers existed before it — but the framing: every NLP task is a string-to-string mapping. By expressing classification labels, translation outputs, and extracted spans all as text, T5 made multi-task pretraining and fine-tuning drastically simpler. That same principle — the model just generates text — underpins modern instruction-tuned and chat models, which are all essentially very large T5-style text-to-text systems without the encoder."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
