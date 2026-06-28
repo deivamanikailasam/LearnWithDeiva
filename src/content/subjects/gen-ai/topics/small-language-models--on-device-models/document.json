@@ -1,0 +1,176 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "On-device models are language models that run entirely on the user's hardware — phone, laptop, or embedded system — with no network call to a remote server. The defining characteristics are: all inference happens locally, user data never leaves the device, and the model must fit within the hardware's available memory and power budget. This is technically demanding: a 2024 smartphone has 8–12 GB of RAM shared with the OS and other apps, a battery-constrained neural engine, and thermal limits that cause throttling under sustained load. On-device AI is where SLM research directly meets product engineering."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Hardware Backends"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Modern smartphones and laptops have dedicated neural processing units alongside the CPU and GPU. Each requires a different runtime:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hardware"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Runtime / format"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Notes"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Apple ANE (Neural Engine)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Core ML (.mlpackage)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Up to 38 TOPS on A17; shared CPU/GPU memory"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Android NPU (Qualcomm, MediaTek)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "ONNX Runtime / LiteRT (TFLite)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Qualcomm Hexagon DSP; vendor-specific delegates"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Windows Copilot+ (NPU)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DirectML / ONNX Runtime"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "40+ TOPS required for Copilot+ certification"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "CPU (any platform)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "llama.cpp (GGUF) / ONNX Runtime CPU"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Universal fallback; uses AVX-512 / ARM NEON SIMD"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Model Format Pipeline: PyTorch → On-Device"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training happens in PyTorch/Hugging Face. Before deployment, the model is converted to a hardware-specific format with optional quantisation. The conversion pipeline for Apple Core ML:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install coremltools transformers torch\nimport coremltools as ct\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\n\ndef export_to_coreml(hf_model_id: str, output_path: str, seq_len: int = 128):\n    \"\"\"\n    Convert a small Hugging Face causal LM to Core ML format\n    for deployment on Apple devices via the Neural Engine.\n\n    Steps:\n    1. Load the PyTorch model\n    2. Trace it with example inputs (torch.jit.trace)\n    3. Convert the traced model to Core ML via coremltools\n    4. Optionally apply 4-bit weight palettisation\n    \"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(hf_model_id)\n    model = AutoModelForCausalLM.from_pretrained(hf_model_id, torch_dtype=torch.float32)\n    model.eval()\n\n    # Create dummy input for tracing\n    dummy_input = torch.zeros((1, seq_len), dtype=torch.int32)\n\n    # Trace the model — tracing captures a single execution path\n    with torch.no_grad():\n        traced = torch.jit.trace(model, dummy_input)\n\n    # Convert to Core ML\n    mlmodel = ct.convert(\n        traced,\n        inputs=[ct.TensorType(name=\"input_ids\", shape=dummy_input.shape, dtype=int)],\n        outputs=[ct.TensorType(name=\"logits\")],\n        compute_precision=ct.precision.FLOAT16,   # FP16 on ANE\n        minimum_deployment_target=ct.target.iOS17,\n    )\n\n    # Optional: 4-bit weight compression (~4× size reduction)\n    op_config = ct.optimize.coreml.OpPalettizerConfig(mode=\"kmeans\", nbits=4)\n    config    = ct.optimize.coreml.OptimizationConfig(global_config=op_config)\n    compressed = ct.optimize.coreml.palettize_weights(mlmodel, config)\n\n    compressed.save(output_path)\n    print(f\"Saved Core ML model to {output_path}\")\n\n\n# export_to_coreml(\"microsoft/phi-2\", \"phi2.mlpackage\", seq_len=256)\n# The .mlpackage can be bundled directly into an iOS/macOS Xcode project.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Cross-Platform Inference with ONNX Runtime"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ONNX Runtime is the most portable on-device inference engine — the same model file runs on CPU (Windows/Linux/Mac/Android/iOS), GPU (CUDA/Metal), and NPU (via execution providers). The Hugging Face Optimum library handles the PyTorch → ONNX export:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install optimum[onnxruntime] transformers\nfrom optimum.onnxruntime import ORTModelForCausalLM\nfrom transformers import AutoTokenizer\nimport numpy as np\n\n\ndef export_to_onnx(hf_model_id: str, output_dir: str):\n    \"\"\"Export a causal LM to ONNX, quantised to INT8 for on-device speed.\"\"\"\n    model = ORTModelForCausalLM.from_pretrained(\n        hf_model_id,\n        export=True,           # triggers ONNX export on first load\n        provider=\"CPUExecutionProvider\",\n    )\n    model.save_pretrained(output_dir)\n    print(f\"ONNX model saved to {output_dir}/\")\n    return output_dir\n\n\ndef onnx_generate(model_dir: str, prompt: str, max_new_tokens: int = 64) -> str:\n    \"\"\"Run inference from a saved ONNX model directory.\"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(model_dir)\n    model     = ORTModelForCausalLM.from_pretrained(\n        model_dir,\n        provider=\"CPUExecutionProvider\",  # swap to CoreMLExecutionProvider on Apple\n    )\n    inputs    = tokenizer(prompt, return_tensors=\"pt\")\n    output    = model.generate(**inputs, max_new_tokens=max_new_tokens)\n    return tokenizer.decode(output[0], skip_special_tokens=True)\n\n\n# Usage:\n# export_to_onnx(\"Qwen/Qwen2.5-0.5B-Instruct\", \"./qwen-onnx\")\n# print(onnx_generate(\"./qwen-onnx\", \"What is 7 * 8?\"))\n#\n# Execution providers for hardware acceleration:\n#   CPUExecutionProvider      — universal, uses SIMD\n#   CUDAExecutionProvider     — NVIDIA GPU\n#   CoreMLExecutionProvider   — Apple ANE / GPU\n#   QNNExecutionProvider      — Qualcomm NPU (Snapdragon)\n#   DmlExecutionProvider      — DirectML (Windows NPU)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key Engineering Constraints"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Memory budget. "},
+              {"type": "text", "text": "The model weights, KV cache, activations, and tokeniser must all fit simultaneously. A 3B model at INT4 weighs ~1.9 GB; add 200–400 MB for KV cache at 512 context. On an 8 GB phone with 3–4 GB available to apps, this is tight."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Thermal throttling. "},
+              {"type": "text", "text": "Sustained neural engine load heats the device. iOS throttles the ANE after ~60 seconds of continuous inference. Applications should use chunked generation with pauses, or limit maximum response length."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Model versioning. "},
+              {"type": "text", "text": "Unlike an API where the vendor upgrades the model silently, on-device models are bundled with the app. Updates require a new app release or an over-the-air model download. Plan the update mechanism before launch."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Context length limits. "},
+              {"type": "text", "text": "KV cache grows linearly with context. A 1024-token context at 32 layers × 8 KV heads × 64 head_dim × 2 (K+V) × 2 bytes (FP16) = 32 MB. At 4096 tokens that is 128 MB — substantial on a mobile device."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "On-device inference is not a worse version of cloud inference — it is a different product with different guarantees: zero latency from network, guaranteed privacy, and offline capability. The engineering tax (format conversion, quantisation, thermal management, update logistics) is real, but for applications where those guarantees matter — a medical keyboard, a private journal assistant, an offline translation tool — it is the only viable architecture."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
