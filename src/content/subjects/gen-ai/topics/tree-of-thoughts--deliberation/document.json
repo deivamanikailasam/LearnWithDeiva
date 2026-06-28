@@ -1,0 +1,116 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Deliberation is the evaluation step in Tree of Thoughts: after generating candidate thoughts, the model (or a separate evaluator call) scores each one before deciding which to expand next. Without a reliable evaluator, search degrades into random exploration — you generate many branches but have no principled way to prune. Deliberation is what makes ToT a search algorithm rather than just parallel sampling. The evaluator can be the same model asked to rate partial solutions, a separate model, a domain-specific heuristic, or a verifiable ground-truth check (e.g. running code and checking its output)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Evaluator Types and Trade-offs"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Evaluator type"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Accuracy"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cost"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When to use"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Same model, numeric score"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Moderate — self-evaluation has known biases"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low — one extra call per node"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Default; good enough for most planning tasks"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Same model, comparative ranking"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Higher — relative judgement more reliable than absolute scores"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Medium — rate all siblings in one call"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When you generate all siblings first then rank them together"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Stronger model as judge"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Highest — cross-model evaluation reduces self-preference"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High — judge call is more expensive"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High-stakes tasks where pruning errors are costly"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Verifiable check (run code, test assertion)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Perfect — binary correct/incorrect"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low — execution is cheap"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Code generation, math with checkable answers"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Numeric Score vs Comparative Ranking"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\nPROBLEM = \"Design a caching strategy for a high-traffic web API.\"\n\nCANDIDATES = [\n    \"Use an in-memory cache (Redis) with a TTL of 60 seconds for all GET endpoints.\",\n    \"Cache at the CDN layer only; rely on HTTP Cache-Control headers.\",\n    \"No cache — serve every request from the database and rely on database read replicas.\",\n    \"Use a two-layer cache: CDN for static assets, Redis for dynamic data with per-route TTLs.\",\n]\n\n\n# --- Approach 1: Individual numeric scores (independent calls) ---\n\ndef score_individual(problem: str, thought: str) -> float:\n    resp = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=10,\n        temperature=0.0,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": (\n                f\"Problem: {problem}\\n\"\n                f\"Proposed step: {thought}\\n\"\n                \"Rate 0–10 for how well this addresses the problem. Reply with only the number.\"\n            ),\n        }],\n    ).content[0].text.strip()\n    try:\n        return float(resp.split()[0])\n    except (ValueError, IndexError):\n        return 5.0\n\n\nprint(\"Individual scores:\")\nfor c in CANDIDATES:\n    s = score_individual(PROBLEM, c)\n    print(f\"  {s:.1f}  {c[:70]}\")\n\n\n# --- Approach 2: Comparative ranking (one call, all candidates together) ---\n\ndef rank_comparatively(problem: str, candidates: list[str]) -> list[int]:\n    \"\"\"Return indices of candidates sorted best-to-worst.\"\"\"\n    numbered = \"\\n\".join(f\"{i+1}. {c}\" for i, c in enumerate(candidates))\n    resp = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=50,\n        temperature=0.0,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": (\n                f\"Problem: {problem}\\n\\n\"\n                f\"Rank these options best to worst for solving the problem:\\n{numbered}\\n\\n\"\n                \"Reply with ONLY the option numbers in order, comma-separated (e.g. 4,2,1,3).\"\n            ),\n        }],\n    ).content[0].text.strip()\n    try:\n        import re\n        nums = [int(x.strip()) - 1 for x in re.findall(r\"\\d+\", resp)]\n        return [n for n in nums if 0 <= n < len(candidates)]\n    except Exception:\n        return list(range(len(candidates)))\n\n\nranking = rank_comparatively(PROBLEM, CANDIDATES)\nprint(\"\\nComparative ranking (best first):\")\nfor rank, idx in enumerate(ranking, 1):\n    print(f\"  {rank}. {CANDIDATES[idx][:70]}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Deliberation with a Verifiable Check"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport re\n\nclient = anthropic.Anthropic()\n\n\ndef generate_code_thought(problem: str, path: list[str]) -> str:\n    \"\"\"Ask the model for the next partial code step.\"\"\"\n    context = \"\\n\".join(path)\n    resp = client.messages.create(\n        model=\"claude-haiku-4-5-20251001\",\n        max_tokens=200,\n        temperature=0.5,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": (\n                f\"Task: {problem}\\n\"\n                f\"Code written so far:\\n{context}\\n\"\n                \"Write only the next 1–3 lines of Python to advance the solution.\"\n            ),\n        }],\n    ).content[0].text.strip()\n    # Strip markdown fences if present\n    return re.sub(r\"```python\\n|```\", \"\", resp).strip()\n\n\ndef verify_partial(code: str, test: str) -> tuple[bool, str]:\n    \"\"\"Try running the code + test assertion; return (passed, message).\"\"\"\n    try:\n        namespace: dict = {}\n        exec(code, namespace)       # noqa: S102 — demo only\n        exec(test, namespace)       # noqa: S102\n        return True, \"ok\"\n    except AssertionError as e:\n        return False, f\"assertion failed: {e}\"\n    except Exception as e:\n        return False, f\"error: {e}\"\n\n\n# Grow code incrementally; each step is verified before continuing\nPROBLEM = \"Write a Python function `add(a, b)` that returns the sum of two numbers.\"\nTEST    = \"assert add(2, 3) == 5; assert add(-1, 1) == 0\"\n\npath: list[str] = []\nfor step in range(5):\n    thought = generate_code_thought(PROBLEM, path)\n    full_code = \"\\n\".join(path + [thought])\n    passed, msg = verify_partial(full_code, TEST)\n    print(f\"Step {step+1}: {thought[:60]}  → {'PASS' if passed else msg}\")\n    if passed:\n        print(f\"\\nFinal code:\\n{full_code}\")\n        break\n    path.append(thought)\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Deliberation quality is the bottleneck of Tree of Thoughts: a search algorithm is only as good as its heuristic. Use comparative ranking over individual numeric scores when possible — the model is more reliable at saying \"option A is better than B\" than at assigning absolute scores to each independently. When the task produces verifiable output (code, math, structured data), replace the model evaluator entirely with an executable check. A perfect binary oracle collapses the evaluation problem and makes search genuinely reliable."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
