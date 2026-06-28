@@ -1,0 +1,205 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Open-weight models are large language models whose trained parameter checkpoints are publicly downloadable. You run them on your own hardware — a laptop with a capable GPU, a cloud VM, or a cluster — with no API dependency, no per-token cost, and no data leaving your infrastructure. The leading families are Meta's LLaMA 3, Mistral, Google's Gemma, and Alibaba's Qwen. \"Open-weight\" is the precise term: the weights are released, but the training code and data often are not, and licences vary significantly. Practical open-weight work involves choosing the right model size, quantising to fit available memory, and serving efficiently."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Loading and Running a Model Locally"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Hugging Face Transformers is the standard library. A model is downloaded once and cached; subsequent runs load from disk:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer, AutoModelForCausalLM\nimport torch\n\n\ndef load_open_weight_model(model_id: str):\n    \"\"\"\n    Download (first run) and load an open-weight model.\n    Weights are cached in ~/.cache/huggingface/hub/.\n\n    model_id examples:\n      \"mistralai/Mistral-7B-Instruct-v0.3\"   (7B, Apache 2.0)\n      \"meta-llama/Meta-Llama-3-8B-Instruct\"  (8B, Meta Community)\n      \"google/gemma-2-9b-it\"                  (9B, Gemma ToU)\n      \"Qwen/Qwen2.5-7B-Instruct\"             (7B, Apache 2.0)\n    \"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(model_id)\n    model = AutoModelForCausalLM.from_pretrained(\n        model_id,\n        torch_dtype=torch.bfloat16,  # halves memory vs float32; BF16 is stable\n        device_map=\"auto\",            # shards across GPUs; offloads to CPU if needed\n    )\n    model.eval()\n    return model, tokenizer\n\n\ndef generate(model, tokenizer, messages: list[dict], max_new_tokens: int = 256) -> str:\n    input_ids = tokenizer.apply_chat_template(\n        messages,\n        tokenize=True,\n        add_generation_prompt=True,\n        return_tensors=\"pt\",\n    ).to(model.device)\n\n    with torch.no_grad():\n        output_ids = model.generate(\n            input_ids,\n            max_new_tokens=max_new_tokens,\n            do_sample=True,\n            temperature=0.7,\n            top_p=0.9,\n            pad_token_id=tokenizer.eos_token_id,\n        )\n    new_ids = output_ids[0, input_ids.shape[1]:]\n    return tokenizer.decode(new_ids, skip_special_tokens=True)\n\n\n# model, tok = load_open_weight_model(\"mistralai/Mistral-7B-Instruct-v0.3\")\n# print(generate(model, tok, [{\"role\": \"user\", \"content\": \"What is entropy?\"}]))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Quantisation: Fitting Models into Available Memory"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A 7B model in float16 occupies ~14 GB of VRAM — more than most consumer GPUs have. Quantisation compresses weights to 4- or 8-bit integers, reducing memory by 2–4× with minimal quality loss. The most practical options are GPTQ (post-training quantisation, static) and BitsAndBytes (on-the-fly, easy to use):"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig\nimport torch\n\n\ndef load_4bit_quantised(model_id: str):\n    \"\"\"\n    Load an open-weight model in 4-bit NF4 quantisation using bitsandbytes.\n    A 7B model drops from ~14 GB to ~4.5 GB VRAM — fits on a single RTX 3080.\n    \"\"\"\n    bnb_config = BitsAndBytesConfig(\n        load_in_4bit=True,\n        bnb_4bit_quant_type=\"nf4\",        # NormalFloat4: better than int4 for LLMs\n        bnb_4bit_use_double_quant=True,   # quantise the quantisation constants too\n        bnb_4bit_compute_dtype=torch.bfloat16,\n    )\n    tokenizer = AutoTokenizer.from_pretrained(model_id)\n    model = AutoModelForCausalLM.from_pretrained(\n        model_id,\n        quantization_config=bnb_config,\n        device_map=\"auto\",\n    )\n    return model, tokenizer\n\n\n# Memory comparison (approximate, 7B model):\n# float32        → 28 GB\n# bfloat16       → 14 GB\n# 8-bit int      →  7 GB\n# 4-bit NF4      →  4.5 GB   ← fits on RTX 3080 (10 GB) or 3090 (24 GB)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Efficient Serving with llama.cpp and Ollama"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For inference-only use, llama.cpp (via the GGUF format) and Ollama are more efficient than full PyTorch: they use CPU SIMD and partial GPU offload, handle quantisation natively, and expose an OpenAI-compatible API on localhost:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# Ollama: run `ollama pull mistral` once, then serve on http://localhost:11434\n# The API is OpenAI-compatible, so the same client works.\n\nfrom openai import OpenAI\n\n# Point the OpenAI client at your local Ollama instance.\nclient = OpenAI(\n    base_url=\"http://localhost:11434/v1\",\n    api_key=\"ollama\",    # required by the client but not checked by Ollama\n)\n\n\ndef local_chat(user_message: str, model: str = \"mistral\") -> str:\n    response = client.chat.completions.create(\n        model=model,\n        messages=[{\"role\": \"user\", \"content\": user_message}],\n        max_tokens=512,\n    )\n    return response.choices[0].message.content\n\n\nprint(local_chat(\"Summarise the transformer architecture in three bullet points.\"))\n# Runs entirely on local hardware; no network call to any external API.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Open-Weight Model Landscape"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model family"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Sizes"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Licence"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strengths"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "LLaMA 3 (Meta)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "8B, 70B, 405B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Meta Community"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Best overall quality; 128k context; huge ecosystem"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Mistral (Mistral AI)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "7B, 8×7B, 8×22B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Apache 2.0"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Commercial-friendly; MoE variants for throughput"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gemma 2 (Google)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "2B, 9B, 27B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Gemma ToU"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strong at its size; 2B is edge-deployable"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Qwen 2.5 (Alibaba)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "0.5B–72B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Apache 2.0"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multilingual; strong code/math; broad size range"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Phi-3 (Microsoft)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "3.8B, 7B, 14B"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "MIT"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Exceptional quality per parameter; runs on CPU"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "When Open-Weight Makes Sense"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Data privacy. "},
+              {"type": "text", "text": "Medical records, legal documents, or proprietary code cannot be sent to a third-party API. Running locally keeps data within your perimeter."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Cost at volume. "},
+              {"type": "text", "text": "At millions of tokens per day, self-hosting amortises GPU costs below API prices. The break-even is typically several hundred dollars per month of API spend."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Fine-tuning for a domain. "},
+              {"type": "text", "text": "You cannot fine-tune most API models on custom data. Open weights let you run LoRA or full fine-tuning on your own dataset."}
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [
+              {"type": "text", "marks": [{"type": "bold"}], "text": "Latency and offline use. "},
+              {"type": "text", "text": "A model running on local hardware has sub-100ms time-to-first-token with no network round-trip and continues working without internet access."}
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "\"Open-weight\" does not mean free in all senses: licences differ, some impose commercial restrictions, and the infrastructure cost is real. But open-weight models give you something API models cannot: full control. You can inspect the weights, modify them, quantise them, fine-tune them, and run them air-gapped. For many production use cases that control is not needed; for some it is non-negotiable."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
