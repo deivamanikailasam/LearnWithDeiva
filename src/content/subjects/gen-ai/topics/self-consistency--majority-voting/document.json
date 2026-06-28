@@ -1,0 +1,135 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Majority voting is the aggregation step in self-consistency: generate N independent answers, then return the answer that appears most often. Its correctness rests on the assumption that errors are diverse — different samples fail in different ways — while the correct answer is unique and thus concentrates at the top of the vote distribution. When that assumption holds (multi-step arithmetic, logical deduction), majority voting reliably outperforms single-sample greedy decoding. When it breaks (systematic bias, very small label sets where multiple wrong answers tie), smarter aggregation is needed."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Implementing Majority Vote"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport re\nfrom collections import Counter\n\nclient = anthropic.Anthropic()\n\n\ndef extract_answer(text: str) -> str:\n    \"\"\"Pull the value after 'Final answer:' or fall back to the last number.\"\"\"\n    match = re.search(r\"Final answer:\\s*(.+)\", text, re.IGNORECASE)\n    if match:\n        return match.group(1).strip()\n    numbers = re.findall(r\"\\b\\d+(?:\\.\\d+)?\\b\", text)\n    return numbers[-1] if numbers else text.strip().split()[-1]\n\n\ndef majority_vote(problem: str, n: int = 7, temperature: float = 0.8) -> dict:\n    answers = []\n    for _ in range(n):\n        resp = client.messages.create(\n            model=\"claude-haiku-4-5-20251001\",\n            max_tokens=400,\n            temperature=temperature,\n            messages=[{\n                \"role\": \"user\",\n                \"content\": (\n                    f\"{problem}\\n\"\n                    \"Think step by step. \"\n                    \"End with 'Final answer: <value>'.\"\n                ),\n            }],\n        )\n        answers.append(extract_answer(resp.content[0].text))\n\n    counts = Counter(answers)\n    winner, votes = counts.most_common(1)[0]\n    return {\n        \"answer\":       winner,\n        \"votes\":        votes,\n        \"total\":        n,\n        \"vote_share\":   votes / n,\n        \"distribution\": dict(counts.most_common()),\n    }\n\n\nresult = majority_vote(\n    \"A car park has 5 floors. Each floor has 8 rows of 12 spaces. \"\n    \"If 60% of all spaces are taken, how many spaces are empty?\"\n)\nprint(f\"Answer:        {result['answer']}\")\nprint(f\"Confidence:    {result['votes']}/{result['total']} ({result['vote_share']:.0%})\")\nprint(f\"Distribution:  {result['distribution']}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Normalising Answers Before Voting"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Majority vote fails silently when equivalent answers are formatted differently: \"16.0\", \"16\", and \"$16\" count as three distinct answers even though they are the same value. Always normalise before counting."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import re\nfrom collections import Counter\n\n\ndef normalise(answer: str) -> str:\n    \"\"\"Strip currency/unit symbols, trailing zeros, and extra whitespace.\"\"\"\n    # Remove common unit/currency prefixes and suffixes\n    cleaned = re.sub(r\"[\\$\\€\\£\\¥%,]\", \"\", answer.strip())\n    # Remove trailing unit words (km, kg, mph, hours, etc.)\n    cleaned = re.sub(r\"\\s+(km|kg|m|g|mph|hours?|days?|years?|liters?|litres?)$\",\n                     \"\", cleaned, flags=re.IGNORECASE).strip()\n    # Normalise floats: '16.0' -> '16', '3.50' -> '3.5'\n    try:\n        value = float(cleaned)\n        return str(int(value)) if value == int(value) else str(value)\n    except ValueError:\n        return cleaned.lower()\n\n\n# Without normalisation — wrong distribution\nraw_answers = [\"$16\", \"16\", \"16.0\", \"16\", \"$16.00\", \"16\", \"15\"]\nprint(\"Without normalisation:\", Counter(raw_answers).most_common())\n\n# With normalisation — correct distribution\nnorm_answers = [normalise(a) for a in raw_answers]\nprint(\"With normalisation:   \", Counter(norm_answers).most_common())\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Using Vote Share as a Reliability Signal"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport re\nfrom collections import Counter\n\nclient = anthropic.Anthropic()\n\n\ndef extract_and_normalise(text: str) -> str:\n    match = re.search(r\"Final answer:\\s*(.+)\", text, re.IGNORECASE)\n    raw = match.group(1).strip() if match else \"\"\n    cleaned = re.sub(r\"[\\$\\€\\£\\¥%,]\", \"\", raw)\n    try:\n        v = float(cleaned.split()[0])   # take first token in case units follow\n        return str(int(v)) if v == int(v) else str(v)\n    except (ValueError, IndexError):\n        return raw.lower()\n\n\ndef vote_with_threshold(\n    problem: str,\n    n: int = 9,\n    temperature: float = 0.8,\n    confidence_threshold: float = 0.6,\n) -> dict:\n    answers = []\n    for _ in range(n):\n        resp = client.messages.create(\n            model=\"claude-haiku-4-5-20251001\",\n            max_tokens=400,\n            temperature=temperature,\n            messages=[{\n                \"role\": \"user\",\n                \"content\": f\"{problem}\\nThink step by step. End with 'Final answer: <value>'.\",\n            }],\n        )\n        answers.append(extract_and_normalise(resp.content[0].text))\n\n    counts  = Counter(answers)\n    winner, votes = counts.most_common(1)[0]\n    share   = votes / n\n    reliable = share >= confidence_threshold\n\n    return {\n        \"answer\":      winner,\n        \"vote_share\":  share,\n        \"reliable\":    reliable,\n        \"distribution\": dict(counts.most_common()),\n    }\n\n\nproblems = [\n    # High confidence expected\n    \"What is 15% of 240?\",\n    # Moderate confidence — more reasoning needed\n    \"A 10% raise followed by a 10% cut: is the final salary higher, lower, or the same?\",\n]\n\nfor p in problems:\n    r = vote_with_threshold(p, n=9)\n    flag = \"\" if r[\"reliable\"] else \" ⚠ low confidence — consider escalating\"\n    print(f\"Q: {p}\")\n    print(f\"A: {r['answer']}  ({r['vote_share']:.0%} agreement){flag}\")\n    print(f\"   Distribution: {r['distribution']}\")\n    print()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Majority Vote Failure Modes"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Failure mode"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "What happens"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fix"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Format fragmentation"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "\"16\", \"$16\", \"16.0\" split votes for the same correct answer"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Normalise answers before voting"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Systematic error"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "All samples make the same mistake; wrong answer wins by consensus"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fix the prompt or use a better model; sampling cannot correct knowledge gaps"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Three-way tie"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No majority; plurality winner is arbitrary"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use an odd N; add a tiebreak verification call"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low temperature"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "All samples are identical — no diversity, no benefit over N=1"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use temperature 0.6–0.9 for majority voting; never 0.0"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Majority voting is most powerful when used with an odd N (3, 5, 7) to avoid ties, with temperature in the 0.6–0.9 range to ensure path diversity, and with answer normalisation before counting. The vote share — the fraction of samples agreeing on the winner — is a reliable proxy for answer confidence: shares above 70–80% strongly correlate with correctness on arithmetic benchmarks, while low shares signal that the problem is ambiguous, underspecified, or beyond the model's reliable capability."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
