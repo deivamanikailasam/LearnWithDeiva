@@ -1,0 +1,197 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Constrained decoding with JSON Schema guarantees that the model's output is valid JSON that matches a given schema — not by prompting, but by masking illegal tokens at each generation step. At step "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "t"
+          },
+          {
+            "type": "text",
+            "text": ", the decoder tracks which JSON Schema states are reachable given what has been generated so far, then sets the logits of all tokens that cannot lead to a valid completion to "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "-inf"
+          },
+          {
+            "type": "text",
+            "text": " before sampling. The result is a probability distribution over only the tokens that keep the output schema-valid. This makes structured output robust even at high temperatures or with models that do not natively follow instructions reliably."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Structured Output via the Anthropic API"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The simplest path to JSON Schema output from a hosted API is to define a tool whose "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "input_schema"
+          },
+          {
+            "type": "text",
+            "text": " is the schema you want. The model is forced to call that tool, and the API enforces that the "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "input"
+          },
+          {
+            "type": "text",
+            "text": " argument matches the schema before returning. No post-processing or retry logic needed."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\n\nclient = anthropic.Anthropic()\n\n# Define the schema you want to extract\nPRODUCT_SCHEMA = {\n    \"type\": \"object\",\n    \"properties\": {\n        \"name\":        {\"type\": \"string\"},\n        \"price_usd\":   {\"type\": \"number\", \"minimum\": 0},\n        \"in_stock\":    {\"type\": \"boolean\"},\n        \"categories\":  {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n        \"rating\":      {\"type\": \"number\", \"minimum\": 0, \"maximum\": 5},\n    },\n    \"required\": [\"name\", \"price_usd\", \"in_stock\"],\n}\n\nresponse = client.messages.create(\n    model=\"claude-haiku-4-5-20251001\",\n    max_tokens=512,\n    tools=[\n        {\n            \"name\": \"extract_product\",\n            \"description\": \"Extract product information from the text.\",\n            \"input_schema\": PRODUCT_SCHEMA,\n        }\n    ],\n    tool_choice={\"type\": \"tool\", \"name\": \"extract_product\"},   # force tool use\n    messages=[\n        {\n            \"role\": \"user\",\n            \"content\": (\n                \"Parse this listing: 'Ergonomic Mesh Chair — $299.99. \"\n                \"In stock. Rated 4.7/5. Categories: furniture, office, ergonomic.'\"\n            ),\n        }\n    ],\n)\n\n# The response is always a tool_use block with a validated input dict\ntool_block = next(b for b in response.content if b.type == \"tool_use\")\nproduct = tool_block.input   # already a dict — no json.loads needed\nprint(json.dumps(product, indent=2))\n# {\n#   \"name\": \"Ergonomic Mesh Chair\",\n#   \"price_usd\": 299.99,\n#   \"in_stock\": true,\n#   \"categories\": [\"furniture\", \"office\", \"ergonomic\"],\n#   \"rating\": 4.7\n# }\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Structured Output via the OpenAI API"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "from openai import OpenAI\nfrom pydantic import BaseModel\nfrom typing import Optional\nimport json\n\nclient = OpenAI()\n\n# Option 1: Pydantic model — OpenAI SDK derives the JSON Schema automatically\nclass Product(BaseModel):\n    name: str\n    price_usd: float\n    in_stock: bool\n    categories: list[str] = []\n    rating: Optional[float] = None\n\ncompletion = client.beta.chat.completions.parse(\n    model=\"gpt-4o-mini\",\n    messages=[\n        {\"role\": \"user\", \"content\": (\n            \"Parse this listing: 'Ergonomic Mesh Chair — $299.99. \"\n            \"In stock. Rated 4.7/5. Categories: furniture, office, ergonomic.'\"\n        )}\n    ],\n    response_format=Product,   # constrained decoding enforces this schema\n)\nproduct: Product = completion.choices[0].message.parsed\nprint(product.model_dump_json(indent=2))\n\n# Option 2: Raw JSON Schema (when you don't want a Pydantic model)\nJSON_SCHEMA = {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n        \"name\": \"product\",\n        \"strict\": True,\n        \"schema\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"name\":       {\"type\": \"string\"},\n                \"price_usd\":  {\"type\": \"number\"},\n                \"in_stock\":   {\"type\": \"boolean\"},\n            },\n            \"required\": [\"name\", \"price_usd\", \"in_stock\"],\n            \"additionalProperties\": False,   # strict mode requires this\n        },\n    },\n}\n\nraw = client.chat.completions.create(\n    model=\"gpt-4o-mini\",\n    messages=[{\"role\": \"user\", \"content\": \"Extract: 'Widget Pro — $49. Out of stock.'\"}],\n    response_format=JSON_SCHEMA,\n)\ndata = json.loads(raw.choices[0].message.content)\nprint(data)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Local Constrained Decoding with Outlines"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For local models, "
+          },
+          {
+            "type": "text",
+            "marks": [{"type": "code"}],
+            "text": "outlines"
+          },
+          {
+            "type": "text",
+            "text": " implements token-level constraint at the logit level. It compiles a JSON Schema into a finite-state machine over the tokenizer's vocabulary, then applies a logit mask at each step to allow only tokens that advance the FSM toward a valid terminal state."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install outlines transformers torch\nimport outlines\nfrom pydantic import BaseModel\nfrom typing import Optional\n\nmodel = outlines.models.transformers(\"microsoft/Phi-3-mini-4k-instruct\")\n\nclass Movie(BaseModel):\n    title: str\n    year: int\n    genre: str\n    rating: float\n    director: Optional[str] = None\n\n# outlines compiles Movie -> JSON Schema -> FSM over the vocabulary\n# Every generated token is guaranteed to keep the output JSON-valid\ngenerator = outlines.generate.json(model, Movie)\n\nresult: Movie = generator(\n    \"Extract: 'Inception (2010) — Sci-fi thriller by Christopher Nolan, rated 8.8/10'\"\n)\nprint(result)\n# Movie(title='Inception', year=2010, genre='Sci-fi thriller',\n#        rating=8.8, director='Christopher Nolan')\n\n# You can also use a raw schema dict instead of a Pydantic model\nschema = {\n    \"type\": \"object\",\n    \"properties\": {\n        \"sentiment\": {\"type\": \"string\", \"enum\": [\"positive\", \"negative\", \"neutral\"]},\n        \"score\":     {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 10},\n    },\n    \"required\": [\"sentiment\", \"score\"],\n}\ngenerator2 = outlines.generate.json(model, schema)\nresult2 = generator2(\"Classify: 'This laptop is outstanding in every way.'\")\nprint(result2)   # {\"sentiment\": \"positive\", \"score\": 9}\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Schema Design Rules"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Rule"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Why it matters"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Example"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use enum for categorical fields"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prevents free-text hallucination in choice fields"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "\"enum\": [\"low\", \"medium\", \"high\"]"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "List all required fields"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Ensures the model always outputs the fields you need"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "\"required\": [\"name\", \"id\"]"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Set additionalProperties: false (strict mode)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prevents the model from inventing extra fields"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "\"additionalProperties\": false"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Keep schemas flat where possible"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Deeply nested schemas create longer FSMs and slower first-token latency"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prefer array of strings over array of objects"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use Optional / nullable for fields that may be absent"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Forces the model to emit null rather than hallucinate a value"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "marks": [{"type": "code"}], "text": "\"type\": [\"string\", \"null\"]"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Constrained decoding with JSON Schema is categorically more reliable than prompting for JSON. Prompt-based approaches fail whenever the model decides to add explanation text, wrap the JSON in markdown fences, or hallucinate fields. Token-level constraints make those failures structurally impossible: the FSM simply cannot advance to states that produce invalid JSON, so the output is always parseable and always matches the schema. The tradeoff is a small first-token latency increase (compiling the schema to a token-level constraint) and slightly reduced output diversity when the schema is very narrow."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
