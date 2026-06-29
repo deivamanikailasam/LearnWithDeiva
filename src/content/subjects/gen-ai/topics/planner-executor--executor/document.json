@@ -1,0 +1,678 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Executor's Role"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In a Planner-Executor architecture, the "
+          },
+          {
+            "type": "text",
+            "text": "Executor",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " receives a validated plan and carries it out step by step. The Executor's job is purely mechanical: dispatch each step's tool call, record the result, and make it available to subsequent steps that depend on it. The Executor does not reason about the goal or decide what to do next \u2014 those decisions were made by the Planner."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Executor has three core responsibilities:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Dependency ordering",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": execute steps in the order their dependencies allow. Steps with no dependencies can run first. Steps that depend on others must wait for their predecessors to complete."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Result recording",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": store each step's output so that later steps can reference it."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Failure handling",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": decide what to do when a step fails \u2014 retry, skip, abort the whole plan, or trigger the Planner to replan."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Sequential Executor"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The baseline Executor processes steps one at a time in dependency order. This is the simplest implementation and is correct for all plans. Parallelism can be added later as an optimization."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json\nfrom dataclasses import dataclass, field\n\n@dataclass\nclass StepResult:\n    step_id: str\n    tool: str\n    args: dict\n    result: str           # JSON string returned by the tool\n    success: bool\n    error: str | None = None\n\nclass SequentialExecutor:\n    \"\"\"\n    Executes plan steps one at a time in dependency order.\n    Records results and makes them available to subsequent steps.\n    \"\"\"\n    def __init__(self, dispatch: dict):\n        self.dispatch = dispatch\n        self._results: dict[str, StepResult] = {}  # step_id -> StepResult\n\n    def get_result(self, step_id: str) -> str | None:\n        \"\"\"Return the result string for a completed step.\"\"\"\n        r = self._results.get(step_id)\n        return r.result if r and r.success else None\n\n    def _execution_order(self, steps: list[dict]) -> list[dict]:\n        \"\"\"Topological sort \u2014 return steps in a valid execution order.\"\"\"\n        completed: set[str] = set()\n        ordered = []\n        remaining = list(steps)\n        while remaining:\n            # Find all steps whose dependencies are satisfied\n            ready = [s for s in remaining if all(d in completed for d in s.get(\"depends_on\", []))]\n            if not ready:\n                raise ValueError(f\"Unresolvable dependencies in remaining steps: {[s['step_id'] for s in remaining]}\")\n            # Execute in deterministic order (by step_id)\n            ready.sort(key=lambda s: s[\"step_id\"])\n            for step in ready:\n                ordered.append(step)\n                completed.add(step[\"step_id\"])\n            remaining = [s for s in remaining if s[\"step_id\"] not in completed]\n        return ordered\n\n    def execute(self, plan: dict) -> dict:\n        \"\"\"\n        Execute all steps in the plan. Returns a summary with all results.\n        \"\"\"\n        steps = plan.get(\"steps\", [])\n        ordered = self._execution_order(steps)\n        failed_steps = []\n\n        for step in ordered:\n            step_id = step[\"step_id\"]\n            tool = step[\"tool\"]\n            args = step.get(\"args\", {})\n\n            fn = self.dispatch.get(tool)\n            if fn is None:\n                result = StepResult(step_id, tool, args, \"\", False,\n                                    f\"Tool '{tool}' not found in dispatch\")\n                self._results[step_id] = result\n                failed_steps.append(step_id)\n                continue\n\n            try:\n                result_str = fn(**args)\n                self._results[step_id] = StepResult(step_id, tool, args, result_str, True)\n            except Exception as e:\n                result_str = json.dumps({\"error\": str(e)})\n                self._results[step_id] = StepResult(step_id, tool, args, result_str, False, str(e))\n                failed_steps.append(step_id)\n\n        return {\n            \"status\": \"complete\" if not failed_steps else \"partial\",\n            \"failed_steps\": failed_steps,\n            \"results\": {sid: r.result for sid, r in self._results.items()},\n        }\n\n# Stub tool implementations\ndef list_flights(origin: str, destination: str) -> str:\n    return json.dumps({\"flights\": [{\"id\": \"F1\", \"price\": 299}, {\"id\": \"F2\", \"price\": 349}]})\n\ndef get_flight(flight_id: str) -> str:\n    prices = {\"F1\": 299, \"F2\": 349}\n    return json.dumps({\"flight_id\": flight_id, \"price\": prices.get(flight_id, 0), \"seats\": 3})\n\nDISPATCH = {\"list_flights\": list_flights, \"get_flight\": get_flight}\n\nplan = {\n    \"goal\": \"Find cheapest NYC-Paris flight\",\n    \"steps\": [\n        {\"step_id\": \"s1\", \"tool\": \"list_flights\",\n         \"args\": {\"origin\": \"NYC\", \"destination\": \"Paris\"}, \"depends_on\": []},\n        {\"step_id\": \"s2\", \"tool\": \"get_flight\",\n         \"args\": {\"flight_id\": \"F1\"}, \"depends_on\": [\"s1\"]},\n    ],\n}\n\nexecutor = SequentialExecutor(DISPATCH)\nresult = executor.execute(plan)\nprint(result)\n# {\"status\": \"complete\", \"failed_steps\": [], \"results\": {\"s1\": \"...\", \"s2\": \"...\"}}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "text": "_execution_order",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " method produces a valid execution sequence that respects all "
+          },
+          {
+            "type": "text",
+            "text": "depends_on",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " declarations. Within a wave of steps that are all ready to execute, they are sorted by "
+          },
+          {
+            "type": "text",
+            "text": "step_id",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " for deterministic ordering. The "
+          },
+          {
+            "type": "text",
+            "text": "_results",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " dictionary accumulates results so that later steps can access earlier steps' outputs via "
+          },
+          {
+            "type": "text",
+            "text": "get_result(step_id)",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallel Executor with Execution Waves"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When the plan has independent steps (no shared dependencies), the Executor can run them in parallel. The "
+          },
+          {
+            "type": "text",
+            "text": "execution_waves",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " method groups steps into waves: all steps in the same wave can start at the same time. Using "
+          },
+          {
+            "type": "text",
+            "text": "ThreadPoolExecutor",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " executes each wave's steps concurrently."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from concurrent.futures import ThreadPoolExecutor, as_completed\n\nclass ParallelExecutor:\n    \"\"\"\n    Executes independent steps in parallel using thread pools.\n    Steps within the same execution wave run concurrently.\n    \"\"\"\n    def __init__(self, dispatch: dict, max_workers: int = 4):\n        self.dispatch = dispatch\n        self.max_workers = max_workers\n        self._results: dict[str, StepResult] = {}\n\n    def _execution_waves(self, steps: list[dict]) -> list[list[dict]]:\n        \"\"\"Group steps into waves using topological ordering.\"\"\"\n        completed: set[str] = set()\n        remaining = list(steps)\n        waves = []\n        while remaining:\n            wave = [s for s in remaining if all(d in completed for d in s.get(\"depends_on\", []))]\n            if not wave:\n                break\n            waves.append(wave)\n            for s in wave:\n                completed.add(s[\"step_id\"])\n            remaining = [s for s in remaining if s[\"step_id\"] not in completed]\n        return waves\n\n    def _execute_step(self, step: dict) -> StepResult:\n        step_id = step[\"step_id\"]\n        tool = step[\"tool\"]\n        args = step.get(\"args\", {})\n        fn = self.dispatch.get(tool)\n        if fn is None:\n            return StepResult(step_id, tool, args, \"\", False, f\"Unknown tool: {tool}\")\n        try:\n            result_str = fn(**args)\n            return StepResult(step_id, tool, args, result_str, True)\n        except Exception as e:\n            return StepResult(step_id, tool, args, json.dumps({\"error\": str(e)}), False, str(e))\n\n    def execute(self, plan: dict) -> dict:\n        steps = plan.get(\"steps\", [])\n        waves = self._execution_waves(steps)\n        failed_steps = []\n\n        for wave_num, wave in enumerate(waves):\n            with ThreadPoolExecutor(max_workers=min(len(wave), self.max_workers)) as pool:\n                futures = {pool.submit(self._execute_step, step): step[\"step_id\"]\n                           for step in wave}\n                for future in as_completed(futures):\n                    step_id = futures[future]\n                    result = future.result()\n                    self._results[step_id] = result\n                    if not result.success:\n                        failed_steps.append(step_id)\n\n        return {\n            \"status\": \"complete\" if not failed_steps else \"partial\",\n            \"failed_steps\": failed_steps,\n            \"waves_executed\": len(waves),\n            \"results\": {sid: r.result for sid, r in self._results.items()},\n        }\n\n# Plan with two independent steps in wave 1:\nparallel_plan = {\n    \"goal\": \"Get details for F1 and F2 in parallel\",\n    \"steps\": [\n        {\"step_id\": \"s1\", \"tool\": \"get_flight\", \"args\": {\"flight_id\": \"F1\"}, \"depends_on\": []},\n        {\"step_id\": \"s2\", \"tool\": \"get_flight\", \"args\": {\"flight_id\": \"F2\"}, \"depends_on\": []},\n        {\"step_id\": \"s3\", \"tool\": \"list_flights\",\n         \"args\": {\"origin\": \"NYC\", \"destination\": \"Paris\"}, \"depends_on\": [\"s1\", \"s2\"]},\n    ],\n}\nexecutor = ParallelExecutor(DISPATCH, max_workers=4)\nresult = executor.execute(parallel_plan)\nprint(f\"Waves: {result['waves_executed']}, Failed: {result['failed_steps']}\")\n# Waves: 2, Failed: []\n# Wave 1: s1 + s2 run in parallel\n# Wave 2: s3 runs after both complete"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The parallel executor runs steps in the same wave concurrently. Wall-clock time for a plan with N independent steps shrinks from N * (step_time) to approximately 1 * (step_time) + overhead. Thread pool overhead is small for I/O-bound tool calls (API requests, database reads). For CPU-bound operations, use "
+          },
+          {
+            "type": "text",
+            "text": "ProcessPoolExecutor",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " instead."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step Failure Strategies"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a step fails, the Executor must decide what to do with the steps that depend on it. The right strategy depends on whether the downstream steps "
+          },
+          {
+            "type": "text",
+            "text": "require",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " the failed step's result:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Failure strategy",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "What happens to downstream steps",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "When to use",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Abort on failure",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "All downstream steps are skipped; execution stops"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "When any failure means the goal cannot be achieved"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Skip dependent steps",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Only steps that directly or transitively depend on the failed step are skipped; others continue"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "When the plan has independent sub-goals; partial results are useful"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Retry with backoff",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The failed step is retried 1-3 times before being marked failed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "When failures are transient (network error, rate limit)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Trigger replanning",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Executor returns 'partial' status; host code sends results + failure reason back to Planner"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "When an alternative path may achieve the goal"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def execute_with_skip_strategy(plan: dict, dispatch: dict) -> dict:\n    \"\"\"\n    Execute plan steps, skipping any step whose dependency failed.\n    Steps that are not affected by failures still run.\n    \"\"\"\n    steps_by_id = {s[\"step_id\"]: s for s in plan.get(\"steps\", [])}\n    results: dict[str, StepResult] = {}\n    failed: set[str] = set()\n    skipped: set[str] = set()\n\n    # Topological order\n    ordered = []\n    completed: set[str] = set()\n    remaining = list(plan.get(\"steps\", []))\n    while remaining:\n        ready = [s for s in remaining\n                 if all(d in completed or d in failed or d in skipped\n                        for d in s.get(\"depends_on\", []))]\n        if not ready:\n            break\n        for s in sorted(ready, key=lambda x: x[\"step_id\"]):\n            ordered.append(s)\n            completed.add(s[\"step_id\"])\n        remaining = [s for s in remaining if s[\"step_id\"] not in completed]\n\n    for step in ordered:\n        sid = step[\"step_id\"]\n        # Check if any dependency failed or was skipped\n        deps_failed = any(d in failed or d in skipped for d in step.get(\"depends_on\", []))\n        if deps_failed:\n            skipped.add(sid)\n            continue\n\n        fn = dispatch.get(step[\"tool\"])\n        try:\n            result_str = fn(**step[\"args\"]) if fn else json.dumps({\"error\": \"Unknown tool\"})\n            ok = '\"error\"' not in result_str and '\"ok\": false' not in result_str\n            results[sid] = StepResult(sid, step[\"tool\"], step[\"args\"], result_str, ok)\n            if not ok:\n                failed.add(sid)\n        except Exception as e:\n            results[sid] = StepResult(sid, step[\"tool\"], step[\"args\"], \"\", False, str(e))\n            failed.add(sid)\n\n    return {\n        \"status\": \"complete\" if not failed else \"partial\",\n        \"failed\": list(failed),\n        \"skipped\": list(skipped),\n        \"results\": {sid: r.result for sid, r in results.items()},\n    }"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The Executor's job is to dispatch plan steps in dependency order, record results, and handle failures.",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " Use sequential execution as the baseline; add parallel execution when the plan has independent steps in the same wave. Choose the failure strategy based on whether the goal requires all steps to succeed (abort) or can tolerate partial success (skip). Retry transient failures; trigger replanning for environment-change failures."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
