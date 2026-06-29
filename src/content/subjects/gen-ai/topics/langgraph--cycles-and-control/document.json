@@ -1,0 +1,712 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Cycles?"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Most LLM workflows are not a single forward pass \u2014 they loop. An agent calls a tool, inspects the result, and decides whether to call another tool or return an answer. A research pipeline retrieves documents, evaluates whether it has enough information, and retrieves again if not. A code generation loop writes code, runs it, and fixes errors until tests pass."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LangGraph is specifically designed for these patterns. Cycles are first-class: you create a loop by adding a "
+          },
+          {
+            "type": "text",
+            "text": "back-edge",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " \u2014 an edge from a downstream node back to an upstream node. A conditional edge with an "
+          },
+          {
+            "type": "text",
+            "text": "END",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " branch provides the exit condition."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Every cycle needs a conditional edge with an END branch. Without an exit condition the graph loops forever (until the recursion limit)."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Minimal Cycle Pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The simplest loop: a single node that updates state and routes back to itself until a stopping condition is met."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from typing import TypedDict, Literal\nfrom langgraph.graph import StateGraph, END\n\nclass CounterState(TypedDict):\n    count: int\n    target: int\n\ndef increment(state: CounterState) -> dict:\n    return {\"count\": state[\"count\"] + 1}\n\ndef should_continue(state: CounterState) -> Literal[\"loop\", \"done\"]:\n    return \"loop\" if state[\"count\"] < state[\"target\"] else \"done\"\n\ngraph = StateGraph(CounterState)\ngraph.add_node(\"increment\", increment)\n\ngraph.set_entry_point(\"increment\")\ngraph.add_conditional_edges(\n    \"increment\",\n    should_continue,\n    {\"loop\": \"increment\", \"done\": END},   # back-edge creates the cycle\n)\n\napp = graph.compile()\nresult = app.invoke({\"count\": 0, \"target\": 5})\nprint(result[\"count\"])   # 5"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "ReAct Agent Loop"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ReAct (Reason + Act) is the canonical agentic cycle: the LLM reasons about the task, emits tool calls, the tools run, their results are added to the message history, and the LLM is called again. This repeats until the LLM returns a final answer without tool calls."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import operator\nfrom typing import TypedDict, Annotated\nfrom langgraph.graph import StateGraph, MessagesState, END\nfrom langchain_openai import ChatOpenAI\nfrom langchain_core.messages import ToolMessage\nfrom langchain_core.tools import tool\n\n@tool\ndef multiply(a: float, b: float) -> float:\n    \"\"\"Multiply two numbers.\"\"\"\n    return a * b\n\n@tool\ndef add(a: float, b: float) -> float:\n    \"\"\"Add two numbers.\"\"\"\n    return a + b\n\ntools = [multiply, add]\ntool_map = {t.name: t for t in tools}\n\nllm = ChatOpenAI(model=\"gpt-4o-mini\").bind_tools(tools)\n\ndef call_llm(state: MessagesState) -> dict:\n    response = llm.invoke(state[\"messages\"])\n    return {\"messages\": [response]}\n\ndef call_tools(state: MessagesState) -> dict:\n    last_msg = state[\"messages\"][-1]\n    results = []\n    for tc in last_msg.tool_calls:\n        result = tool_map[tc[\"name\"]].invoke(tc[\"args\"])\n        results.append(ToolMessage(\n            content=str(result),\n            tool_call_id=tc[\"id\"],\n        ))\n    return {\"messages\": results}\n\ndef route_after_llm(state: MessagesState) -> str:\n    last_msg = state[\"messages\"][-1]\n    return \"tools\" if last_msg.tool_calls else END\n\ngraph = StateGraph(MessagesState)\ngraph.add_node(\"llm\", call_llm)\ngraph.add_node(\"tools\", call_tools)\n\ngraph.set_entry_point(\"llm\")\ngraph.add_conditional_edges(\"llm\", route_after_llm, {\"tools\": \"tools\", END: END})\ngraph.add_edge(\"tools\", \"llm\")   # back-edge: after tools, always call LLM again\n\napp = graph.compile()\n\nfrom langchain_core.messages import HumanMessage\nresult = app.invoke({\"messages\": [HumanMessage(content=\"What is (3 * 7) + 12?\")]})\nprint(result[\"messages\"][-1].content)   # \"33\""
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Iteration Guard \u2014 Max Loop Count"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To prevent runaway loops, track the number of iterations in state and exit once a maximum is reached. This is a safety net for agentic systems that may fail to converge."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from typing import TypedDict, Literal\nfrom langgraph.graph import StateGraph, END\n\nMAX_ITERATIONS = 5\n\nclass ResearchState(TypedDict):\n    question: str\n    documents: list[str]\n    answer: str\n    iterations: int\n    done: bool\n\ndef retrieve(state: ResearchState) -> dict:\n    # Simulate retrieval\n    new_docs = [f\"Doc {state['iterations']+1}: some content about {state['question']}\"]\n    return {\n        \"documents\": state[\"documents\"] + new_docs,\n        \"iterations\": state[\"iterations\"] + 1,\n    }\n\ndef evaluate(state: ResearchState) -> dict:\n    # Simulate: decide if we have enough info\n    enough = len(state[\"documents\"]) >= 3\n    answer = \"Found answer!\" if enough else \"\"\n    return {\"done\": enough, \"answer\": answer}\n\ndef route(state: ResearchState) -> Literal[\"retrieve\", \"done\"]:\n    if state[\"done\"] or state[\"iterations\"] >= MAX_ITERATIONS:\n        return \"done\"\n    return \"retrieve\"\n\ngraph = StateGraph(ResearchState)\ngraph.add_node(\"retrieve\", retrieve)\ngraph.add_node(\"evaluate\", evaluate)\n\ngraph.set_entry_point(\"retrieve\")\ngraph.add_edge(\"retrieve\", \"evaluate\")\ngraph.add_conditional_edges(\"evaluate\", route, {\"retrieve\": \"retrieve\", \"done\": END})\n\napp = graph.compile()\nresult = app.invoke({\n    \"question\": \"What is LangGraph?\",\n    \"documents\": [],\n    \"answer\": \"\",\n    \"iterations\": 0,\n    \"done\": False,\n})\nprint(f\"Iterations: {result['iterations']}, Answer: {result['answer']}\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recursion Limit"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LangGraph enforces a "
+          },
+          {
+            "type": "text",
+            "text": "recursion limit",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " \u2014 the maximum number of node executions per graph run (default: 25). When the limit is reached, LangGraph raises "
+          },
+          {
+            "type": "text",
+            "text": "GraphRecursionError",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". Increase it for legitimate long-running loops, or treat it as a safety catch for accidental infinite loops."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from langgraph.errors import GraphRecursionError\n\napp = graph.compile()\n\ntry:\n    result = app.invoke(\n        {\"count\": 0, \"target\": 100},\n        config={\"recursion_limit\": 150},   # raise the limit for this run\n    )\nexcept GraphRecursionError as e:\n    print(f\"Loop exceeded recursion limit: {e}\")\n\n# Or set a graph-wide default at compile time\napp_with_limit = graph.compile()\n# Pass config per-invoke to override"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Self-Correction Loop \u2014 Code Execution"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A common agentic pattern: generate code, run it, check for errors, feed errors back to the LLM to fix, repeat until the code runs cleanly. The cycle has three nodes: generate \u2192 execute \u2192 route."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import subprocess\nfrom typing import TypedDict, Literal, Optional\nfrom langgraph.graph import StateGraph, END\nfrom langchain_openai import ChatOpenAI\nfrom langchain_core.messages import HumanMessage, AIMessage, SystemMessage\n\nclass CodeState(TypedDict):\n    task: str\n    code: str\n    error: Optional[str]\n    attempts: int\n\nllm = ChatOpenAI(model=\"gpt-4o-mini\", temperature=0)\n\ndef generate_code(state: CodeState) -> dict:\n    messages = [\n        SystemMessage(content=\"Write Python code only. Return just the code, no markdown.\"),\n        HumanMessage(content=state[\"task\"]),\n    ]\n    if state[\"error\"]:\n        messages.append(HumanMessage(\n            content=f\"The previous code produced this error. Fix it:\\n{state['error']}\"\n        ))\n        messages.append(AIMessage(content=state[\"code\"]))\n\n    response = llm.invoke(messages)\n    return {\"code\": response.content, \"attempts\": state[\"attempts\"] + 1}\n\ndef execute_code(state: CodeState) -> dict:\n    try:\n        result = subprocess.run(\n            [\"python3\", \"-c\", state[\"code\"]],\n            capture_output=True, text=True, timeout=10,\n        )\n        if result.returncode != 0:\n            return {\"error\": result.stderr.strip()}\n        return {\"error\": None}\n    except subprocess.TimeoutExpired:\n        return {\"error\": \"Execution timed out.\"}\n\ndef route(state: CodeState) -> Literal[\"generate\", \"done\"]:\n    if state[\"error\"] is None:\n        return \"done\"      # success\n    if state[\"attempts\"] >= 3:\n        return \"done\"      # give up after 3 attempts\n    return \"generate\"      # retry with error feedback\n\ngraph = StateGraph(CodeState)\ngraph.add_node(\"generate\", generate_code)\ngraph.add_node(\"execute\", execute_code)\n\ngraph.set_entry_point(\"generate\")\ngraph.add_edge(\"generate\", \"execute\")\ngraph.add_conditional_edges(\"execute\", route, {\"generate\": \"generate\", \"done\": END})\n\napp = graph.compile()\nresult = app.invoke({\n    \"task\": \"Write a Python function that returns the factorial of n=5 and prints it.\",\n    \"code\": \"\",\n    \"error\": None,\n    \"attempts\": 0,\n})\nprint(f\"Final code (attempt {result['attempts']}):\\n{result['code']}\")\nprint(f\"Error: {result['error']}\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallel Cycles \u2014 Independent Loops"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Multiple independent loops can run in the same graph if they do not share nodes. Route from a dispatcher node using "
+          },
+          {
+            "type": "text",
+            "text": "Send",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to fan out to N parallel sub-agents, each running its own internal loop, then merge results. The parent graph fans out once and collects all results when all sub-agents reach "
+          },
+          {
+            "type": "text",
+            "text": "END",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import operator\nfrom typing import TypedDict, Annotated\nfrom langgraph.graph import StateGraph, END\nfrom langgraph.types import Send\n\nclass OverallState(TypedDict):\n    topics: list[str]\n    summaries: Annotated[list[str], operator.add]\n\nclass TopicState(TypedDict):\n    topic: str\n    drafts: list[str]\n    iteration: int\n\ndef draft(state: TopicState) -> dict:\n    new_draft = f\"Draft {state['iteration']+1} on {state['topic']}\"\n    return {\n        \"drafts\": state[\"drafts\"] + [new_draft],\n        \"iteration\": state[\"iteration\"] + 1,\n    }\n\ndef refine_or_done(state: TopicState) -> str:\n    return \"draft\" if state[\"iteration\"] < 2 else \"publish\"\n\ndef publish(state: TopicState) -> dict:\n    # returns to OverallState via the send mechanism\n    return {\"summaries\": [state[\"drafts\"][-1]]}\n\n# Sub-graph per topic\nsub = StateGraph(TopicState)\nsub.add_node(\"draft\", draft)\nsub.add_node(\"publish\", publish)\nsub.set_entry_point(\"draft\")\nsub.add_conditional_edges(\"draft\", refine_or_done, {\"draft\": \"draft\", \"publish\": \"publish\"})\nsub.add_edge(\"publish\", END)\nsub_app = sub.compile()\n\n# Parent: fan out to one sub-graph per topic\ndef fan_out(state: OverallState) -> list[Send]:\n    return [\n        Send(\"research\", {\"topic\": t, \"drafts\": [], \"iteration\": 0})\n        for t in state[\"topics\"]\n    ]\n\nparent = StateGraph(OverallState)\nparent.add_node(\"research\", sub_app)\nparent.add_conditional_edges(\"__start__\", fan_out)\nparent.add_edge(\"research\", END)\norchestrator = parent.compile()\n\nresult = orchestrator.invoke({\n    \"topics\": [\"RAG\", \"Fine-tuning\", \"Agents\"],\n    \"summaries\": [],\n})\nprint(result[\"summaries\"])   # 3 summaries, one per topic"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cycle Patterns Reference"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pattern",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Graph shape",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Termination",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Simple loop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "node \u2192 conditional \u2192 node (back-edge) | END"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "State condition or iteration count"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ReAct agent"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "llm \u2192 conditional \u2192 tools \u2192 llm | END"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No tool calls in LLM response"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Self-correction"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "generate \u2192 execute \u2192 conditional \u2192 generate | END"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No error or max attempts"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Parallel loops"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "dispatcher \u2192 Send \u2192 N sub-graphs"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Each sub-graph hits its own END"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Outer/inner loops"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Subgraph compiled and used as a node in parent cycle"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Inner loop: sub-graph END; outer: parent condition"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Design checklist for cycles:",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " (1) Every cycle has a conditional edge with an "
+              },
+              {
+                "type": "text",
+                "text": "END",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " branch. (2) At least one state field tracks progress (iteration count, error flag, done bool). (3) Set "
+              },
+              {
+                "type": "text",
+                "text": "recursion_limit",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " explicitly in long-running loops. (4) Test the exit condition alone before wiring the back-edge."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
