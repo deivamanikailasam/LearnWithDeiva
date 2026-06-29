@@ -12,21 +12,25 @@ instructions after the subject id; otherwise this spec applies.
 
 ## Length and depth
 
-**MINIMUM DEPTH REQUIREMENT (STRICT): Every sub-subtopic MUST be authored to a computed reading/study duration of at least 1 hour 30 minutes (1.5h). This is a hard floor — do not submit content that will compute below this threshold. To reliably hit 1.5h, aim for the depth and volume of the Stage 1 content (llm-apis / llm-applications) which consistently computes to 1.5h–2h per sub-subtopic. When in doubt, write more, not less.**
+**DURATION REQUIREMENT (STRICT): Every sub-subtopic MUST compute to between 1 hour 30 minutes (1.5h) and 2 hours 30 minutes (2.5h). Both ends are hard limits — do not submit content below 1.5h or above 2.5h.**
+
+To target the 1.5h–2.5h window reliably, aim for content with roughly:
+- 15–25 headings (h2/h3)
+- 3–6 code blocks totalling 100–200 lines of code
+- 1–2 SVG diagrams
+- 30–60 list items
+- 1,500–3,000 words of prose text
+
+These are calibration guides, not rigid counts. After authoring, mentally estimate whether the content reads as 1.5–2.5 hours of focused study. If it feels shorter, expand the thinnest sections. If it feels longer, trim repetition and merge overlapping sections.
 
 - Maximize useful detail, not empty length.
-- Explain the topic thoroughly, from fundamentals to advanced points — cover all applicable content areas exhaustively, not just the "key" ones.
-- Cover every major sub-point needed to properly understand the topic. Do not stop at a high-level treatment of any point.
-- Prefer complete coverage over concise summaries; do not stop at a short summary if more useful detail can be added.
-- Each major section must have multiple paragraphs of explanation, not just a sentence or two.
-- Include multiple runnable code examples per topic — at minimum one simple introductory example and one production-realistic example.
+- Explain the topic thoroughly, from fundamentals to advanced points — cover all applicable content areas, but do not pad with repetition or boilerplate.
+- Each major section must have substantive explanation (multiple paragraphs or a code block), not just a sentence or two.
+- Include multiple runnable code examples — at minimum one simple introductory example and one realistic/production example.
 - Avoid filler, repetition, and generic statements; every paragraph must add new value.
-- Use clear section headings and structured formatting so long content stays readable.
-- When the topic is broad, break it into logical parts and explain each part thoroughly.
-- Include step-by-step guidance, comparisons, and real-world examples when helpful.
-- Lead with the most important sections in full detail, then continue with the remaining sections as far as possible.
-- Never intentionally shorten the content.
-- **If you finish authoring and the content feels brief, it is too brief. Add more detail, more examples, more explanation.**
+- Use clear section headings and structured formatting so content stays readable.
+- Include step-by-step guidance, comparisons, and real-world examples where they add genuine value.
+- Do not pad sections to hit the duration floor; do not repeat information already covered in another section to push the word count up.
 
 ## Content structure
 
