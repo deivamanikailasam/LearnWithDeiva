@@ -1,0 +1,624 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Connecting LLMs to Databases"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Databases are the most common external data source in enterprise LLM applications. An LLM on its own cannot query a database \u2014 it has no connection, no schema awareness, and no knowledge of your data. Wrapping database operations as tools gives the LLM a controlled, auditable interface to your data: it calls a tool with typed arguments, and the tool executes the query and returns results as text."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "There are two main patterns:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pre-defined query tools",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 each tool wraps a specific, parameterised query (get_order_by_id, list_customers_by_region). Safer, more predictable, easier to audit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Text-to-SQL",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 the LLM generates a SQL query string from natural language, which is then executed. More flexible, but requires schema injection and careful validation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Start with pre-defined query tools. They eliminate SQL injection risk, are trivial to test, and cover 80% of use cases. Add text-to-SQL only when the query space is genuinely open-ended."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pre-defined Query Tools"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The safest database integration pattern: define one tool per query, use parameterised arguments, and never let the LLM touch raw SQL. The LLM chooses which tool to call and what arguments to pass \u2014 the SQL lives entirely in your code."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install openai sqlalchemy psycopg2-binary (or sqlite for local dev)\nimport json\nfrom openai import OpenAI\nfrom sqlalchemy import create_engine, text\n\nengine = create_engine(\"sqlite:///orders.db\")   # or postgresql://...\nclient = OpenAI()\n\n# --- Tool implementations ---\n\ndef get_order(order_id: str) -> dict | None:\n    with engine.connect() as conn:\n        row = conn.execute(\n            text(\"SELECT id, customer_name, total, status FROM orders WHERE id = :id\"),\n            {\"id\": order_id},\n        ).fetchone()\n    if row is None:\n        return None\n    return {\"id\": row.id, \"customer\": row.customer_name,\n            \"total\": row.total, \"status\": row.status}\n\ndef list_orders_by_status(status: str, limit: int = 10) -> list[dict]:\n    with engine.connect() as conn:\n        rows = conn.execute(\n            text(\"SELECT id, customer_name, total FROM orders \"\n                 \"WHERE status = :status ORDER BY created_at DESC LIMIT :limit\"),\n            {\"status\": status, \"limit\": limit},\n        ).fetchall()\n    return [{\"id\": r.id, \"customer\": r.customer_name, \"total\": r.total} for r in rows]\n\n# --- Tool schemas ---\n\nTOOLS = [\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_order\",\n            \"description\": (\n                \"Retrieve a single order by its ID. Use when the user references \"\n                \"a specific order number (e.g. 'ORD-1042'). Returns order details \"\n                \"including customer, total, and status.\"\n            ),\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"order_id\": {\n                        \"type\": \"string\",\n                        \"description\": \"The order ID, e.g. 'ORD-1042'.\",\n                    }\n                },\n                \"required\": [\"order_id\"],\n                \"additionalProperties\": False,\n            },\n        },\n    },\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"list_orders_by_status\",\n            \"description\": (\n                \"List recent orders filtered by status. Use when the user asks \"\n                \"about pending, completed, or cancelled orders. Returns up to 10 \"\n                \"most recent orders by default.\"\n            ),\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"status\": {\n                        \"type\": \"string\",\n                        \"enum\": [\"pending\", \"processing\", \"completed\", \"cancelled\"],\n                        \"description\": \"Order status to filter by.\",\n                    },\n                    \"limit\": {\n                        \"type\": \"integer\",\n                        \"description\": \"Max results to return (1-50).\",\n                        \"default\": 10,\n                        \"minimum\": 1,\n                        \"maximum\": 50,\n                    },\n                },\n                \"required\": [\"status\"],\n                \"additionalProperties\": False,\n            },\n        },\n    },\n]\n\nTOOL_MAP = {\n    \"get_order\": get_order,\n    \"list_orders_by_status\": list_orders_by_status,\n}\n\ndef format_db_result(result) -> str:\n    if result is None:\n        return \"No record found.\"\n    return json.dumps(result, default=str, indent=2)\n\ndef run_agent(user_message: str) -> str:\n    messages = [{\"role\": \"user\", \"content\": user_message}]\n    while True:\n        response = client.chat.completions.create(\n            model=\"gpt-4o-mini\",\n            messages=messages,\n            tools=TOOLS,\n            tool_choice=\"auto\",\n        )\n        choice = response.choices[0]\n        messages.append(choice.message)\n        if choice.finish_reason == \"stop\":\n            return choice.message.content\n        for tc in choice.message.tool_calls:\n            args = json.loads(tc.function.arguments)\n            result = TOOL_MAP[tc.function.name](**args)\n            messages.append({\n                \"role\": \"tool\",\n                \"tool_call_id\": tc.id,\n                \"content\": format_db_result(result),\n            })\n\nprint(run_agent(\"Show me the 5 most recent pending orders.\"))\nprint(run_agent(\"What is the status of order ORD-1042?\"))"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Text-to-SQL"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Text-to-SQL lets the LLM write SQL from a natural language question. To do this reliably, inject the database schema into the prompt. The schema tells the LLM the table names, column names, types, and relationships it needs to construct a syntactically valid query."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Schema Injection"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from sqlalchemy import create_engine, inspect\n\nengine = create_engine(\"sqlite:///sales.db\")\n\ndef get_schema_prompt(engine) -> str:\n    \"\"\"Generate a schema description for the LLM from SQLAlchemy metadata.\"\"\"\n    inspector = inspect(engine)\n    lines = [\"Database schema:\"]\n    for table_name in inspector.get_table_names():\n        cols = inspector.get_columns(table_name)\n        col_defs = \", \".join(f\"{c['name']} {c['type']}\" for c in cols)\n        lines.append(f\"  {table_name}({col_defs})\")\n    return \"\\n\".join(lines)\n\n# Example output:\n# Database schema:\n#   orders(id TEXT, customer_name TEXT, total FLOAT, status TEXT, created_at DATETIME)\n#   products(id TEXT, name TEXT, price FLOAT, category TEXT, stock INTEGER)\n#   customers(id TEXT, name TEXT, email TEXT, region TEXT)\n\nschema_prompt = get_schema_prompt(engine)\nprint(schema_prompt)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Text-to-SQL Tool"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import re\nfrom openai import OpenAI\nfrom sqlalchemy import create_engine, text\n\nengine = create_engine(\"sqlite:///sales.db\")\nclient = OpenAI()\n\nSQL_TOOL = {\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"run_sql_query\",\n        \"description\": (\n            \"Execute a read-only SQL SELECT query against the sales database. \"\n            \"Use this when the user asks analytical questions about orders, \"\n            \"products, or customers that require aggregation or filtering. \"\n            \"Only SELECT statements are permitted.\"\n        ),\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"sql\": {\n                    \"type\": \"string\",\n                    \"description\": (\n                        \"A valid SQLite SELECT statement. \"\n                        \"Must not contain INSERT, UPDATE, DELETE, DROP, or ALTER.\"\n                    ),\n                },\n            },\n            \"required\": [\"sql\"],\n            \"additionalProperties\": False,\n        },\n    },\n}\n\nFORBIDDEN = re.compile(\n    r\"\\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE)\\b\",\n    re.IGNORECASE,\n)\n\ndef run_sql_query(sql: str) -> str:\n    if FORBIDDEN.search(sql):\n        return \"Error: only SELECT queries are permitted.\"\n    try:\n        with engine.connect() as conn:\n            rows = conn.execute(text(sql)).fetchmany(50)   # cap at 50 rows\n        if not rows:\n            return \"Query returned no rows.\"\n        headers = list(rows[0]._fields)\n        lines = [\" | \".join(headers)]\n        lines += [\" | \".join(str(v) for v in row) for row in rows]\n        return \"\\n\".join(lines)\n    except Exception as e:\n        return f\"SQL error: {e}\"\n\nsystem_prompt = f\"\"\"You are a data assistant.\n{get_schema_prompt(engine)}\n\nOnly generate SELECT queries. Never modify data.\nLimit result sets to 20 rows unless the user asks for more.\n\"\"\"\n\ndef run_sql_agent(user_message: str) -> str:\n    messages = [\n        {\"role\": \"system\", \"content\": system_prompt},\n        {\"role\": \"user\", \"content\": user_message},\n    ]\n    while True:\n        response = client.chat.completions.create(\n            model=\"gpt-4o-mini\",\n            messages=messages,\n            tools=[SQL_TOOL],\n            tool_choice=\"auto\",\n        )\n        choice = response.choices[0]\n        messages.append(choice.message)\n        if choice.finish_reason == \"stop\":\n            return choice.message.content\n        for tc in choice.message.tool_calls:\n            args = json.loads(tc.function.arguments)\n            result = run_sql_query(**args)\n            messages.append({\n                \"role\": \"tool\",\n                \"tool_call_id\": tc.id,\n                \"content\": result,\n            })\n\nprint(run_sql_agent(\"What are the top 5 products by revenue this month?\"))"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "NoSQL and Key-Value Databases"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Not all databases are relational. LLMs can query document stores, key-value caches, and time-series databases through the same tool pattern. The key difference: instead of SQL, the tool arguments map to the database's native query interface."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Redis"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install redis\nimport redis\nimport json\n\nr = redis.Redis(host=\"localhost\", port=6379, decode_responses=True)\n\ndef get_user_session(session_id: str) -> dict | None:\n    data = r.hgetall(f\"session:{session_id}\")\n    return data if data else None\n\ndef get_product_cache(product_id: str) -> dict | None:\n    raw = r.get(f\"product:{product_id}\")\n    if raw is None:\n        return None\n    return json.loads(raw)\n\nREDIS_TOOLS = [\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_user_session\",\n            \"description\": (\n                \"Retrieve an active user session by session ID. Returns user ID, \"\n                \"login time, and preferences. Returns null if session is expired or not found.\"\n            ),\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"session_id\": {\"type\": \"string\", \"description\": \"Session token UUID.\"},\n                },\n                \"required\": [\"session_id\"],\n                \"additionalProperties\": False,\n            },\n        },\n    },\n]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "MongoDB"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install pymongo\nfrom pymongo import MongoClient\nimport json\n\nmongo = MongoClient(\"mongodb://localhost:27017/\")\ndb = mongo[\"ecommerce\"]\n\ndef find_products(\n    category: str | None = None,\n    max_price: float | None = None,\n    in_stock: bool = True,\n    limit: int = 10,\n) -> list[dict]:\n    query: dict = {}\n    if category:\n        query[\"category\"] = category\n    if max_price is not None:\n        query[\"price\"] = {\"$lte\": max_price}\n    if in_stock:\n        query[\"stock\"] = {\"$gt\": 0}\n    cursor = db.products.find(query, {\"_id\": 0}).limit(limit)\n    return list(cursor)\n\nMONGO_TOOL = {\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"find_products\",\n        \"description\": (\n            \"Search the product catalog. Use when the user asks about available products, \"\n            \"prices, or stock levels. Supports filtering by category, maximum price, and \"\n            \"in-stock status.\"\n        ),\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"category\": {\n                    \"anyOf\": [{\"type\": \"string\"}, {\"type\": \"null\"}],\n                    \"description\": \"Product category filter, e.g. 'electronics'. Null for all.\",\n                    \"default\": None,\n                },\n                \"max_price\": {\n                    \"anyOf\": [{\"type\": \"number\"}, {\"type\": \"null\"}],\n                    \"description\": \"Maximum price in USD. Null for no price filter.\",\n                    \"default\": None,\n                },\n                \"in_stock\": {\n                    \"type\": \"boolean\",\n                    \"description\": \"If true, return only in-stock items.\",\n                    \"default\": True,\n                },\n                \"limit\": {\n                    \"type\": \"integer\",\n                    \"description\": \"Max results (1-50).\",\n                    \"default\": 10,\n                    \"minimum\": 1,\n                    \"maximum\": 50,\n                },\n            },\n            \"required\": [],\n            \"additionalProperties\": False,\n        },\n    },\n}"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Safety"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Database tools carry real risks. A bug in your tool or a misbehaving LLM could corrupt or leak data. Apply these controls before shipping:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Risk",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Control",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "SQL injection via text-to-SQL"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Regex-block write keywords; run query in read-only DB user"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Excessive data exposure"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Select only necessary columns; cap row count (50-100 rows max)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PII in tool results"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Mask or omit sensitive columns (SSN, card number, password hash) in the SELECT list"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Runaway queries"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Set query timeout (SQLAlchemy: connect_args={'timeout': 5})"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Write operations via LLM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Use a read-only DB user for all LLM-accessible connections"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Schema leakage"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Only inject schema for tables the LLM needs; keep internal tables out"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Read-only connection via SQLAlchemy \u2014 PostgreSQL example\n# Create a dedicated DB user with SELECT only:\n#   CREATE USER llm_reader WITH PASSWORD 'secret';\n#   GRANT SELECT ON ALL TABLES IN SCHEMA public TO llm_reader;\n\nfrom sqlalchemy import create_engine, event\nfrom sqlalchemy.exc import OperationalError\n\nengine = create_engine(\n    \"postgresql://llm_reader:secret@localhost/sales\",\n    connect_args={\"connect_timeout\": 5},\n    pool_pre_ping=True,\n)\n\n# Belt-and-suspenders: also block writes at the connection level\n@event.listens_for(engine, \"connect\")\ndef set_readonly(dbapi_conn, connection_record):\n    dbapi_conn.set_session(readonly=True, autocommit=True)"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "LangChain SQLDatabase Toolkit"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LangChain ships a ready-made toolkit for SQL databases that handles schema injection and provides a suite of tools: one to list tables, one to describe a table's schema, and one to execute a query. Use it when you want text-to-SQL without writing the plumbing yourself."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install langchain-community langchain-openai\nfrom langchain_community.utilities import SQLDatabase\nfrom langchain_community.agent_toolkits import SQLDatabaseToolkit\nfrom langchain_openai import ChatOpenAI\nfrom langgraph.prebuilt import create_react_agent\n\ndb = SQLDatabase.from_uri(\"sqlite:///sales.db\")\nllm = ChatOpenAI(model=\"gpt-4o-mini\", temperature=0)\n\ntoolkit = SQLDatabaseToolkit(db=db, llm=llm)\ntools = toolkit.get_tools()\n# tools = [sql_db_list_tables, sql_db_schema, sql_db_query, sql_db_query_checker]\n\nsystem_prompt = (\n    \"You are a data analyst. Use the SQL tools to answer questions about the sales database. \"\n    \"Always check the table schema before querying. Never run destructive statements.\"\n)\n\nagent = create_react_agent(llm, tools, prompt=system_prompt)\nresult = agent.invoke({\n    \"messages\": [{\"role\": \"user\", \"content\": \"Which product category had the highest revenue last month?\"}]\n})\nprint(result[\"messages\"][-1].content)"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Database tools give LLMs live access to your data.",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " Pre-defined query tools are the safest starting point \u2014 no SQL generation, no injection risk, fully auditable. Add text-to-SQL with schema injection when the query space is open-ended, and always run on a read-only connection. Mask PII columns at the query layer, not in post-processing."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
