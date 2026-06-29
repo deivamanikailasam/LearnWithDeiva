@@ -1,0 +1,1901 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompting for text-to-image models is the interface between human intent and the model's learned latent space. A prompt is not processed as a natural language sentence \u2014 it is tokenised, encoded by a text model (typically CLIP), and passed to the denoising U-Net via cross-attention. Understanding how the text encoder represents concepts, how token position and ordering influence results, and how quality tokens exploit biases in training data gives you direct control over what the model generates rather than relying on trial and error."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How Text Reaches the Image"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The text-to-image pipeline encodes the prompt through a frozen text encoder before the denoising process begins. In Stable Diffusion v1.x, this is CLIP ViT-L/14 (OpenAI). The encoder maps the tokenised prompt to a sequence of 768-dimensional vectors \u2014 one per token, up to 77 tokens total. These vectors are fed to the U-Net's cross-attention layers at multiple resolutions throughout the denoising process. Each spatial position in the U-Net feature map attends to the token sequence, selecting relevant concepts for that spatial region."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# How a text-to-image model processes a prompt internally\n\nfrom transformers import CLIPTokenizer, CLIPTextModel\nimport torch\n\ntokenizer  = CLIPTokenizer.from_pretrained(\"openai/clip-vit-large-patch14\")\ntext_model = CLIPTextModel.from_pretrained(\"openai/clip-vit-large-patch14\")\ntext_model.eval()\n\nprompt = \"a red fox sitting on a snow-covered log, golden hour lighting, wildlife photography\"\n\n# Tokenise\ntokens = tokenizer(\n    prompt,\n    max_length=77,          # CLIP's fixed context length\n    padding=\"max_length\",\n    truncation=True,\n    return_tensors=\"pt\",\n)\nprint(\"Token count:\", tokens[\"input_ids\"].shape[1])        # 77\nprint(\"Prompt tokens:\", tokenizer.convert_ids_to_tokens(tokens[\"input_ids\"][0].tolist()))\n\n# Encode to sequence of embeddings (B, 77, 768)\nwith torch.no_grad():\n    text_emb = text_model(**tokens).last_hidden_state\nprint(\"Embedding shape:\", text_emb.shape)   # (1, 77, 768)\n\n# IMPORTANT: SD uses the PENULTIMATE hidden layer, not the pooled output\n# This preserves the per-token geometry instead of collapsing to a single vector\n# text_model(...).hidden_states[-2]  -- used by SD v1.x"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key consequences of this architecture:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Token limit: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "CLIP's context window is 77 tokens. SD v1.x truncates any prompt exceeding this. Very long prompts lose their tail. SDXL and SD v3 use larger encoders and support longer prompts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Word order matters less than you expect: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "because cross-attention is a bag-of-tokens weighted sum, the model does not have strong left-to-right reading order as in language models. Earlier tokens are slightly preferred due to position encoding, but concept proximity within the sequence matters more."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CLIP was trained on image-caption pairs: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "it understands descriptive nouns, adjectives, and art style terms far better than instructions or negations. Saying "
+                  },
+                  {
+                    "type": "text",
+                    "text": "\"no people\"",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " in the positive prompt is often ignored \u2014 use negative prompts for exclusions."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Anatomy of an Effective Prompt"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Effective prompts for diffusion models follow a layered structure rather than grammatical sentences. The ordering heuristic is: core subject first, details second, environment and lighting third, artistic style fourth, quality tokens last."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"\nPrompt anatomy for Stable Diffusion and compatible models.\n\nEffective prompts typically follow this structure:\n  [subject] [details] [environment] [style/medium] [quality tokens]\n\nExamples demonstrating each component:\n\"\"\"\n\n# 1. Subject \u2014 who or what the image depicts\nsubject = \"a young woman with curly auburn hair\"\n\n# 2. Subject details \u2014 pose, expression, clothing, attributes\ndetails = \"wearing a midnight blue velvet dress, seated at a grand piano\"\n\n# 3. Environment \u2014 setting, time of day, weather\nenvironment = \"ornate concert hall, warm candlelight, shallow depth of field\"\n\n# 4. Style / medium \u2014 artistic style or rendering technique\nstyle = \"oil painting, impressionist style, rich colour palette\"\n\n# 5. Quality tokens \u2014 tokens strongly associated with high-quality images in training data\nquality = \"masterpiece, highly detailed, 8k, sharp focus, award-winning photography\"\n\n# Combined prompt\nprompt = f\"{subject}, {details}, {environment}, {style}, {quality}\"\nprint(prompt)\n# \u2192 \"a young woman with curly auburn hair, wearing a midnight blue velvet dress,\n#    seated at a grand piano, ornate concert hall, warm candlelight, shallow depth\n#    of field, oil painting, impressionist style, rich colour palette, masterpiece,\n#    highly detailed, 8k, sharp focus, award-winning photography\"\n\n# Negative prompt \u2014 what to exclude\nnegative = \"blurry, low quality, deformed hands, watermark, text, overexposed, ugly\""
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Quality Tokens"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Certain tokens are strongly correlated with high-quality images in the training data because they appear in image hosting sites' metadata, art forums, and curated datasets. Including them in the prompt biases the model toward generating images that look like those sources:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Token category"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Examples"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Effect"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "General quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "masterpiece, best quality, highly detailed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sharpness, detail density, composition quality"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Resolution"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4k, 8k uhd, high resolution"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Texture sharpness (model-dependent)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Photography"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "DSLR, f/1.8, shallow DOF, golden hour, Kodak Portra 400"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Photorealistic rendering, bokeh, film grain"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Art platforms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "artstation, deviantart, pixiv, CG Society"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Digital art / illustration aesthetic"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Award language"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "award-winning, trending, professional"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pulls toward popular high-voted images in training"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Technique"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "octane render, unreal engine, ray tracing"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3D rendered look, specular highlights"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These tokens work because the text encoder has learned associations between them and visual quality signals in the training data \u2014 not because the model understands what "
+          },
+          {
+            "type": "text",
+            "text": "\"8k\"",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " resolution means. On models that were not trained on such datasets, they may have no effect or different effects."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Style Tokens"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Style tokens invoke a visual aesthetic by referencing art movements, media types, or named artists. The model has learned what images are associated with these terms in the training corpus:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Style token"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Visual result"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "oil painting, impasto"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Visible brushstrokes, rich texture"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "watercolour, loose brushwork"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Soft edges, colour bleeds, paper texture"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ink sketch, pen and ink"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Line art, high contrast"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "photorealistic, hyperrealistic"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Photo-quality rendering"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Studio Ghibli style"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hand-drawn anime look (Ghibli aesthetic)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "cinematic, movie still, anamorphic lens"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Widescreen format, film-grade colour grading"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "concept art, matte painting"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Digital art with painterly quality"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "low poly, isometric, voxel art"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Geometric / game art aesthetics"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Named artist references (e.g. "
+          },
+          {
+            "type": "text",
+            "text": "\"in the style of [artist]\"",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ") are powerful but raise ethical considerations: the model may reproduce an artist's distinctive style without consent. Many models and APIs prohibit named-artist prompts for living artists."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Token Weighting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Frontends like AUTOMATIC1111, ComfyUI, and InvokeAI support explicit attention weighting for individual tokens. Increasing a token's weight raises its cross-attention scores in the U-Net, making the model attend to that concept more during denoising."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"\nPrompt token weighting \u2014 supported by A1111, ComfyUI, and InvokeAI.\n\nSyntax varies by implementation; A1111 uses (token:weight) notation.\nIncreasing weight raises the cross-attention score for that token's queries\nduring denoising, making the model attend to that concept more strongly.\n\nStandard weight = 1.0. Range 0.5\u20131.5 is typical; >2.0 often produces artefacts.\n\"\"\"\n\n# A1111 / AUTOMATIC1111 syntax\nprompt_weighted = (\n    \"a (dragon:1.4) perched on a (gothic castle:1.2) tower, \"\n    \"(stormy sky:1.3), (cinematic lighting:1.1), \"\n    \"(photorealistic:1.5), (8k:1.2)\"\n)\n\n# ComfyUI uses CLIP prompt syntax with nested parentheses for boosting:\nprompt_comfyui = (\n    \"a dragon perched on a gothic castle tower, \"\n    \"((stormy sky)), (cinematic lighting), \"\n    \"photorealistic, 8k uhd\"\n)\n# Double parens \u2248 1.1\u00d7 boost in ComfyUI; triple \u2248 1.21\u00d7\n\n# InvokeAI syntax \u2014 explicit multiplier with +/- notation:\nprompt_invoke = \"dragon+++ perched on gothic castle tower, stormy sky++\"\n\n# IMPORTANT: weighting acts on CLIP attention scores, not on image-space regions.\n# To control spatial layout, use tools like ControlNet, IP-Adapter, or\n# region-based conditioning \u2014 token weights alone cannot constrain position."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Negative Prompts"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The negative prompt replaces the null conditioning in CFG. Instead of guiding away from an empty embedding, the model is guided away from the negative prompt's embedding and toward the positive prompt. This enables concept suppression that the positive prompt alone cannot achieve."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"\nEffective negative prompt construction.\n\nNegative prompts are the unconditional conditioning in CFG:\n    eps_guided = eps_uncond(neg_prompt) + w * (eps_cond(pos_prompt) - eps_uncond(neg_prompt))\n\nThe model is pushed TOWARD the positive prompt and AWAY from the negative.\n\"\"\"\n\n# Generic quality negative (works for most models)\nquality_negative = (\n    \"blurry, low resolution, low quality, worst quality, jpeg artifacts, \"\n    \"noise, grain, overexposed, underexposed, watermark, signature, text\"\n)\n\n# Anatomy / people negative\nanatomy_negative = (\n    \"deformed, mutated, extra limbs, missing limbs, bad anatomy, \"\n    \"disfigured, malformed hands, extra fingers, fused fingers, \"\n    \"poorly drawn face, asymmetrical eyes\"\n)\n\n# Style negative \u2014 suppress unwanted aesthetics\nstyle_negative = (\n    \"cartoon, anime, illustration, sketch, painting, 3d render, \"\n    \"cgi, synthetic\"\n)\n\n# For photorealism: combine quality + anatomy negatives\nphoto_negative = f\"{quality_negative}, {anatomy_negative}\"\n\n# For photorealism with human subjects:\nportrait_negative = f\"{photo_negative}, {style_negative}\""
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "SDXL and Multi-Encoder Prompting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "SDXL introduced a dual text encoder architecture \u2014 CLIP ViT-L/14 and OpenCLIP ViT-bigG \u2014 with separate prompt inputs for each. The two encoders' outputs are concatenated and fed to different parts of the U-Net. Using "
+          },
+          {
+            "type": "text",
+            "text": "prompt_2",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to pass more technical or stylistic details to the larger encoder while keeping the primary prompt concise in "
+          },
+          {
+            "type": "text",
+            "text": "prompt",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " often produces better results than putting everything in one prompt field."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import StableDiffusionXLPipeline\nimport torch\n\npipe = StableDiffusionXLPipeline.from_pretrained(\n    \"stabilityai/stable-diffusion-xl-base-1.0\",\n    torch_dtype=torch.float16,\n)\npipe.to(\"cuda\")\n\n# SDXL dual text encoder:\n# - prompt          \u2192 CLIP ViT-L (same as SD v1.5)\n# - prompt_2        \u2192 OpenCLIP ViT-bigG (new, richer semantic understanding)\n# If prompt_2 is None, the first prompt is used for both encoders.\nimage = pipe(\n    prompt=\"a serene Japanese garden at dusk, koi pond, stone lanterns, cherry blossoms\",\n    prompt_2=\"ultra detailed, soft golden light, reflections in water, 4k photography\",  # SDXL-specific\n    negative_prompt=\"blurry, low quality, deformed, watermark\",\n    negative_prompt_2=\"worst quality, low resolution\",\n    guidance_scale=7.0,\n    num_inference_steps=30,\n    height=1024,\n    width=1024,\n).images[0]\nimage.save(\"garden.png\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical Prompting Checklist"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start with the subject: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "be specific. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "\"red fox sitting on a log\"",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " beats "
+                  },
+                  {
+                    "type": "text",
+                    "text": "\"a fox\"",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Add details progressively: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "pose, expression, clothing, attributes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Specify environment: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "location, time of day, weather, lighting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Choose a style or medium: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "one or two style terms are usually enough."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Append quality tokens: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "tail-end quality tokens have less influence than subject tokens due to attention dilution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use negative prompts for suppression: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "don't try to exclude concepts with "
+                  },
+                  {
+                    "type": "text",
+                    "text": "\"no X\"",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " in the positive prompt."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Iterate guidance scale: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "try 5.0\u20139.0 range first; lower for more variety, higher for stricter prompt following."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Check token count: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "anything past token 77 is silently dropped in SD v1.x."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Iterative Prompt Refinement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Effective prompting is iterative. Fix the random seed first so each run is identical except for the prompt change. This isolates the effect of each addition or modification, making it clear which tokens are responsible for which visual changes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import StableDiffusionPipeline\nimport torch\n\npipe = StableDiffusionPipeline.from_pretrained(\n    \"runwayml/stable-diffusion-v1-5\", torch_dtype=torch.float16\n).to(\"cuda\")\n\nbase_prompt = \"a medieval castle on a cliff, dramatic thunderstorm\"\nnegative    = \"blurry, low quality, deformed\"\n\n# Iterate on the prompt with the same seed \u2014 only the prompt changes\nprompts = [\n    base_prompt,\n    base_prompt + \", oil painting, Rembrandt lighting\",\n    base_prompt + \", oil painting, Rembrandt lighting, golden hour\",\n    base_prompt + \", photorealistic, cinematic, 4k, stormy sea below\",\n]\n\nfor idx, prompt in enumerate(prompts):\n    # Reset to same seed each time to isolate the effect of the prompt change\n    generator = torch.Generator(\"cuda\").manual_seed(42)\n    image = pipe(\n        prompt=prompt,\n        negative_prompt=negative,\n        guidance_scale=7.5,\n        num_inference_steps=30,\n        generator=generator,\n    ).images[0]\n    image.save(f\"iteration_{idx}.png\")\n    print(f\"Saved iteration_{idx}.png: {prompt[:60]}...\")"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical refinement sequence:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start minimal: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "generate with only the core subject to establish baseline quality and understand what the model defaults to without guidance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Add descriptors one category at a time: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "add details, then environment, then style. Observe changes to isolate which tokens affect which elements."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fix unwanted elements with negative prompts: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "rather than adding more positive tokens, identify and suppress specific problems."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sweep guidance scale at 5, 7.5, 10: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "the optimal scale varies by prompt length and content. Short prompts often need higher guidance; long detailed prompts need lower guidance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Vary seeds once prompt is stable: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "generate 4\u20138 images with different seeds to find the best composition for the final prompt."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Spatial Control: When Prompts Are Not Enough"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Token weighting and prompt ordering affect "
+          },
+          {
+            "type": "text",
+            "text": "what",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " appears in an image but not reliably "
+          },
+          {
+            "type": "text",
+            "text": "where",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". To control spatial composition \u2014 putting a subject on the left, a building in the background, a person facing a specific direction \u2014 text prompts alone are insufficient. These situations call for structural conditioning tools:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tool"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Input"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Controls"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ControlNet (Canny)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Edge map of reference image"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Overall structural composition"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ControlNet (depth)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Depth map of reference"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3D scene layout, foreground/background"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ControlNet (pose)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Human pose keypoints"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Body pose, limb positions"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IP-Adapter"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reference image"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Style, face identity, colour palette"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Region-based prompting"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Text-to-mask + per-region prompt"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Assign different prompts to spatial regions"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Inpainting"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Image + binary mask"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Edit specific regions while keeping context"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import StableDiffusionControlNetPipeline, ControlNetModel\nimport torch\nfrom PIL import Image\n\n\ndef make_edge_map(image_path: str) -> Image.Image:\n    \"\"\"Generate a Canny edge map from a reference image for structural control.\"\"\"\n    import cv2\n    img = cv2.imread(image_path)\n    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)\n    edges = cv2.Canny(gray, threshold1=100, threshold2=200)\n    return Image.fromarray(edges)\n\n\ncontrolnet = ControlNetModel.from_pretrained(\n    \"lllyasviel/sd-controlnet-canny\", torch_dtype=torch.float16\n)\npipe = StableDiffusionControlNetPipeline.from_pretrained(\n    \"runwayml/stable-diffusion-v1-5\",\n    controlnet=controlnet,\n    torch_dtype=torch.float16,\n).to(\"cuda\")\n\ncontrol_image = make_edge_map(\"reference.jpg\")\n\nimage = pipe(\n    prompt=\"a futuristic city at night, neon lights, cyberpunk, highly detailed\",\n    negative_prompt=\"blurry, low quality\",\n    image=control_image,                 # spatial constraint from edge map\n    controlnet_conditioning_scale=0.8,  # 0=ignore control, 1=strong control\n    guidance_scale=7.5,\n    num_inference_steps=30,\n).images[0]\nimage.save(\"controlnet_output.png\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Programmatic Prompt Exploration"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When building pipelines or evaluating multiple prompt variants, use batched generation with fixed seeds to systematically compare combinations. This is the basis for automated prompt optimisation \u2014 searching over prompt variants and guidance scales using a quality metric like CLIP similarity or FID, then human review of top-ranked outputs."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from diffusers import StableDiffusionPipeline\nimport torch\nfrom itertools import product\n\n\ndef batch_generate(pipe, prompts, guidance_scales, seed=42, steps=25):\n    \"\"\"Generate one image per (prompt, guidance_scale) pair.\"\"\"\n    results = []\n    for prompt, scale in product(prompts, guidance_scales):\n        gen = torch.Generator(\"cuda\").manual_seed(seed)\n        image = pipe(\n            prompt=prompt,\n            guidance_scale=scale,\n            num_inference_steps=steps,\n            generator=gen,\n        ).images[0]\n        results.append((prompt, scale, image))\n        print(f\"  scale={scale:.1f}: {prompt[:50]}...\")\n    return results\n\n\npipe = StableDiffusionPipeline.from_pretrained(\n    \"runwayml/stable-diffusion-v1-5\", torch_dtype=torch.float16\n).to(\"cuda\")\n\nsubject_variants = [\n    \"a fox in a forest\",\n    \"a red fox in an autumn forest, detailed fur\",\n    \"a red fox perched on a mossy log, autumn forest, golden hour, wildlife photography\",\n]\nscales = [5.0, 7.5, 10.0]\n\nresults = batch_generate(pipe, subject_variants, scales)\n# Inspect the grid to find optimal specificity + guidance scale"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Prompting for diffusion models is engineering CLIP embeddings, not writing natural language. The cross-attention mechanism means concepts appear at their spatial locations because the model learned correlations from training data \u2014 not because it reads your prompt left-to-right. Subject specificity, style tokens, quality tokens, and negative prompts each address a different dimension of the output, and they compose multiplicatively with the guidance scale."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
