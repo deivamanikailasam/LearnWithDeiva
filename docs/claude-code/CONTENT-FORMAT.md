@@ -149,3 +149,43 @@ Encoding rules:
 - Newlines/structure come from separate block nodes, never from `\n` inside a single `text` node or from literal Markdown characters.
 - The first block should be a `paragraph` giving a high-level overview (not a heading repeating the topic title).
 - Mirror the depth, tone, and node usage of the 2–3 sibling `document.json` files read during generation.
+
+### TipTap schema validation rules (required — violations cause "[tiptap warn]: Invalid content")
+
+The ProseMirror schema enforced by TipTap is strict. Violating any of these rules produces runtime "Invalid content" warnings and silently drops or corrupts content in the viewer:
+
+**Block vs. inline placement**
+- `blockMath` is a **block node**. It must appear as a direct child of `doc` or another block container (e.g. `blockquote`). It CANNOT be nested inside a `paragraph`'s `content` array.
+- `inlineMath` is an **inline node**. It MUST appear inside a `paragraph`'s `content` array, interleaved with `text` nodes. It CANNOT be a top-level block.
+- `horizontalRule` is a block node and cannot be nested inside `listItem`, `blockquote`, or `tableCell`.
+
+**List items**
+- `listItem` MUST contain at least one block node as a direct child. Its `content` must be an array of block nodes — typically `[{"type":"paragraph","content":[...]}]`. Never put `text` nodes or inline nodes directly inside `listItem.content`.
+- Nested lists go inside a `listItem`'s content after the paragraph: `[paragraph, bulletList]`.
+- Do NOT put `heading` nodes inside `listItem`.
+
+**Table cells**
+- `tableHeader` and `tableCell` MUST wrap their content in `paragraph` nodes. Never put raw `text` nodes directly inside a cell's `content` array.
+- Every table must start with a `tableRow` whose cells are all `tableHeader` nodes (the header row).
+
+**Marks**
+- Marks (`bold`, `italic`, `code`, `link`) are arrays of mark objects on `text` nodes: `{"type":"text","text":"...","marks":[{"type":"bold"}]}`.
+- Marks cannot be applied to block nodes (headings, paragraphs) — only to `text` nodes.
+- `code` mark and `link` mark cannot coexist on the same text node.
+
+**Content arrays**
+- Nodes that require content (paragraph, heading, listItem, blockquote, tableRow, tableHeader, tableCell, bulletList, orderedList) MUST have a non-empty `content` array.
+- Nodes that are leaves (text, horizontalRule, blockMath, inlineMath, image, hardBreak) MUST NOT have a `content` property.
+
+**Images**
+- Every document MUST include at least one SVG diagram. For architecture, flow, pipeline, or comparison topics an SVG is especially important. Omitting images entirely is not acceptable.
+- Author the SVG by hand and reference it with `FILE:` placeholder, then run the embed-images script to inline it as base64.
+
+**After authoring, mentally validate against this checklist:**
+- [ ] No `blockMath` inside a `paragraph`
+- [ ] No `inlineMath` at top level
+- [ ] Every `listItem` has at least one `paragraph` child
+- [ ] Every `tableHeader`/`tableCell` has at least one `paragraph` child
+- [ ] No heading inside a list item
+- [ ] No `horizontalRule` inside a list or table
+- [ ] Every document has at least one `image` node with an SVG diagram
