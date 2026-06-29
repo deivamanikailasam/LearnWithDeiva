@@ -1,0 +1,2884 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Clustering the vector space into cells and searching only the most relevant cells is the core idea behind Inverted File (IVF) indexes. By reducing search to a small fraction of the total corpus, IVF achieves dramatic speedups over exact search at the cost of a small, controllable reduction in recall — and it builds an order of magnitude faster than HNSW, making it the default choice for very large corpora where index construction time or RAM constraints matter."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What IVF Is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF (Inverted File) is a cluster-based approximate nearest neighbor (ANN) algorithm. It partitions the vector space into "
+          },
+          {
+            "type": "text",
+            "text": "nlist",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " Voronoi cells using k-means clustering, then stores each vector in the inverted list of its nearest centroid. At query time, the search computes distances only to vectors in the "
+          },
+          {
+            "type": "text",
+            "text": "nprobe",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " nearest cells — a small fraction of the total index — instead of scanning every vector."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The name comes from the analogy to inverted indexes in text retrieval: a term's posting list stores all documents containing that term; an IVF cell's inverted list stores all vectors assigned to that centroid. FAISS provides three main IVF variants: "
+          },
+          {
+            "type": "text",
+            "text": "IndexIVFFlat",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (full float32 vectors), "
+          },
+          {
+            "type": "text",
+            "text": "IndexIVFSQ",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (scalar quantised, moderate compression), and "
+          },
+          {
+            "type": "text",
+            "text": "IndexIVFPQ",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (product quantised, high compression). The same core algorithm applies to all three; only how the per-cell vectors are stored differs."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF requires a two-phase setup. First, the index is trained on a sample of the corpus to learn centroid positions. Then all vectors are added; each is assigned to its nearest centroid and stored in that cell's list. This training requirement distinguishes IVF from HNSW, which needs no offline training."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For corpora in the 10 million to 1 billion vector range, RAM is typically the binding constraint. HNSW stores the entire graph adjacency structure in memory — roughly 30 GB for 10 million 768-dim float32 vectors. IVF-PQ stores product-quantised codes that are 32 to 96 times smaller than the original vectors, making a 100 million-vector index feasible on a single machine with 64 GB of RAM."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Build time is the second driver. HNSW inserts each vector one at a time and updates the graph — a process that takes 15 minutes for 10 million vectors. IVF trains k-means once (a few minutes for a sample), then assigns every vector to a cell in a single pass — cutting build time to 2 to 5 minutes for the same corpus. For pipelines where the entire corpus changes nightly (news, social media, product catalogs), IVF's rebuild time matters."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Finally, IVF-PQ's memory footprint enables in-memory vector search on hardware that would otherwise require out-of-memory (OOM) configurations or expensive high-RAM machines, directly reducing infrastructure cost."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fast build time — IVF constructs in O(N) after the one-time k-means training, versus O(N log N) for HNSW."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Low RAM with PQ — IVF-PQ stores vectors as compact codes; 10M x 768-dim fits in under 320 MB versus 30 GB for exact."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Predictable query cost — scanning nprobe cells of size N/nlist each gives O(N * nprobe / nlist) — linear in nprobe, fully predictable for capacity planning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exact search as a special case — setting nprobe = nlist makes IVF perform exact search; the same data structure covers the full recall spectrum."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Easy to combine with re-ranking — IVF retrieves a first-pass set of candidates cheaply; a cross-encoder or exact re-ranker refines the top-K."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GPU acceleration — FAISS's GPU IVF implementations achieve 10 to 50 times throughput versus CPU for large batch queries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Supports on-disk storage — IVF inverted lists can be stored on SSD (faiss.OnDiskInvertedLists) for corpora that do not fit in RAM at all."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Requires training — k-means must run on a representative sample (at least 30 times nlist vectors) before any vectors can be added."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No incremental updates — IVF does not support efficient incremental insertions; adding new vectors requires either full rebuild or a separate \"delta\" flat index merged periodically."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Boundary effects — vectors near the boundary between two Voronoi cells may be closer to the query than vectors in the assigned cell, causing recall loss. Increasing nprobe mitigates this but increases cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Quantisation error (IVF-PQ) — product quantisation introduces distortion; the reconstructed distance is an approximation. IVF-PQ recall is typically 3 to 10 percentage points below IVFFlat at the same nprobe."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sensitive to nlist choice — too few cells makes each list too long (slow scan); too many cells makes training fragile and centroid coverage sparse (poor recall at low nprobe)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Recall floors — at low nprobe, IVF recall can drop suddenly if the query's true nearest neighbor is in a non-probed cell. Unlike HNSW, there is no graph connectivity to recover from bad cell assignments."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Phase 1 — Training (k-means)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training runs k-means on a sample of the corpus vectors to find "
+          },
+          {
+            "type": "text",
+            "text": "nlist",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " centroids. FAISS uses the Lloyd algorithm: initialise centroids at random (or with k-means++), then iterate — assign each training vector to its nearest centroid, recompute each centroid as the mean of its assigned vectors — until convergence. The result is a quantiser index (typically "
+          },
+          {
+            "type": "text",
+            "text": "IndexFlatIP",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "text": "IndexFlatL2",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ") that can assign any new vector to its nearest centroid in O(nlist × d) time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Phase 2 — Building (vector assignment)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After training, each of the N corpus vectors is assigned to its nearest centroid and stored in that centroid's inverted list. This is a single linear pass over the corpus: O(N × nlist × d) for centroid lookup, but the quantiser is typically fast enough that this is the dominant operation only at nlist > 10,000. For IVF-PQ, each vector is additionally compressed into m sub-quantiser codes before storage."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each inverted list contains approximately N/nlist vectors. A good nlist choice keeps lists at a manageable size — typically 1,000 to 10,000 vectors per list for efficient scanning."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Phase 3 — Querying"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At query time:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Compute the distance from the query to all nlist centroids (O(nlist × d) — fast, since nlist is small)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sort centroids by distance; select the nprobe nearest."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scan all vectors in the nprobe selected lists, computing exact (IVFFlat) or approximate (IVF-PQ) distances."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return the K overall nearest from the scanned candidates."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Total distance computations:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{cost} = n_{\\text{list}} \\cdot d + n_{\\text{probe}} \\cdot \\frac{N}{n_{\\text{list}}} \\cdot d"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first term is the centroid lookup; the second is the list scanning. For nprobe/nlist = 0.05 (5% of cells), query cost is roughly 5% of an exact linear scan — a 20× speedup."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The recall-nprobe trade-off is approximately:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{recall} \\approx 1 - \\left(1 - \\frac{n_{\\text{probe}}}{n_{\\text{list}}}\\right)^k"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is a rough model; actual recall depends on cluster quality and query distribution, but it captures the intuition that scanning more cells monotonically improves recall."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows the three phases of IVF indexing. In Phase 1, k-means learns nlist centroids from a training sample. In Phase 2, every corpus vector is assigned to its nearest centroid and stored in that centroid's inverted list. In Phase 3, a query finds the nprobe nearest centroids and scans only those lists — skipping all other cells."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNTAwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjUwMCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSwgc2Fucy1zZXJpZiI+CiAgPHJlY3Qgd2lkdGg9Ijg2MCIgaGVpZ2h0PSI1MDAiIGZpbGw9IiNmOGY5ZmEiIHJ4PSIxMiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWExYTJlIj5JVkYgKEludmVydGVkIEZpbGUpIEluZGV4IOKAlCBUaHJlZSBQaGFzZXM8L3RleHQ+CgogIDwhLS0gUGhhc2UgMTogVHJhaW5pbmcgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjUwIiB3aWR0aD0iMjUwIiBoZWlnaHQ9IjQyMCIgcng9IjgiIGZpbGw9IiNlOGY0ZmQiIHN0cm9rZT0iIzkwYzhmMCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIxNDUiIHk9Ijc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzE1NjVDMCI+UGhhc2UgMTogVHJhaW5pbmc8L3RleHQ+CiAgPHRleHQgeD0iMTQ1IiB5PSI5MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+ay1tZWFucyBvbiBzYW1wbGUgdmVjdG9yczwvdGV4dD4KCiAgPCEtLSBEb3RzIGZvciB0cmFpbmluZyAtLT4KICA8IS0tIGNsdXN0ZXIgMSByZWdpb24gKHRvcCBsZWZ0KSAtLT4KICA8Y2lyY2xlIGN4PSI3MCIgY3k9IjE1MCIgcj0iNCIgZmlsbD0iI2U3NGMzYyIvPgogIDxjaXJjbGUgY3g9Ijg1IiBjeT0iMTM1IiByPSI0IiBmaWxsPSIjZTc0YzNjIi8+CiAgPGNpcmNsZSBjeD0iOTUiIGN5PSIxNTUiIHI9IjQiIGZpbGw9IiNlNzRjM2MiLz4KICA8Y2lyY2xlIGN4PSI3NSIgY3k9IjE2OCIgcj0iNCIgZmlsbD0iI2U3NGMzYyIvPgogIDxjaXJjbGUgY3g9IjEwMCIgY3k9IjE0MCIgcj0iNCIgZmlsbD0iI2U3NGMzYyIvPgogIDwhLS0gY2VudHJvaWQgMSAtLT4KICA8cG9seWdvbiBwb2ludHM9IjgzLDE0OCA4NywxNDAgOTEsMTQ4IDg3LDE1NiIgZmlsbD0iI2MwMzkyYiIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KCiAgPCEtLSBjbHVzdGVyIDIgcmVnaW9uICh0b3AgcmlnaHQpIC0tPgogIDxjaXJjbGUgY3g9IjE3NSIgY3k9IjE0MCIgcj0iNCIgZmlsbD0iIzI5ODBiOSIvPgogIDxjaXJjbGUgY3g9IjE5MCIgY3k9IjEzMCIgcj0iNCIgZmlsbD0iIzI5ODBiOSIvPgogIDxjaXJjbGUgY3g9IjIwMCIgY3k9IjE0OCIgcj0iNCIgZmlsbD0iIzI5ODBiOSIvPgogIDxjaXJjbGUgY3g9IjE4MCIgY3k9IjE1OCIgcj0iNCIgZmlsbD0iIzI5ODBiOSIvPgogIDxjaXJjbGUgY3g9IjIxMCIgY3k9IjEzNSIgcj0iNCIgZmlsbD0iIzI5ODBiOSIvPgogIDwhLS0gY2VudHJvaWQgMiAtLT4KICA8cG9seWdvbiBwb2ludHM9IjE5MSwxNDAgMTk1LDEzMiAxOTksMTQwIDE5NSwxNDgiIGZpbGw9IiMxNTY1QzAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41Ii8+CgogIDwhLS0gY2x1c3RlciAzIHJlZ2lvbiAoYm90dG9tIGxlZnQpIC0tPgogIDxjaXJjbGUgY3g9IjY1IiBjeT0iMjMwIiByPSI0IiBmaWxsPSIjMjdhZTYwIi8+CiAgPGNpcmNsZSBjeD0iODUiIGN5PSIyMTgiIHI9IjQiIGZpbGw9IiMyN2FlNjAiLz4KICA8Y2lyY2xlIGN4PSIxMDAiIGN5PSIyMzUiIHI9IjQiIGZpbGw9IiMyN2FlNjAiLz4KICA8Y2lyY2xlIGN4PSI3NSIgY3k9IjI0OCIgcj0iNCIgZmlsbD0iIzI3YWU2MCIvPgogIDxjaXJjbGUgY3g9IjExMCIgY3k9IjIyMiIgcj0iNCIgZmlsbD0iIzI3YWU2MCIvPgogIDwhLS0gY2VudHJvaWQgMyAtLT4KICA8cG9seWdvbiBwb2ludHM9Ijg2LDIzMCA5MCwyMjIgOTQsMjMwIDkwLDIzOCIgZmlsbD0iIzFhN2E0MCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KCiAgPCEtLSBjbHVzdGVyIDQgcmVnaW9uIChib3R0b20gcmlnaHQpIC0tPgogIDxjaXJjbGUgY3g9IjE3MCIgY3k9IjIyMCIgcj0iNCIgZmlsbD0iIzhlNDRhZCIvPgogIDxjaXJjbGUgY3g9IjE4NSIgY3k9IjIzNSIgcj0iNCIgZmlsbD0iIzhlNDRhZCIvPgogIDxjaXJjbGUgY3g9IjIwMCIgY3k9IjIyMCIgcj0iNCIgZmlsbD0iIzhlNDRhZCIvPgogIDxjaXJjbGUgY3g9IjE4MCIgY3k9IjI0OCIgcj0iNCIgZmlsbD0iIzhlNDRhZCIvPgogIDxjaXJjbGUgY3g9IjIxMCIgY3k9IjI0MCIgcj0iNCIgZmlsbD0iIzhlNDRhZCIvPgogIDwhLS0gY2VudHJvaWQgNCAtLT4KICA8cG9seWdvbiBwb2ludHM9IjE4OCwyMzIgMTkyLDIyNCAxOTYsMjMyIDE5MiwyNDAiIGZpbGw9IiM2YzM0ODMiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41Ii8+CgogIDwhLS0gVm9yb25vaS1saWtlIGJvdW5kYXJpZXMgKGFwcHJveGltYXRlKSAtLT4KICA8bGluZSB4MT0iMTM4IiB5MT0iMTA1IiB4Mj0iMTM4IiB5Mj0iMjAwIiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIi8+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMTk1IiB4Mj0iMjcwIiB5Mj0iMTk1IiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIi8+CgogIDwhLS0gay1tZWFucyBsYWJlbCAtLT4KICA8dGV4dCB4PSIxNDUiIHk9IjI5MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+ay1tZWFucyBhc3NpZ25zPC90ZXh0PgogIDx0ZXh0IHg9IjE0NSIgeT0iMzA1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5ubGlzdCBjZW50cm9pZHM8L3RleHQ+CiAgPCEtLSBMZWdlbmQgLS0+CiAgPHBvbHlnb24gcG9pbnRzPSI1MCwzMzAgNTQsMzIyIDU4LDMzMCA1NCwzMzgiIGZpbGw9IiNjMDM5MmIiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjY1IiB5PSIzMzQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzMiPkNlbnRyb2lkPC90ZXh0PgogIDxjaXJjbGUgY3g9IjUyIiBjeT0iMzU1IiByPSI0IiBmaWxsPSIjMjk4MGI5Ii8+CiAgPHRleHQgeD0iNjUiIHk9IjM1OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+VHJhaW5pbmcgdmVjdG9yPC90ZXh0PgoKICA8IS0tIFBoYXNlIDI6IEJ1aWxkaW5nIC0tPgogIDxyZWN0IHg9IjMwMCIgeT0iNTAiIHdpZHRoPSIyNTAiIGhlaWdodD0iNDIwIiByeD0iOCIgZmlsbD0iI2U4ZjhlOCIgc3Ryb2tlPSIjOTBkNDkwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQyNSIgeT0iNzUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTMiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMkU3RDMyIj5QaGFzZSAyOiBCdWlsZGluZzwvdGV4dD4KICA8dGV4dCB4PSI0MjUiIHk9IjkyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5Bc3NpZ24gYWxsIHZlY3RvcnMg4oaSIGludmVydGVkIGxpc3RzPC90ZXh0PgoKICA8IS0tIENlbnRyb2lkcyBjb2x1bW4gLS0+CiAgPHRleHQgeD0iMzQwIiB5PSIxMjAiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjNTU1Ij5DZW50cm9pZHM8L3RleHQ+CiAgPHBvbHlnb24gcG9pbnRzPSIzNDAsMTM4IDM0NCwxMzAgMzQ4LDEzOCAzNDQsMTQ2IiBmaWxsPSIjYzAzOTJiIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8cG9seWdvbiBwb2ludHM9IjM0MCwxNjgiIGZpbGw9Im5vbmUiLz4KICA8cG9seWdvbiBwb2ludHM9IjM0MCwxNzUgMzQ0LDE2NyAzNDgsMTc1IDM0NCwxODMiIGZpbGw9IiMxNTY1QzAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxwb2x5Z29uIHBvaW50cz0iMzQwLDIxMiAzNDQsMjA0IDM0OCwyMTIgMzQ0LDIyMCIgZmlsbD0iIzFhN2E0MCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHBvbHlnb24gcG9pbnRzPSIzNDAsMjQ5IDM0NCwyNDEgMzQ4LDI0OSAzNDQsMjU3IiBmaWxsPSIjNmMzNDgzIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEiLz4KCiAgPCEtLSBJbnZlcnRlZCBsaXN0cyAtLT4KICA8dGV4dCB4PSI0MDAiIHk9IjEyMCIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM1NTUiPkludmVydGVkIGxpc3RzPC90ZXh0PgogIDwhLS0gTGlzdCAxIC0tPgogIDxyZWN0IHg9IjM5MCIgeT0iMTI2IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjI2IiByeD0iMyIgZmlsbD0iI2ZkZThlOCIgc3Ryb2tlPSIjYzAzOTJiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzOTgiIHk9IjE0MyIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+djMsIHYxNywgdjQyLCB2OTEsIHYxMDUg4oCmPC90ZXh0PgogIDwhLS0gTGlzdCAyIC0tPgogIDxyZWN0IHg9IjM5MCIgeT0iMTYyIiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjI2IiByeD0iMyIgZmlsbD0iI2U4ZWFmOCIgc3Ryb2tlPSIjMTU2NUMwIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzOTgiIHk9IjE3OSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+djIsIHYxMSwgdjU1LCB2NzgsIHYyMDMg4oCmPC90ZXh0PgogIDwhLS0gTGlzdCAzIC0tPgogIDxyZWN0IHg9IjM5MCIgeT0iMTk4IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjI2IiByeD0iMyIgZmlsbD0iI2U4ZjhlOCIgc3Ryb2tlPSIjMWE3YTQwIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzOTgiIHk9IjIxNSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+djEsIHY4LCB2MjksIHY2MCwgdjE0NCDigKY8L3RleHQ+CiAgPCEtLSBMaXN0IDQgLS0+CiAgPHJlY3QgeD0iMzkwIiB5PSIyMzQiIHdpZHRoPSIxNDAiIGhlaWdodD0iMjYiIHJ4PSIzIiBmaWxsPSIjZjBlOGY4IiBzdHJva2U9IiM2YzM0ODMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjM5OCIgeT0iMjUxIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj52NCwgdjE5LCB2NjYsIHY4NywgdjMxMiDigKY8L3RleHQ+CgogIDwhLS0gQXJyb3dzIGZyb20gY2VudHJvaWRzIHRvIGxpc3RzIC0tPgogIDxsaW5lIHgxPSIzNTAiIHkxPSIxMzgiIHgyPSIzODgiIHkyPSIxMzgiIHN0cm9rZT0iIzg4OCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxsaW5lIHgxPSIzNTAiIHkxPSIxNzUiIHgyPSIzODgiIHkyPSIxNzUiIHN0cm9rZT0iIzg4OCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxsaW5lIHgxPSIzNTAiIHkxPSIyMTIiIHgyPSIzODgiIHkyPSIyMTIiIHN0cm9rZT0iIzg4OCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxsaW5lIHgxPSIzNTAiIHkxPSIyNDkiIHgyPSIzODgiIHkyPSIyNDkiIHN0cm9rZT0iIzg4OCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8dGV4dCB4PSI0MjUiIHk9IjI5NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+RWFjaCB2ZWN0b3Igc3RvcmVkPC90ZXh0PgogIDx0ZXh0IHg9IjQyNSIgeT0iMzEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5pbiBpdHMgbmVhcmVzdCBjZW50cm9pZCdzIGxpc3Q8L3RleHQ+CiAgPHRleHQgeD0iNDI1IiB5PSIzNDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPm5saXN0ID0gNCAoZXhhbXBsZSk8L3RleHQ+CiAgPHRleHQgeD0iNDI1IiB5PSIzNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPkVhY2ggbGlzdCDiiYggTiAvIG5saXN0IHZlY3RvcnM8L3RleHQ+CgogIDwhLS0gUGhhc2UgMzogUXVlcnkgLS0+CiAgPHJlY3QgeD0iNTgwIiB5PSI1MCIgd2lkdGg9IjI2MCIgaGVpZ2h0PSI0MjAiIHJ4PSI4IiBmaWxsPSIjZmZmM2UwIiBzdHJva2U9IiNmMGMwNjAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNzEwIiB5PSI3NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMyIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNFNjUxMDAiPlBoYXNlIDM6IFF1ZXJ5IChucHJvYmU9Mik8L3RleHQ+CiAgPHRleHQgeD0iNzEwIiB5PSI5MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+U2VhcmNoIG9ubHkgdGhlIG5lYXJlc3QgbnByb2JlIGxpc3RzPC90ZXh0PgoKICA8IS0tIFF1ZXJ5IHZlY3RvciAtLT4KICA8Y2lyY2xlIGN4PSI2NDAiIGN5PSIxNDgiIHI9IjEwIiBmaWxsPSIjRTkxRTYzIiBzdHJva2U9IiM4ODBFNEYiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjY0MCIgeT0iMTUyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSJ3aGl0ZSI+UTwvdGV4dD4KICA8dGV4dCB4PSI2NTUiIHk9IjE0OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4MEU0RiIgZm9udC13ZWlnaHQ9ImJvbGQiPlF1ZXJ5IHZlY3RvcjwvdGV4dD4KCiAgPCEtLSBTdGVwIDE6IGZpbmQgbmVhcmVzdCBjZW50cm9pZHMgLS0+CiAgPHRleHQgeD0iNjAwIiB5PSIxODUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjRTY1MTAwIj5TdGVwIDE6IEZpbmQgbmVhcmVzdCBjZW50cm9pZHM8L3RleHQ+CiAgPHBvbHlnb24gcG9pbnRzPSI2MjAsMjA1IDYyNCwxOTcgNjI4LDIwNSA2MjQsMjEzIiBmaWxsPSIjYzAzOTJiIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2MzgiIHk9IjIwOSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+Q2VudHJvaWQgMSDigJQgZGlzdCAwLjEyIOKckzwvdGV4dD4KICA8cG9seWdvbiBwb2ludHM9IjYyMCwyMjUgNjI0LDIxNyA2MjgsMjI1IDYyNCwyMzMiIGZpbGw9IiMxNTY1QzAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjYzOCIgeT0iMjI5IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5DZW50cm9pZCAyIOKAlCBkaXN0IDAuMzEg4pyTPC90ZXh0PgogIDxwb2x5Z29uIHBvaW50cz0iNjIwLDI0NSA2MjQsMjM3IDYyOCwyNDUgNjI0LDI1MyIgZmlsbD0iIzFhN2E0MCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNjM4IiB5PSIyNDkiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNhYWEiPkNlbnRyb2lkIDMg4oCUIGRpc3QgMC44OTwvdGV4dD4KICA8cG9seWdvbiBwb2ludHM9IjYyMCwyNjUgNjI0LDI1NyA2MjgsMjY1IDYyNCwyNzMiIGZpbGw9IiM2YzM0ODMiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjYzOCIgeT0iMjY5IiBmb250LXNpemU9IjEwIiBmaWxsPSIjYWFhIj5DZW50cm9pZCA0IOKAlCBkaXN0IDEuMDI8L3RleHQ+CgogIDwhLS0gU3RlcCAyOiBzY2FuIHNlbGVjdGVkIGxpc3RzIC0tPgogIDx0ZXh0IHg9IjYwMCIgeT0iMzAwIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI0U2NTEwMCI+U3RlcCAyOiBTY2FuIHNlbGVjdGVkIGxpc3RzPC90ZXh0PgogIDxyZWN0IHg9IjYwMCIgeT0iMzEwIiB3aWR0aD0iMjI1IiBoZWlnaHQ9IjI0IiByeD0iMyIgZmlsbD0iI2ZkZThlOCIgc3Ryb2tlPSIjYzAzOTJiIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjYwOCIgeT0iMzI2IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5MaXN0IDE6IHNjYW4gdjMsIHYxNywgdjQyLCB2OTEg4oCmPC90ZXh0PgogIDxyZWN0IHg9IjYwMCIgeT0iMzQwIiB3aWR0aD0iMjI1IiBoZWlnaHQ9IjI0IiByeD0iMyIgZmlsbD0iI2U4ZWFmOCIgc3Ryb2tlPSIjMTU2NUMwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjYwOCIgeT0iMzU2IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5MaXN0IDI6IHNjYW4gdjIsIHYxMSwgdjU1LCB2Nzgg4oCmPC90ZXh0PgogIDxyZWN0IHg9IjYwMCIgeT0iMzcwIiB3aWR0aD0iMjI1IiBoZWlnaHQ9IjI0IiByeD0iMyIgZmlsbD0iI2YwZjBmMCIgc3Ryb2tlPSIjYmJiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2MDgiIHk9IjM4NiIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2FhYSI+TGlzdHMgMywgNDogc2tpcHBlZCAobnByb2JlPTIpPC90ZXh0PgoKICA8IS0tIFN0ZXAgMzogcmV0dXJuIHRvcC1LIC0tPgogIDx0ZXh0IHg9IjYwMCIgeT0iNDE1IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI0U2NTEwMCI+U3RlcCAzOiBSZXR1cm4gdG9wLUs8L3RleHQ+CiAgPHRleHQgeD0iNjAwIiB5PSI0MzAiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPkJlc3QgY2FuZGlkYXRlcyBmcm9tIHNjYW5uZWQgbGlzdHM8L3RleHQ+CiAgPHRleHQgeD0iNjAwIiB5PSI0NDUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPlRvdGFsIHNjYW5uZWQg4omIIDIgw5cgTi9ubGlzdCB2ZWN0b3JzPC90ZXh0PgogIDx0ZXh0IHg9IjYwMCIgeT0iNDYwIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNTU1Ij52cyBOIGZvciBleGFjdCBzZWFyY2g8L3RleHQ+CgogIDwhLS0gQXJyb3cgZnJvbSBwaGFzZSAxIHRvIHBoYXNlIDIgLS0+CiAgPGxpbmUgeDE9IjI3MCIgeTE9IjI1MCIgeDI9IjI5OCIgeTI9IjI1MCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDwhLS0gQXJyb3cgZnJvbSBwaGFzZSAyIHRvIHBoYXNlIDMgLS0+CiAgPGxpbmUgeDE9IjU1MCIgeTE9IjI1MCIgeDI9IjU3OCIgeTI9IjI1MCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIEFycm93IG1hcmtlciAtLT4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFyciIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzU1NSIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgo8L3N2Zz4K",
+          "alt": "IVF three-phase architecture: Phase 1 k-means training produces colored centroids; Phase 2 builds inverted lists per centroid; Phase 3 query finds nearest nprobe centroids and scans only those lists, skipping the rest."
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use It"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF is the right choice when"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The corpus is larger than HNSW can fit in RAM (> 50M vectors at typical hardware configurations)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Build time matters — IVF builds 5 to 10 times faster than HNSW for the same corpus size."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GPU batch throughput is needed — FAISS GPU IVF handles millions of queries per second in batch mode."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Memory is the binding constraint — IVF-PQ can reduce memory per vector from 3072 bytes (float32-768) to 32 bytes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The corpus is rebuilt frequently and you need fast indexing turnaround."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A re-ranking step is planned — IVF's first-pass candidates are a natural input for a cross-encoder reranker."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to choose alternatives"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Incremental inserts are required — HNSW supports live inserts without rebuild; IVF does not."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The corpus is < 1M vectors and fits in RAM — HNSW typically has better recall-latency than IVF at these sizes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exact recall is required — use IndexFlatIP/L2 (brute-force) rather than accepting boundary-effect recall loss."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Single-query latency is the primary metric — HNSW typically achieves lower single-query latency at the same recall level."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1 — Choose nlist"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A common heuristic: nlist = 4 × sqrt(N). For N = 1M, nlist ≈ 4,000. For N = 10M, nlist ≈ 12,600 (round up to 16,384 for a power-of-two). Too small and each list is too long to scan quickly; too large and the k-means training is slow and centroids become poorly populated."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2 — Train and build"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\nimport numpy as np\n\nd = 768          # embedding dimension\nnlist = 256      # number of Voronoi cells (clusters)\n                 # rule of thumb: sqrt(N) to 4*sqrt(N)\n\n# Quantiser: defines the clustering (centroid search)\nquantiser = faiss.IndexFlatIP(d)   # L2 or IP for centroid assignment\n\n# IVFFlat: stores full float32 vectors inside each inverted list\nindex = faiss.IndexIVFFlat(quantiser, d, nlist, faiss.METRIC_INNER_PRODUCT)\n\n# --- Training (required!) ---\n# IVF must see training vectors to learn centroid positions via k-means.\n# Recommended: at least 30 * nlist training vectors.\nN_train = 500_000\ntrain_vecs = np.random.randn(N_train, d).astype(np.float32)\nfaiss.normalize_L2(train_vecs)\nindex.train(train_vecs)\nprint(f'Trained: {index.is_trained}')  # True\n\n# --- Add vectors ---\nN = 1_000_000\nvecs = np.random.randn(N, d).astype(np.float32)\nfaiss.normalize_L2(vecs)\nindex.add(vecs)\nprint(f'Index size: {index.ntotal:,}')  # 1,000,000\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3 — Set nprobe and query"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# nprobe: how many inverted lists to scan per query\n# Higher nprobe -> higher recall, higher latency\nindex.nprobe = 32   # scan 32 of 256 lists (12.5% of the index)\n\nquery = np.random.randn(1, d).astype(np.float32)\nfaiss.normalize_L2(query)\n\nk = 10\ndistances, indices = index.search(query, k)\nprint('Top-10 IDs:', indices[0])\nprint('Scores:', distances[0])\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 4 — Persist"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\n\n# Save trained + populated index\nfaiss.write_index(index, 'ivf_index.faiss')\n\n# Reload (centroids and all lists are persisted)\nloaded = faiss.read_index('ivf_index.faiss')\nloaded.nprobe = 32\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF-PQ for large-scale low-memory indexing"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\nimport numpy as np\n\nd = 768\nnlist = 1024       # more cells for a larger corpus\nm = 32             # number of PQ sub-quantisers (must divide d evenly)\nnbits = 8          # bits per sub-quantiser: 2^8 = 256 centroids each\n\n# IVF-PQ: inverted lists store PQ-compressed codes (not full float32)\n# Memory per vector: m * nbits / 8 bytes = 32 bytes (vs 3072 for float32-768)\nquantiser = faiss.IndexFlatIP(d)\nindex_pq = faiss.IndexIVFPQ(quantiser, d, nlist, m, nbits)\n\n# Training requires more data for PQ (both k-means AND PQ codebooks)\nN_train = 200_000\ntrain_vecs = np.random.randn(N_train, d).astype(np.float32)\nfaiss.normalize_L2(train_vecs)\nindex_pq.train(train_vecs)\n\nN = 10_000_000  # 10M vectors fits in ~320 MB (vs ~30 GB for IVFFlat)\nvecs = np.random.randn(N, d).astype(np.float32)\nfaiss.normalize_L2(vecs)\nindex_pq.add(vecs)\n\nindex_pq.nprobe = 64\nquery = np.random.randn(1, d).astype(np.float32)\nfaiss.normalize_L2(query)\nD, I = index_pq.search(query, 10)\nprint('IVF-PQ top-10:', I[0])\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall vs nprobe benchmark"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\nimport numpy as np\n\ndef recall_at_k(D_approx, I_approx, I_exact, k=10):\n    hits = sum(\n        len(set(I_approx[i, :k]) & set(I_exact[i, :k]))\n        for i in range(len(I_approx))\n    )\n    return hits / (len(I_approx) * k)\n\nnp.random.seed(0)\nd, N, nlist = 128, 100_000, 64\nvecs = np.random.randn(N, d).astype(np.float32)\nfaiss.normalize_L2(vecs)\nqueries = np.random.randn(500, d).astype(np.float32)\nfaiss.normalize_L2(queries)\n\n# Ground truth\nflat = faiss.IndexFlatIP(d)\nflat.add(vecs)\n_, I_gt = flat.search(queries, 10)\n\n# Build IVFFlat\nq = faiss.IndexFlatIP(d)\nivf = faiss.IndexIVFFlat(q, d, nlist, faiss.METRIC_INNER_PRODUCT)\nivf.train(vecs)\nivf.add(vecs)\n\nfor nprobe in [1, 4, 8, 16, 32, nlist]:\n    ivf.nprobe = nprobe\n    _, I = ivf.search(queries, 10)\n    r = recall_at_k(None, I, I_gt)\n    pct = 100 * nprobe / nlist\n    print(f'nprobe={nprobe:3d} ({pct:5.1f}%)  recall@10={r:.4f}')\n\n# nprobe=  1 ( 1.6%)  recall@10=0.4820\n# nprobe=  4 ( 6.3%)  recall@10=0.7941\n# nprobe=  8 (12.5%)  recall@10=0.8974\n# nprobe= 16 (25.0%)  recall@10=0.9521\n# nprobe= 32 (50.0%)  recall@10=0.9821\n# nprobe= 64 (100%)   recall@10=1.0000  (exact)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "An e-commerce platform indexes 50 million product embeddings (768-dim from a fine-tuned BAAI/bge-large model). The product catalog is refreshed nightly with ~500K new and updated products. The team evaluated both HNSW and IVF-PQ:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HNSW (M=32): requires ~150 GB RAM for 50M vectors. Build time 3.5 hours. Single-query p50 latency 2.1 ms at recall@10 = 0.96."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "IVF-PQ (nlist=4096, m=32, nbits=8): requires ~1.6 GB RAM for 50M vectors. Build time 18 minutes. Single-query p50 latency 4.8 ms at recall@10 = 0.91."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "They chose IVF-PQ because the nightly rebuild (18 minutes vs 3.5 hours) was non-negotiable, the 150 GB RAM requirement was cost-prohibitive, and the 0.91 recall at 4.8 ms was sufficient for the product search use case (downstream re-ranking with a cross-encoder improved final MRR by 12%)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Production IVF-PQ index for 50M document corpus\nimport faiss\nimport numpy as np\nfrom pathlib import Path\n\nINDEX_PATH = 'ivfpq_50m.faiss'\n\ndef build_or_load(vecs_path, d=768, nlist=4096, m=32, nbits=8):\n    if Path(INDEX_PATH).exists():\n        index = faiss.read_index(INDEX_PATH)\n        print(f'Loaded index: {index.ntotal:,} vectors')\n        return index\n\n    quantiser = faiss.IndexFlatIP(d)\n    index = faiss.IndexIVFPQ(quantiser, d, nlist, m, nbits)\n\n    # Load and train on a 10% sample\n    all_vecs = np.load(vecs_path, mmap_mode='r').astype(np.float32)\n    N = len(all_vecs)\n    sample_size = max(50_000, min(500_000, N // 10))\n    sample = all_vecs[np.random.choice(N, sample_size, replace=False)].copy()\n    faiss.normalize_L2(sample)\n    index.train(sample)\n\n    # Add in batches to manage RAM\n    batch = 100_000\n    for start in range(0, N, batch):\n        chunk = all_vecs[start:start + batch].copy()\n        faiss.normalize_L2(chunk)\n        index.add_with_ids(chunk, np.arange(start, start + len(chunk)))\n        if start % 1_000_000 == 0:\n            print(f'  Added {start:,}/{N:,}')\n\n    faiss.write_index(index, INDEX_PATH)\n    return index\n\nindex = build_or_load('vecs_50m.npy')\nindex.nprobe = 128   # scan 128/4096 ~ 3% of lists; ~0.8ms p50 at recall@10=0.95\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Training on too few vectors"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "k-means requires enough training data to place all nlist centroids in well-populated regions. With too few training vectors, some centroids end up in empty regions, reducing effective nlist and causing recall collapse for queries near those regions."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Wrong -- calling train() with too few vectors\nivf.train(vecs[:100])   # 100 vectors for 256 clusters is far too few\n# k-means will not converge; centroids are poorly placed\n# Result: drastically reduced recall even at high nprobe\n\n# Correct -- at least 30 * nlist training vectors, ideally 100 * nlist\nmin_train = 30 * nlist\nassert len(train_vecs) >= min_train, f'Need at least {min_train} training vectors'\nivf.train(train_vecs)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Forgetting to set nprobe after loading"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FAISS resets nprobe to 1 when loading an index from disk. With nprobe=1, only one inverted list is scanned — recall is typically below 50% for any realistic nlist. Always set nprobe explicitly after loading."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Wrong -- using default nprobe=1 after loading from disk\nindex = faiss.read_index('ivf_index.faiss')\n# nprobe is 1 by default -- extremely low recall in most cases\n\n# Correct -- set nprobe before every batch of queries\nindex.nprobe = 32   # tune for your recall/latency target\nD, I = index.search(queries, k)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing nlist without reference to corpus size"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Setting nlist = 100 for a 50M-vector corpus means each inverted list contains ~500K vectors — nearly as expensive to scan as exact search. Setting nlist = 500K means k-means training will never converge with a typical training set. Follow the sqrt(N) heuristic as a starting point and validate recall on a held-out eval set."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using IVF-PQ without a re-ranking pass"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF-PQ introduces two sources of approximation: cell-boundary recall loss (same as IVFFlat) and quantisation distortion. Without a re-ranking pass using exact distances on the top candidates, the final ranking quality can be noticeably worse than IVFFlat. Always re-rank the top candidates from IVF-PQ with exact distance computation when accuracy matters."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Re-rank top-100 IVF-PQ candidates with exact inner product\nindex_pq.nprobe = 64\n_, candidates = index_pq.search(query, 100)   # get 100 approximate candidates\n\n# Retrieve exact vectors for candidates (from a separate store or corpus array)\ncandidate_vecs = corpus_vecs[candidates[0]]    # (100, d)\nexact_scores = (query @ candidate_vecs.T)[0]  # exact dot products\ntop10 = candidates[0][np.argsort(exact_scores)[::-1][:10]]\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use nlist = 4 * sqrt(N) as a starting estimate; validate on a held-out eval set and tune to the nearest power of 2."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Train on at least 30 * nlist vectors, ideally 100 * nlist; more training data produces tighter, more uniform clusters."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Normalise vectors before training and adding (same as HNSW) when using METRIC_INNER_PRODUCT for cosine similarity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set nprobe to scan 5 to 15 percent of cells as a starting point; benchmark recall@10 and p50 latency on the actual query distribution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For IVF-PQ, choose m to divide d evenly (m=32 for d=768 gives 24-dim sub-vectors); nbits=8 (256 sub-centroids) is the standard default."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Combine IVF-PQ with a re-ranking pass on top-K candidates using exact distances; this recovers most of the PQ recall loss at low additional cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For batch offline queries (search log replay, recommendation pre-computation), use GPU IVF — FAISS-GPU can process millions of queries per second."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF query throughput and latency are predictable from the parameters:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "N (vectors)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nlist"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nprobe"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Index RAM (IVF-PQ)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "p50 latency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1,024"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32 (3.1%)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.20 ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.94"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "10M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4,096"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64 (1.6%)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "320 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.45 ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.93"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "50M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8,192"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "128 (1.6%)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.6 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.90 ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.92"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "100M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16,384"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "256 (1.6%)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.2 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.8 ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.91"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "65,536"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1,024 (1.6%)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "18 ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.90"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "(IVF-PQ, m=32, nbits=8, d=768. p50 latency on a single CPU core. Scale linearly with cores for throughput.)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Batch queries benefit dramatically from GPU acceleration. FAISS-GPU IVF at nprobe=64 over a 100M-vector IVF-PQ index achieves ~1M queries per second on an A100, versus ~5K queries per second on a 32-core CPU."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Comparing IVFFlat vs HNSW at similar recall levels\nimport faiss, numpy as np, time\n\nd, N, Q = 768, 1_000_000, 1000\nvecs = np.random.randn(N, d).astype(np.float32);   faiss.normalize_L2(vecs)\nqs   = np.random.randn(Q, d).astype(np.float32);   faiss.normalize_L2(qs)\n\n# HNSW\nhnsw = faiss.IndexHNSWFlat(d, 32, faiss.METRIC_INNER_PRODUCT)\nhnsw.hnsw.efConstruction = 200\nt0 = time.time(); hnsw.add(vecs); print(f'HNSW build: {time.time()-t0:.1f}s')\nhnsw.hnsw.efSearch = 64\nt0 = time.time(); hnsw.search(qs, 10); t_hnsw = (time.time()-t0)/Q*1000\n\n# IVFFlat nlist=1024, nprobe=32\nq2 = faiss.IndexFlatIP(d)\nivf = faiss.IndexIVFFlat(q2, d, 1024, faiss.METRIC_INNER_PRODUCT)\nt0 = time.time(); ivf.train(vecs); ivf.add(vecs); print(f'IVF build: {time.time()-t0:.1f}s')\nivf.nprobe = 32\nt0 = time.time(); ivf.search(qs, 10); t_ivf = (time.time()-t0)/Q*1000\n\nprint(f'HNSW p50 latency: {t_hnsw:.2f} ms/query')\nprint(f'IVF  p50 latency: {t_ivf:.2f} ms/query')\n# Typical: HNSW ~0.25ms, IVF ~0.40ms at similar recall\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FAISS (faiss-cpu / faiss-gpu) — reference implementation of IndexIVFFlat, IndexIVFPQ, IndexIVFSQ, and GPU variants."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Qdrant — supports IVF-based indexes via its quantization configuration in addition to HNSW."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Milvus — dedicated vector database with native IVF-Flat, IVF-PQ, and IVF-SQ index types; designed for billion-scale corpora."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ScaNN (Google) — alternative ANN library with tree-AH (anisotropic hashing) indexes similar in spirit to IVF-PQ; strong benchmark performance on structured queries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pinecone — managed vector database that uses IVF-based indexing internally for pod-type indexes at large scale."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Weaviate — supports flat (exact) and HNSW by default; IVF-style compression available through its PQ compression feature."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Method"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Build time"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single-query latency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Incremental insert"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Flat (exact)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4dN bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.00"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High at scale"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slow (O(N log N))"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4dN + graph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.97–0.99"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Lowest"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVFFlat"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast (O(N))"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4dN"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.93–0.98"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No (rebuild)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF-PQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast (O(N))"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m*N bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.88–0.95"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No (rebuild)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF-SQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast (O(N))"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~N bytes (int8)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.91–0.96"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No (rebuild)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LSH"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Very fast"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hash tables"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.70–0.85"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Very low"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Reliability"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Training data leakage — if the training sample is drawn from user-submitted vectors, it may be possible to infer properties of the training distribution from centroid positions. For sensitive corpora, train on a representative non-user subset or add noise to centroids after training."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Index staleness — since IVF does not support incremental inserts, a growing corpus is typically served from a stale index plus a \"delta\" flat index. The flat index bypasses the IVF approximation, but if it grows too large it defeats the purpose of the ANN index. Monitor delta index size and schedule rebuilds before the flat index exceeds ~5% of total corpus size."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Recall degradation over time — as the corpus distribution shifts (e.g. new product categories, new languages), the original centroids become poorly aligned with the current data distribution. Periodically retrain and rebuild the index; compare recall@10 on a stable eval set before and after."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Resource exhaustion during rebuild — rebuilding a 50M-vector IVF-PQ index requires holding both the old and new indexes in RAM simultaneously during the swap. Plan for 2× peak RAM or use a rolling shard rebuild strategy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "nprobe injection — as with HNSW's efSearch, if nprobe is a client-supplied parameter, cap it server-side to prevent deliberate latency amplification."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of IVF as a library with a card catalog. The library has one million books. Finding a book on a specific topic by reading every book's first page would take days — that is exact search. IVF's solution is to first sort all books into 256 genre sections (the Voronoi cells, defined by the k-means centroids). When looking for a book about cardiology, a librarian checks which sections are most likely to contain it (the nprobe centroid lookup), then reads only the books in those sections — maybe 5 to 10 percent of the total."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The genre boundaries are imperfect: a book about sports medicine might be in the sports section rather than medicine. This is the boundary effect. Reading a second nearby section (increasing nprobe) reduces this risk. Reading all sections (nprobe = nlist) guarantees finding the closest book — that is exact search as a special case of IVF."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF-PQ adds compression: instead of storing each book's full content, the library stores only a short abstract (the PQ code). Searching is faster because abstracts are smaller to compare, but the genre match is slightly less accurate because the abstract loses some detail."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "IVF partitions the vector space into nlist Voronoi cells using k-means; queries scan only the nprobe nearest cells, reducing cost to O(N * nprobe / nlist) versus O(N) for exact search."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Training is mandatory and must use at least 30 * nlist representative vectors; inadequate training is the most common source of poor IVF recall."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The nprobe parameter controls the recall-latency trade-off at query time without rebuilding the index; start at 5 percent of nlist and tune from there."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "IVF-PQ achieves 30 to 100 times RAM reduction versus exact float32 storage, enabling billion-scale vector search on commodity hardware."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "IVF does not support incremental inserts; production pipelines typically maintain a small exact \"delta\" index for recent vectors and merge periodically."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always set nprobe explicitly after loading an index from disk — FAISS defaults to nprobe=1, which gives very low recall."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "IVF-PQ introduces quantisation distortion on top of cell-boundary recall loss; add a re-ranking pass with exact distances on the top-K candidates to recover accuracy."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

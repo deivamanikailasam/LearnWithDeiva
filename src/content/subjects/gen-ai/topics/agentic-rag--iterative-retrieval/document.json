@@ -1,0 +1,1228 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why One Retrieval Pass Is Not Enough"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard RAG retrieves once before generating. This works when the question maps cleanly to a single chunk of the corpus. It fails for three classes of questions:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Multi-hop:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " 'Who manages the team that owns the product mentioned in the Q3 report?' \u2014 requires chaining from report -> product -> team -> manager."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Clarification-seeking:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " The first retrieval reveals that the question is ambiguous or that more context exists elsewhere."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Narrow initial query:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " The first query returns irrelevant results; a refined query would succeed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Iterative retrieval solves these by letting the LLM retrieve, read, decide, and retrieve again \u2014 using each observation to inform the next query."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Iterative retrieval is the difference between searching and researching. One pass finds what you asked for; multiple passes find what you need."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "IRCoT \u2014 Interleaved Retrieval with Chain-of-Thought"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IRCoT (Trivedi et al., 2022) interleaves retrieval with chain-of-thought reasoning. After each reasoning sentence, the LLM checks whether its current knowledge is sufficient to continue. If not, it retrieves before generating the next sentence."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice this means the LLM generates one thought sentence, retrieves based on that sentence, adds the observation to context, generates the next thought, retrieves again if needed, and so on until it reaches a final answer."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install langchain langchain-openai\nfrom langchain_openai import ChatOpenAI\nfrom langchain_community.vectorstores import FAISS\nfrom langchain_openai import OpenAIEmbeddings\n\nembedder = OpenAIEmbeddings(model=\"text-embedding-3-small\")\nstore = FAISS.load_local(\"./index\", embedder, allow_dangerous_deserialization=True)\nllm = ChatOpenAI(model=\"gpt-4o-mini\", temperature=0)\n\ndef retrieve(query: str, k: int = 3) -> str:\n    docs = store.similarity_search(query, k=k)\n    return \"\\n\".join(d.page_content for d in docs)\n\ndef ircot(question: str, max_hops: int = 4) -> str:\n    context_so_far = []\n    reasoning_so_far = []\n\n    for hop in range(max_hops):\n        # Build prompt from accumulated context and reasoning\n        context_block = \"\\n\\n\".join(context_so_far) if context_so_far else \"(no context yet)\"\n        reasoning_block = \"\\n\".join(reasoning_so_far) if reasoning_so_far else \"(start)\"\n\n        prompt = (\n            f\"Question: {question}\\n\\n\"\n            f\"Retrieved context:\\n{context_block}\\n\\n\"\n            f\"Reasoning so far:\\n{reasoning_block}\\n\\n\"\n            \"Continue the reasoning. Write one sentence.\"\n            \" If you have enough information to answer the question, write the final answer.\"\n            \" If you need more information, end the sentence with [RETRIEVE: your search query].\"\n        )\n        thought = llm.invoke(prompt).content.strip()\n        reasoning_so_far.append(thought)\n\n        if \"[RETRIEVE:\" in thought:\n            query = thought.split(\"[RETRIEVE:\")[1].split(\"]\")[0].strip()\n            context_so_far.append(f\"[Hop {hop+1}] {retrieve(query)}\")\n        else:\n            # No retrieve signal \u2014 this is the final answer\n            return thought\n\n    return \" \".join(reasoning_so_far)\n\nanswer = ircot(\"Which subsidiary generated the revenue growth mentioned in the CEO letter?\")\nprint(answer)"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FLARE \u2014 Forward-Looking Active Retrieval"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FLARE (Jiang et al., 2023) takes a different approach. The LLM generates a tentative continuation of its answer. If any token in the continuation has low probability (model uncertainty), FLARE treats the tentative text as a retrieval query, retrieves, and then regenerates that part of the answer with the new context."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key insight: low generation probability signals that the model is guessing \u2014 exactly the cases where retrieval helps most."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Simplified FLARE implementation\nfrom langchain_openai import ChatOpenAI\nimport re\n\nllm = ChatOpenAI(model=\"gpt-4o-mini\", temperature=0, logprobs=True, top_logprobs=5)\n\nMIN_PROB_THRESHOLD = 0.5  # tokens below this probability trigger retrieval\n\ndef low_confidence_span(response_with_logprobs) -> str | None:\n    \"\"\"Return the first span of text where a token falls below threshold.\"\"\"\n    content_parts = response_with_logprobs.response_metadata.get(\"logprobs\", {}).get(\"content\", [])\n    uncertain_text = []\n    for token_data in content_parts:\n        prob = 2 ** token_data[\"logprob\"]  # convert log prob\n        token = token_data[\"token\"]\n        if prob < MIN_PROB_THRESHOLD:\n            uncertain_text.append(token)\n        elif uncertain_text:\n            # Uncertainty window ended; return what we collected\n            return \"\".join(uncertain_text).strip()\n    return None\n\ndef flare_generate(question: str, max_iterations: int = 4) -> str:\n    answer_so_far = \"\"\n    context = []\n\n    for _ in range(max_iterations):\n        prompt = (\n            (\"\\n\\n\".join(context) + \"\\n\\n\" if context else \"\")\n            + f\"Question: {question}\\n\\nAnswer: {answer_so_far}\"\n        )\n        response = llm.invoke(prompt)\n        tentative = response.content\n\n        uncertain_span = low_confidence_span(response)\n        if uncertain_span is None:\n            return answer_so_far + tentative\n\n        # Use uncertain span as retrieval query\n        retrieved = retrieve(uncertain_span)\n        context.append(f\"[Retrieved for: {uncertain_span}]\\n{retrieved}\")\n        # answer_so_far stays the same; regenerate from current position\n\n    return answer_so_far"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Self-Ask with Retrieval"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Self-Ask (Press et al., 2022) trains the LLM to decompose a complex question into sub-questions, answer each with retrieval, and compose the final answer. Unlike IRCoT, the decomposition happens explicitly as a planning step."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def self_ask_rag(question: str) -> str:\n    # Step 1: Decompose into sub-questions\n    decompose_prompt = (\n        f\"Question: {question}\\n\\n\"\n        \"Decompose this into 2-4 simpler sub-questions that, when answered, \"\n        \"let you answer the original question. Output as a numbered list.\"\n    )\n    decomposition = llm.invoke(decompose_prompt).content.strip()\n    sub_questions = [\n        line.split(\".\", 1)[1].strip()\n        for line in decomposition.split(\"\\n\")\n        if line and line[0].isdigit()\n    ]\n\n    # Step 2: Answer each sub-question with retrieval\n    sub_answers = []\n    for sq in sub_questions:\n        context = retrieve(sq, k=3)\n        answer_prompt = (\n            f\"Context:\\n{context}\\n\\n\"\n            f\"Sub-question: {sq}\\n\\n\"\n            \"Answer concisely in 1-2 sentences.\"\n        )\n        sub_answer = llm.invoke(answer_prompt).content.strip()\n        sub_answers.append(f\"Q: {sq}\\nA: {sub_answer}\")\n\n    # Step 3: Synthesise final answer\n    synthesis_prompt = (\n        f\"Original question: {question}\\n\\n\"\n        \"Sub-question answers:\\n\" + \"\\n\\n\".join(sub_answers) + \"\\n\\n\"\n        \"Synthesise a complete answer to the original question.\"\n    )\n    return llm.invoke(synthesis_prompt).content.strip()\n\nanswer = self_ask_rag(\n    \"How did the segment that contributed most to margin expansion\"\n    \" perform relative to analyst expectations in Q3?\"\n)\nprint(answer)"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stopping Criteria for Iterative Loops"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A retrieval loop needs a reliable exit condition. Without one, the LLM may keep retrieving even when it has sufficient context, wasting tokens and time."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Stopping criterion",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "When it fires",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Risk",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No [RETRIEVE] signal in LLM output"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM decides it has enough"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM may hallucinate confidence"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Max iterations reached"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hard cap (e.g. 6)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "May stop before finding the answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Confidence score > threshold"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Classifier rates answer quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Requires a trained confidence model"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Answer unchanged after new retrieval"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Retrieval adds no new info"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reliable but adds one extra call"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most robust approach combines a hard iteration cap with a simple self-consistency check: if the answer generated from retrieval round N is semantically identical to round N-1, stop \u2014 additional retrieval converged."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def semantic_similarity(a: str, b: str) -> float:\n    va = embedder.embed_query(a)\n    vb = embedder.embed_query(b)\n    # dot product of normalised vectors = cosine similarity\n    import numpy as np\n    va, vb = np.array(va), np.array(vb)\n    return float(np.dot(va / np.linalg.norm(va), vb / np.linalg.norm(vb)))\n\ndef iterative_rag_with_convergence(\n    question: str,\n    max_hops: int = 5,\n    convergence_threshold: float = 0.97,\n) -> str:\n    context = []\n    prev_answer = \"\"\n\n    for hop in range(max_hops):\n        query = refine_query(question, prev_answer, context)  # see below\n        context.append(retrieve(query))\n        answer = generate_answer(question, context)\n\n        if prev_answer and semantic_similarity(answer, prev_answer) > convergence_threshold:\n            return answer  # converged\n\n        prev_answer = answer\n\n    return prev_answer  # return best answer at max_hops\n\ndef refine_query(question: str, prev_answer: str, context: list[str]) -> str:\n    if not prev_answer:\n        return question\n    prompt = (\n        f\"Original question: {question}\\n\\n\"\n        f\"Current partial answer: {prev_answer}\\n\\n\"\n        \"What specific information is still missing? \"\n        \"Write a targeted search query to find it. \"\n        \"Return only the query, nothing else.\"\n    )\n    return llm.invoke(prompt).content.strip()"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison of Iterative Strategies"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Strategy",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Who triggers retrieval?",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Query source",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IRCoT"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM (explicit signal)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Current reasoning sentence"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Multi-hop with traceable chain"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FLARE"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Probability threshold"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low-confidence span"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Long-form generation with uncertainty"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Self-Ask"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM (decomposition)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pre-planned sub-questions"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Structured, decomposable questions"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ReAct agent"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM (tool call)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Any thought the LLM has"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Open-ended research; most flexible"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-Hop Retrieval with an Explicit Hop Graph"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For structured multi-hop questions \u2014 where hop 2's query depends on hop 1's answer \u2014 you can make the graph explicit rather than leaving it implicit in the LLM's reasoning. This produces more predictable, debuggable behaviour."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from dataclasses import dataclass\nfrom typing import Callable\n\n@dataclass\nclass Hop:\n    query_fn: Callable[[dict], str]   # builds query from accumulated answers\n    answer_key: str                   # where to store this hop's answer\n\ndef run_hop_graph(question: str, hops: list[Hop]) -> dict:\n    answers = {\"question\": question}\n    for hop in hops:\n        query = hop.query_fn(answers)\n        context = retrieve(query, k=3)\n        answer_prompt = (\n            f\"Context:\\n{context}\\n\\n\"\n            f\"Question: {query}\\n\\nAnswer in one sentence.\"\n        )\n        answers[hop.answer_key] = llm.invoke(answer_prompt).content.strip()\n    return answers\n\n# Example: \"Which product line manager drove the most revenue growth in Q3?\"\nhops = [\n    Hop(\n        query_fn=lambda a: f\"Q3 2024 revenue growth by product line\",\n        answer_key=\"top_product_line\",\n    ),\n    Hop(\n        query_fn=lambda a: f\"product manager of {a['top_product_line']} product line\",\n        answer_key=\"manager_name\",\n    ),\n    Hop(\n        query_fn=lambda a: f\"{a['manager_name']} Q3 revenue contribution performance\",\n        answer_key=\"final_answer\",\n    ),\n]\nresult = run_hop_graph(question, hops)\nprint(result[\"final_answer\"])"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Context Window Management Across Hops"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each retrieval hop adds context. After 4-5 hops, the accumulated context may exceed the LLM's context window, or degrade answer quality through irrelevant early retrievals crowding out relevant later ones."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Strategies for Growing Context"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rolling window:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Keep only the last N hops in context. Drop older retrievals as new ones come in."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Summarise-then-retrieve:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " After each hop, ask the LLM to summarise the current context in 3 sentences. Use that summary as the working context, not the raw retrieved text."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Relevance filtering:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Before passing retrieved chunks to the next hop, re-score each chunk against the original question. Drop chunks below a similarity threshold of 0.3."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def summarise_context(question: str, context_chunks: list[str]) -> str:\n    context = \"\\n\\n\".join(context_chunks)\n    prompt = (\n        f\"Original question: {question}\\n\\n\"\n        f\"Retrieved context across {len(context_chunks)} retrieval hops:\\n{context}\\n\\n\"\n        \"Summarise what we know so far that is relevant to the original question.\"\n        \" Maximum 3 sentences. Include specific numbers or names found.\"\n    )\n    return llm.invoke(prompt).content.strip()\n\ndef filter_by_relevance(\n    question: str,\n    chunks: list[str],\n    threshold: float = 0.3,\n) -> list[str]:\n    q_vec = embedder.embed_query(question)\n    import numpy as np\n    q_arr = np.array(q_vec) / np.linalg.norm(q_vec)\n    filtered = []\n    for chunk in chunks:\n        c_vec = np.array(embedder.embed_query(chunk))\n        c_arr = c_vec / np.linalg.norm(c_vec)\n        if float(q_arr @ c_arr) >= threshold:\n            filtered.append(chunk)\n    return filtered or chunks[:2]  # never return empty"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Retrieval with Memory: Tracking What Was Already Retrieved"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Naive iterative retrieval repeats the same queries, wasting tokens and returning the same chunks again. Tracking retrieved chunk IDs prevents redundant retrieval and forces the LLM to explore new areas."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def iterative_rag_no_repeats(\n    question: str,\n    max_hops: int = 5,\n) -> str:\n    retrieved_ids: set[str] = set()\n    context_chunks: list[str] = []\n    answer = \"\"\n\n    for hop in range(max_hops):\n        # Generate search query based on gaps in current knowledge\n        search_query = refine_query(question, answer, context_chunks)\n        docs_and_scores = store.similarity_search_with_relevance_scores(search_query, k=5)\n\n        # Filter out already-seen chunks\n        new_chunks = []\n        for doc, score in docs_and_scores:\n            doc_id = doc.metadata.get(\"chunk_id\") or hash(doc.page_content)\n            if str(doc_id) not in retrieved_ids and score > 0.3:\n                retrieved_ids.add(str(doc_id))\n                new_chunks.append(doc.page_content)\n\n        if not new_chunks:\n            break  # no new information available\n\n        context_chunks.extend(new_chunks)\n\n        # Summarise if context grows too large\n        if len(\" \".join(context_chunks)) > 4000:\n            context_chunks = [summarise_context(question, context_chunks)]\n\n        answer = generate_answer(question, context_chunks)\n\n    return answer\n\ndef generate_answer(question: str, context_chunks: list[str]) -> str:\n    context = \"\\n\\n\".join(context_chunks)\n    return llm.invoke(\n        f\"Context:\\n{context}\\n\\nQuestion: {question}\\n\\nAnswer:\"\n    ).content.strip()"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Evaluating Iterative Retrieval Quality"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Measuring iterative retrieval is harder than single-pass RAG because you need to evaluate both the retrieval chain and the final answer."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Hop Coverage"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For multi-hop benchmarks (HotpotQA, 2WikiMultiHopQA), each question has a set of supporting documents. Hop coverage measures how many of the ground-truth supporting documents were retrieved across all hops."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def hop_coverage(\n    retrieved_per_hop: list[list[str]],  # list of doc IDs per hop\n    ground_truth_docs: list[str],         # required doc IDs\n) -> float:\n    all_retrieved = {doc_id for hop in retrieved_per_hop for doc_id in hop}\n    found = all_retrieved.intersection(ground_truth_docs)\n    return len(found) / len(ground_truth_docs) if ground_truth_docs else 1.0"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Retrieval Efficiency"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Efficiency measures how many retrieval hops were needed. Lower is better if the final answer quality is equivalent. An agent that finds the answer in 2 hops is better than one that needs 5."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from statistics import mean\n\ndef retrieval_efficiency(hop_counts: list[int], correct_flags: list[bool]) -> float:\n    \"\"\"Mean hops for questions answered correctly. Lower is better.\"\"\"\n    correct_hops = [h for h, ok in zip(hop_counts, correct_flags) if ok]\n    return mean(correct_hops) if correct_hops else float(\"inf\")"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Full Benchmark Example"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Run on 100 multi-hop questions and compute all metrics\nresults = []\nfor q, gt_docs, gt_answer in test_set[:100]:\n    hops_context = []\n    hop_doc_ids = []\n    n_hops = 0\n\n    for hop in range(5):\n        query = refine_query(q, \"\" if not hops_context else generate_answer(q, hops_context), hops_context)\n        docs = store.similarity_search_with_score(query, k=3)\n        hop_doc_ids.append([d.metadata.get(\"chunk_id\") for d, _ in docs])\n        hops_context.extend([d.page_content for d, _ in docs])\n        n_hops += 1\n        answer = generate_answer(q, hops_context)\n        if semantic_similarity(answer, gt_answer) > 0.85:\n            break\n\n    final_answer = generate_answer(q, hops_context)\n    correct = semantic_similarity(final_answer, gt_answer) > 0.85\n    coverage = hop_coverage(hop_doc_ids, gt_docs)\n    results.append({\"hops\": n_hops, \"correct\": correct, \"coverage\": coverage})\n\nprint(f\"Accuracy: {mean(r['correct'] for r in results):.1%}\")\nprint(f\"Mean hops: {mean(r['hops'] for r in results):.1f}\")\nprint(f\"Mean hop coverage: {mean(r['coverage'] for r in results):.1%}\")"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Rule of thumb:",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " Use ReAct (tool-calling agent) for most agentic RAG applications. Use IRCoT when you need interpretable reasoning steps. Use Self-Ask when the question can be decomposed before any retrieval. Reserve FLARE for long-form generation where low-confidence spans are the natural trigger for retrieval."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

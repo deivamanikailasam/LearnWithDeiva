@@ -1,0 +1,3569 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall vs Latency in Approximate Nearest-Neighbour Search"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every approximate nearest-neighbour (ANN) index makes a trade-off: you can get exact results but scan the whole corpus, or you can skip most of it and accept that a few true neighbours escape the search.  The two numbers that quantify this trade-off are "
+          },
+          {
+            "type": "text",
+            "text": "recall@K",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " -- how many of the true top-K neighbours the index actually returns -- and "
+          },
+          {
+            "type": "text",
+            "text": "query latency",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " -- how long a single lookup takes.  Understanding, measuring, and consciously choosing an operating point on the recall-latency curve is one of the most practically important skills in production vector search."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This sub-subtopic covers the mathematics of both quantities, the mechanisms by which each ANN algorithm moves along its own Pareto frontier, how to benchmark and visualise the trade-off, and how to pick an operating point that satisfies real service-level agreements."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall@K -- Definition and Formula"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall@K is measured on a held-out evaluation set of "
+          },
+          {
+            "type": "text",
+            "text": "Q",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " queries for each of which the true nearest neighbours are known (usually found by exact brute-force search):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Recall@K} = \\frac{1}{Q} \\sum_{q=1}^{Q} \\frac{|\\text{ANN}(q,K) \\cap \\text{exact}(q,K)|}{K}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A value of 1.0 means the index always returns the exact top-K.  A value of 0.9 means, on average, 9 of every 10 returned neighbours are true top-K members; one is a false positive that displaced a true neighbour which was missed."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most common variants in practice are "
+          },
+          {
+            "type": "text",
+            "text": "Recall@1",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (does the index return the single nearest neighbour?) and "
+          },
+          {
+            "type": "text",
+            "text": "Recall@10",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "text": "Recall@100",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " for retrieval tasks.  Semantic search typically targets Recall@10; recommendation systems often use Recall@100 or Recall@1000."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Why recall, not precision?",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The set returned by ANN and the set from exact search both have size K, so recall and precision are identical in this setting: every returned vector is either a true positive or displaces a true neighbour.  People say 'recall' because it emphasises what was missed."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Query Latency -- p50, p99, and Throughput"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Latency is measured as wall-clock time from query submission to result delivery.  Because latency distributions are right-skewed, two percentile metrics matter:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "p50 (median):",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " half of queries finish faster than this.  Driven by the typical search-path length."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "p99:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " 99% of queries finish faster than this.  Driven by worst-case graph traversal, memory stalls, or lock contention.  In SLA conversations, p99 is often the binding constraint."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Throughput",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (queries per second, QPS) is a separate but related concept.  Latency is the time for one query; throughput measures how many can be handled simultaneously across all CPU/GPU threads.  The two conflict when an index is CPU-bound: batching queries raises throughput by amortising overhead, but increases per-query latency because a query waits for its batch to fill.  Always report both when characterising performance."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Pareto Frontier"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For any fixed ANN index, varying a single query-time parameter traces a curve in recall-latency space.  No point dominates all others: moving right (higher recall) always costs more latency; moving left saves latency but drops recall.  This curve is called the "
+          },
+          {
+            "type": "text",
+            "text": "Pareto frontier",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " of the index."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNDgwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjQ4MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSwgc2Fucy1zZXJpZiI+CiAgPHJlY3Qgd2lkdGg9Ijg2MCIgaGVpZ2h0PSI0ODAiIGZpbGw9IiNmOGY5ZmEiIHJ4PSIxMiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWExYTJlIj5SZWNhbGwgdnMgTGF0ZW5jeSBUcmFkZS1vZmYg4oCUIEFOTiBBbGdvcml0aG0gT3BlcmF0aW5nIFBvaW50czwvdGV4dD4KCiAgPCEtLSDilIDilIAgTEVGVCBQQU5FTDogUmVjYWxsLUxhdGVuY3kgUGFyZXRvIEN1cnZlIOKUgOKUgCAtLT4KICA8cmVjdCB4PSIyMCIgeT0iNDUiIHdpZHRoPSI0OTAiIGhlaWdodD0iNDE1IiByeD0iOCIgZmlsbD0id2hpdGUiIHN0cm9rZT0iI2RlZTJlNiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMjY1IiB5PSI2OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzMzMiPlJlY2FsbEAxMCB2cyBwNTAgUXVlcnkgTGF0ZW5jeSAoMU0gdmVjdG9ycywgZD03NjgpPC90ZXh0PgoKICA8IS0tIEF4ZXMgLS0+CiAgPGxpbmUgeDE9IjcwIiB5MT0iMzkwIiB4Mj0iNDkwIiB5Mj0iMzkwIiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMiIvPgogIDxsaW5lIHgxPSI3MCIgeTE9IjM5MCIgeDI9IjcwIiAgeTI9IjgwIiAgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjIiLz4KCiAgPCEtLSBYIGF4aXMgbGFiZWwgLS0+CiAgPHRleHQgeD0iMjgwIiB5PSI0MzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPlF1ZXJ5IExhdGVuY3kg4oCUIHA1MCAobXMpPC90ZXh0PgogIDwhLS0gWSBheGlzIGxhYmVsIC0tPgogIDx0ZXh0IHg9IjIyIiB5PSIyNDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiIHRyYW5zZm9ybT0icm90YXRlKC05MCwyMiwyNDApIj5SZWNhbGxAMTA8L3RleHQ+CgogIDwhLS0gWCB0aWNrczogMC4xLCAwLjUsIDEsIDIsIDUsIDEwIG1zIC0tPgogIDwhLS0gTWFwOiAwLjFtcz04NSwgMC41bXM9MTUyLCAxbXM9MjA3LCAybXM9Mjg1LCA1bXM9MzgzLCAxMG1zPTQ3NSAobG9nIHNjYWxlKSAtLT4KICA8IS0tIFVzaW5nIHNpbXBsZSBsaW5lYXIgMOKGkjEwbXMgc2NhbGU6IDcwKzAqNDIgdG8gNzArMTAqNDIgPSA3MCB0byA0OTAgLS0+CiAgPCEtLSBBY3R1YWxseSBsZXQgbWUgdXNlIGxpbmVhciBzY2FsZSBmcm9tIDAgdG8gOG1zIC0tPgogIDwhLS0geCA9IDcwICsgKG1zLzgpKjQyMCAtLT4KICA8bGluZSB4MT0iNzAiICB5MT0iMzkwIiB4Mj0iNzAiICB5Mj0iMzk1IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjcwIiAgIHk9IjQwNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij4wPC90ZXh0PgogIDxsaW5lIHgxPSIxMjIiIHkxPSIzOTAiIHgyPSIxMjIiIHkyPSIzOTUiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMTIyIiAgeT0iNDA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPjE8L3RleHQ+CiAgPGxpbmUgeDE9IjE3NSIgeTE9IjM5MCIgeDI9IjE3NSIgeTI9IjM5NSIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxNzUiICB5PSI0MDYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+MjwvdGV4dD4KICA8bGluZSB4MT0iMjI4IiB5MT0iMzkwIiB4Mj0iMjI4IiB5Mj0iMzk1IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjIyOCIgIHk9IjQwNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij4zPC90ZXh0PgogIDxsaW5lIHgxPSIyODAiIHkxPSIzOTAiIHgyPSIyODAiIHkyPSIzOTUiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMjgwIiAgeT0iNDA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPjQ8L3RleHQ+CiAgPGxpbmUgeDE9IjMzMyIgeTE9IjM5MCIgeDI9IjMzMyIgeTI9IjM5NSIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzMzMiICB5PSI0MDYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+NTwvdGV4dD4KICA8bGluZSB4MT0iMzg2IiB5MT0iMzkwIiB4Mj0iMzg2IiB5Mj0iMzk1IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjM4NiIgIHk9IjQwNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij42PC90ZXh0PgogIDxsaW5lIHgxPSI0MzkiIHkxPSIzOTAiIHgyPSI0MzkiIHkyPSIzOTUiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDM5IiAgeT0iNDA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPjc8L3RleHQ+CiAgPGxpbmUgeDE9IjQ5MCIgeTE9IjM5MCIgeDI9IjQ5MCIgeTI9IjM5NSIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0OTAiICB5PSI0MDYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+ODwvdGV4dD4KCiAgPCEtLSBZIHRpY2tzOiAwLjUwLCAwLjYwLCAwLjcwLCAwLjgwLCAwLjkwLCAxLjAwIC0tPgogIDwhLS0geSA9IDM5MCAtIChyZWNhbGwgLSAwLjUpLzAuNSAqIDMxMCAgIC0tPgogIDwhLS0gMC41MCDihpIgeT0zOTAsIDAuNjDihpJ5PTMyOCwgMC43MOKGknk9MjY2LCAwLjgw4oaSeT0yMDQsIDAuOTDihpJ5PTE0MiwgMS4wMOKGknk9ODAgLS0+CiAgPGxpbmUgeDE9IjY1IiB5MT0iMzkwIiB4Mj0iNzAiIHkyPSIzOTAiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNjAiIHk9IjM5MyIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij4wLjUwPC90ZXh0PgogIDxsaW5lIHgxPSI2NSIgeTE9IjMyOCIgeDI9IjcwIiB5Mj0iMzI4IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjYwIiB5PSIzMzEiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+MC42MDwvdGV4dD4KICA8bGluZSB4MT0iNjUiIHkxPSIyNjYiIHgyPSI3MCIgeTI9IjI2NiIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2MCIgeT0iMjY5IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPjAuNzA8L3RleHQ+CiAgPGxpbmUgeDE9IjY1IiB5MT0iMjA0IiB4Mj0iNzAiIHkyPSIyMDQiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNjAiIHk9IjIwNyIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij4wLjgwPC90ZXh0PgogIDxsaW5lIHgxPSI2NSIgeTE9IjE0MiIgeDI9IjcwIiB5Mj0iMTQyIiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjYwIiB5PSIxNDUiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+MC45MDwvdGV4dD4KICA8bGluZSB4MT0iNjUiIHkxPSI4MCIgIHgyPSI3MCIgeTI9IjgwIiAgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2MCIgeT0iODMiICAgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij4xLjAwPC90ZXh0PgoKICA8IS0tIEdyaWQgbGluZXMgKGxpZ2h0KSAtLT4KICA8bGluZSB4MT0iNzAiIHkxPSIzMjgiIHgyPSI0OTAiIHkyPSIzMjgiIHN0cm9rZT0iI2VlZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPGxpbmUgeDE9IjcwIiB5MT0iMjY2IiB4Mj0iNDkwIiB5Mj0iMjY2IiBzdHJva2U9IiNlZWUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxsaW5lIHgxPSI3MCIgeTE9IjIwNCIgeDI9IjQ5MCIgeTI9IjIwNCIgc3Ryb2tlPSIjZWVlIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8bGluZSB4MT0iNzAiIHkxPSIxNDIiIHgyPSI0OTAiIHkyPSIxNDIiIHN0cm9rZT0iI2VlZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPGxpbmUgeDE9IjcwIiB5MT0iODAiICB4Mj0iNDkwIiB5Mj0iODAiICBzdHJva2U9IiNlZWUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxsaW5lIHgxPSIxMjIiIHkxPSI4MCIgeDI9IjEyMiIgeTI9IjM5MCIgc3Ryb2tlPSIjZWVlIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8bGluZSB4MT0iMTc1IiB5MT0iODAiIHgyPSIxNzUiIHkyPSIzOTAiIHN0cm9rZT0iI2VlZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPGxpbmUgeDE9IjIyOCIgeTE9IjgwIiB4Mj0iMjI4IiB5Mj0iMzkwIiBzdHJva2U9IiNlZWUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxsaW5lIHgxPSIyODAiIHkxPSI4MCIgeDI9IjI4MCIgeTI9IjM5MCIgc3Ryb2tlPSIjZWVlIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8bGluZSB4MT0iMzMzIiB5MT0iODAiIHgyPSIzMzMiIHkyPSIzOTAiIHN0cm9rZT0iI2VlZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CgogIDwhLS0gU0xBIGJvdW5kYXJ5OiBtYXggbGF0ZW5jeSA9IDNtcyAtLT4KICA8bGluZSB4MT0iMjI4IiB5MT0iODAiIHgyPSIyMjgiIHkyPSIzOTAiIHN0cm9rZT0iI2U3NGMzYyIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjYsMyIvPgogIDx0ZXh0IHg9IjIzMiIgeT0iOTYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2U3NGMzYyIgZm9udC13ZWlnaHQ9ImJvbGQiPlNMQSBtYXg8L3RleHQ+CiAgPHRleHQgeD0iMjMyIiB5PSIxMDgiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2U3NGMzYyI+MyBtczwvdGV4dD4KCiAgPCEtLSBNaW5pbXVtIHJlY2FsbCBsaW5lOiAwLjkwIC0tPgogIDxsaW5lIHgxPSI3MCIgeTE9IjE0MiIgeDI9IjQ5MCIgeTI9IjE0MiIgc3Ryb2tlPSIjMmVjYzcxIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNiwzIi8+CiAgPHRleHQgeD0iMzU0IiB5PSIxMzgiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzJlY2M3MSIgZm9udC13ZWlnaHQ9ImJvbGQiPk1pbiByZWNhbGwgdGFyZ2V0ICgwLjkwKTwvdGV4dD4KCiAgPCEtLSBTaGFkZWQgb3BlcmF0aW5nIHpvbmUgKGluc2lkZSBib3RoIGNvbnN0cmFpbnRzKSAtLT4KICA8cmVjdCB4PSI3MCIgeT0iODAiIHdpZHRoPSIxNTgiIGhlaWdodD0iNjIiIGZpbGw9IiMyZWNjNzEiIGZpbGwtb3BhY2l0eT0iMC4wOCIgcng9IjAiLz4KICA8dGV4dCB4PSIxNDQiIHk9IjEwMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMjdhZTYwIiBmb250LXdlaWdodD0iYm9sZCI+T3BlcmF0aW5nPC90ZXh0PgogIDx0ZXh0IHg9IjE0NCIgeT0iMTEyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiMyN2FlNjAiIGZvbnQtd2VpZ2h0PSJib2xkIj56b25lPC90ZXh0PgoKICA8IS0tIEhOU1cgUGFyZXRvIGN1cnZlOiAobGF0ZW5jeV9tcywgcmVjYWxsKSBwb2ludHMgLS0+CiAgPCEtLSBlZj04OiAgMC4zNW1zLCAwLjczIC0tPgogIDwhLS0gZWY9MTY6IDAuNTVtcywgMC44NCAtLT4KICA8IS0tIGVmPTMyOiAwLjk1bXMsIDAuOTIgLS0+CiAgPCEtLSBlZj02NDogMS43bXMsICAwLjk2IC0tPgogIDwhLS0gZWY9MTI4OiAzLjJtcywgMC45ODMgLS0+CiAgPCEtLSBlZj0yNTY6IDUuOG1zLCAwLjk5MyAtLT4KICA8IS0tIGVmPTUxMjogOG1zLCAgIDAuOTk4IC0tPgogIDwhLS0geCA9IDcwICsgKG1zLzgpKjQyMCwgIHkgPSAzOTAgLSAocmVjYWxsLTAuNSkvMC41KjMxMCAtLT4KICA8IS0tIGVmPTg6ICB4PTg4LCAgeT0yNjUgIC0tPgogIDwhLS0gZWY9MTY6IHg9OTksICB5PTIwNCAgLS0+ICA8IS0tIHdhaXQ6ICgwLjg0LTAuNSkvMC41KjMxMD0yMTEsIHk9MzkwLTIxMT0xNzkuLi4gLS0+CiAgPCEtLSBMZXQgbWUgcmVjYWxjdWxhdGU6IHkgPSAzOTAgLSAocmVjYWxsLTAuNSkvMC41KjMxMCAtLT4KICA8IS0tIDAuNzM6ICgwLjczLTAuNSkvMC41KjMxMD0xNDIuNiB5PTM5MC0xNDM9MjQ3IC0tPgogIDwhLS0gMC44NDogKDAuODQtMC41KS8wLjUqMzEwPTIxMC44IHk9MzkwLTIxMT0xNzkgLS0+CiAgPCEtLSAwLjkyOiAoMC45Mi0wLjUpLzAuNSozMTA9MjYwLjQgeT0zOTAtMjYwPTEzMCAtLT4KICA8IS0tIDAuOTY6ICgwLjk2LTAuNSkvMC41KjMxMD0yODUuMiB5PTM5MC0yODU9MTA1IC0tPgogIDwhLS0gMC45ODM6ICgwLjk4My0wLjUpLzAuNSozMTA9Mjk5LjcgeT0zOTAtMzAwPTkwIC0tPgogIDwhLS0gMC45OTM6ICgwLjk5My0wLjUpLzAuNSozMTA9MzA1LjcgeT0zOTAtMzA2PTg0IC0tPgogIDwhLS0gMC45OTg6ICgwLjk5OC0wLjUpLzAuNSozMTA9MzA4LjcgeT0zOTAtMzA5PTgxIC0tPgogIDwhLS0geDogMC4zNW1zOiA3MCswLjM1LzgqNDIwPTg4IC0tPgogIDwhLS0gMC41NW1zOiA3MCswLjU1LzgqNDIwPTk5IC0tPgogIDwhLS0gMC45NW1zOiA3MCswLjk1LzgqNDIwPTEyMCAtLT4KICA8IS0tIDEuN21zOiA3MCsxLjcvOCo0MjA9MTU5IC0tPgogIDwhLS0gMy4ybXM6IDcwKzMuMi84KjQyMD0yMzggLS0+CiAgPCEtLSA1LjhtczogNzArNS44LzgqNDIwPTM3NCAtLT4KICA8IS0tIDhtczogNzArOC84KjQyMD00OTAgLS0+CgogIDwhLS0gSE5TVyBjdXJ2ZSAtLT4KICA8cG9seWxpbmUgcG9pbnRzPSI4OCwyNDcgOTksMTc5IDEyMCwxMzAgMTU5LDEwNSAyMzgsOTAgMzc0LDg0IDQ5MCw4MSIKICAgIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzIxOTZGMyIgc3Ryb2tlLXdpZHRoPSIyLjUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KCiAgPCEtLSBJVkYgY3VydmUgKHNsaWdodGx5IGRpZmZlcmVudCBzaGFwZSkgLS0+CiAgPCEtLSBucHJvYmU9MjogMC4yMG1zLCAwLjU4IC0tPgogIDwhLS0gbnByb2JlPTg6IDAuNTVtcywgMC44MCAtLT4KICA8IS0tIG5wcm9iZT0xNjogMC45NW1zLCAwLjg4IC0tPgogIDwhLS0gbnByb2JlPTMyOiAxLjhtcywgMC45NCAtLT4KICA8IS0tIG5wcm9iZT02NDogMy40bXMsIDAuOTczIC0tPgogIDwhLS0gbnByb2JlPTEyODogNi4ybXMsIDAuOTg3IC0tPgogIDwhLS0gMC41ODogeT0zOTAtKDAuMDgvMC41KSozMTA9MzkwLTQ5LjY9MzQwIC0tPgogIDwhLS0gMC44MDogeT0zOTAtKDAuMzAvMC41KSozMTA9MzkwLTE4Nj0yMDQgLS0+CiAgPCEtLSAwLjg4OiB5PTM5MC0oMC4zOC8wLjUpKjMxMD0zOTAtMjM2PTE1NCAtLT4KICA8IS0tIDAuOTQ6IHk9MzkwLSgwLjQ0LzAuNSkqMzEwPTM5MC0yNzM9MTE3IC0tPgogIDwhLS0gMC45NzM6IHk9MzkwLSgwLjQ3My8wLjUpKjMxMD0zOTAtMjk0PTk2IC0tPgogIDwhLS0gMC45ODc6IHk9MzkwLSgwLjQ4Ny8wLjUpKjMxMD0zOTAtMzAyPTg4IC0tPgogIDwhLS0geDogMC4yMDogNzArMC4yLzgqNDIwPTgxIC0tPgogIDwhLS0gMC41NTogOTksIDAuOTU6IDEyMCwgMS44OiAxNjUsIDMuNDogMjQ5LCA2LjI6IDM5NiAtLT4KICA8cG9seWxpbmUgcG9pbnRzPSI4MSwzNDAgOTksMjA0IDEyMCwxNTQgMTY1LDExNyAyNDksOTYgMzk2LDg4IgogICAgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkY5ODAwIiBzdHJva2Utd2lkdGg9IjIuNSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgc3Ryb2tlLWRhc2hhcnJheT0iNywzIi8+CgogIDwhLS0gT3BlcmF0aW5nIHBvaW50cyBmb3IgSE5TVyAtLT4KICA8IS0tIGVmPTE2OiB4PTk5LCB5PTE3OSAtLT4KICA8Y2lyY2xlIGN4PSI5OSIgIGN5PSIxNzkiIHI9IjUiIGZpbGw9IiMxNTY1QzAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTA0IiAgY3k9IjE3OSIgZHk9Ii02IiB5PSIxNzMiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzE1NjVDMCIgZm9udC13ZWlnaHQ9ImJvbGQiPmVmPTE2PC90ZXh0PgoKICA8IS0tIGVmPTMyOiB4PTEyMCwgeT0xMzAgLS0+CiAgPGNpcmNsZSBjeD0iMTIwIiBjeT0iMTMwIiByPSI1IiBmaWxsPSIjMTU2NUMwIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjEyNSIgeT0iMTI0IiBmb250LXNpemU9IjkiIGZpbGw9IiMxNTY1QzAiIGZvbnQtd2VpZ2h0PSJib2xkIj5lZj0zMjwvdGV4dD4KCiAgPCEtLSBlZj02NDogeD0xNTksIHk9MTA1IC0tPgogIDxjaXJjbGUgY3g9IjE1OSIgY3k9IjEwNSIgcj0iNSIgZmlsbD0iIzE1NjVDMCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIxNjQiIHk9Ijk5IiBmb250LXNpemU9IjkiIGZpbGw9IiMxNTY1QzAiIGZvbnQtd2VpZ2h0PSJib2xkIj5lZj02NCDimIU8L3RleHQ+CgogIDwhLS0gZWY9MTI4OiB4PTIzOCwgeT05MCAtLT4KICA8Y2lyY2xlIGN4PSIyMzgiIGN5PSI5MCIgcj0iNSIgZmlsbD0iIzE1NjVDMCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyNDMiIHk9Ijg0IiBmb250LXNpemU9IjkiIGZpbGw9IiMxNTY1QzAiIGZvbnQtd2VpZ2h0PSJib2xkIj5lZj0xMjg8L3RleHQ+CgogIDwhLS0gTGVnZW5kIC0tPgogIDxsaW5lIHgxPSI4NSIgeTE9IjQyMiIgeDI9IjExNSIgeTI9IjQyMiIgc3Ryb2tlPSIjMjE5NkYzIiBzdHJva2Utd2lkdGg9IjIuNSIvPgogIDx0ZXh0IHg9IjEyMCIgeT0iNDI2IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5ITlNXIChNPTMyKTwvdGV4dD4KICA8bGluZSB4MT0iMjAwIiB5MT0iNDIyIiB4Mj0iMjMwIiB5Mj0iNDIyIiBzdHJva2U9IiNGRjk4MDAiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtZGFzaGFycmF5PSI2LDMiLz4KICA8dGV4dCB4PSIyMzUiIHk9IjQyNiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+SVZGIChubGlzdD0xMDI0KTwvdGV4dD4KICA8Y2lyY2xlIGN4PSIzNDAiIGN5PSI0MjIiIHI9IjQiIGZpbGw9IiMxNTY1QzAiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjM0OCIgeT0iNDI2IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5PcGVyYXRpbmcgcG9pbnQ8L3RleHQ+CiAgPHRleHQgeD0iNDIwIiB5PSI0MjYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxNTY1QzAiIGZvbnQtd2VpZ2h0PSJib2xkIj7imIUgU3dlZXQgc3BvdDwvdGV4dD4KCiAgPCEtLSDilIDilIAgUklHSFQgUEFORUw6IFBhcmFtZXRlciBlZmZlY3RzIOKUgOKUgCAtLT4KICA8cmVjdCB4PSI1MzAiIHk9IjQ1IiB3aWR0aD0iMzEwIiBoZWlnaHQ9IjQxNSIgcng9IjgiIGZpbGw9IndoaXRlIiBzdHJva2U9IiNkZWUyZTYiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjY4NSIgeT0iNjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5QYXJhbWV0ZXIg4oaSIFRyYWRlLW9mZiBNYXA8L3RleHQ+CgogIDwhLS0gSE5TVyBzZWN0aW9uIC0tPgogIDxyZWN0IHg9IjU0OCIgeT0iODAiIHdpZHRoPSIyNzQiIGhlaWdodD0iMTAwIiByeD0iNSIgZmlsbD0iI2UzZjJmZCIgc3Ryb2tlPSIjOTBjOGYwIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2ODUiIHk9Ijk3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzE1NjVDMCI+SE5TVzwvdGV4dD4KCiAgPHRleHQgeD0iNTU4IiB5PSIxMTMiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5CdWlsZC10aW1lIChmaXhlZCBhZnRlciBidWlsZCk8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSIxMjciIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+TSDihpEgIOKGkiBiZXR0ZXIgZ3JhcGgg4oaSIGhpZ2hlciByZWNhbGwgYXQgc2FtZSBlZjwvdGV4dD4KICA8dGV4dCB4PSI1NTgiIHk9IjE0MCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij5lZl9jIOKGkSDihpIgYmV0dGVyIGdyYXBoIOKGkiBoaWdoZXIgcmVjYWxsIGF0IHNhbWUgZWY8L3RleHQ+CgogIDx0ZXh0IHg9IjU1OCIgeT0iMTU3IiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzMzMyI+UXVlcnktdGltZSAodHVuZSBhbnl0aW1lKTwvdGV4dD4KICA8dGV4dCB4PSI1NTgiIHk9IjE3MCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij5lZiDihpEgIOKGkiBzY2FuIG1vcmUgY2FuZGlkYXRlcyDihpIgcmVjYWxsIOKGkSwgbGF0ZW5jeSDihpE8L3RleHQ+CgogIDwhLS0gSVZGIHNlY3Rpb24gLS0+CiAgPHJlY3QgeD0iNTQ4IiB5PSIxOTIiIHdpZHRoPSIyNzQiIGhlaWdodD0iMTAwIiByeD0iNSIgZmlsbD0iI2ZmZjNlMCIgc3Ryb2tlPSIjZjBjMDYwIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2ODUiIHk9IjIwOSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNFNjUxMDAiPklWRiAvIElWRi1QUTwvdGV4dD4KCiAgPHRleHQgeD0iNTU4IiB5PSIyMjUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5CdWlsZC10aW1lIChmaXhlZCBhZnRlciBidWlsZCk8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSIyMzkiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+bmxpc3Qg4oaRICDihpIgZmluZXIgcGFydGl0aW9uIOKGkiBoaWdoZXIgcmVjYWxsIGF0IHNhbWUgbnByb2JlPC90ZXh0PgoKICA8dGV4dCB4PSI1NTgiIHk9IjI1NiIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzMzMiPlF1ZXJ5LXRpbWUgKHR1bmUgYW55dGltZSk8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSIyNzAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+bnByb2JlIOKGkSDihpIgc2NhbiBtb3JlIGNlbGxzIOKGkiByZWNhbGwg4oaRLCBsYXRlbmN5IOKGkTwvdGV4dD4KICA8dGV4dCB4PSI1NTgiIHk9IjI4MyIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij5ucHJvYmUvbmxpc3Q6IHR5cGljYWwgcmFuZ2UgMeKAkzI1JTwvdGV4dD4KCiAgPCEtLSBUaHJvdWdocHV0IHNlY3Rpb24gLS0+CiAgPHJlY3QgeD0iNTQ4IiB5PSIzMDQiIHdpZHRoPSIyNzQiIGhlaWdodD0iODAiIHJ4PSI1IiBmaWxsPSIjZThmNWU5IiBzdHJva2U9IiM5MGQ0OTAiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjY4NSIgeT0iMzIxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzJFN0QzMiI+TGF0ZW5jeSB2cyBUaHJvdWdocHV0PC90ZXh0PgogIDx0ZXh0IHg9IjU1OCIgeT0iMzM3IiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPkxhdGVuY3k6IHRpbWUgZm9yIG9uZSBxdWVyeSAocDUwL3A5OSk8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSIzNTAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+VGhyb3VnaHB1dDogcXVlcmllcyAvIHNlY29uZCAoYWNyb3NzIGFsbCBDUFUgY29yZXMpPC90ZXh0PgogIDx0ZXh0IHg9IjU1OCIgeT0iMzYzIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPkJhdGNoIHNpemUg4oaRIOKGkiB0aHJvdWdocHV0IOKGkSwgbGF0ZW5jeSDihpEgKHBlci1iYXRjaCk8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSIzNzYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+SG9yaXpvbnRhbCBzaGFyZGluZzogbGF0ZW5jeSB1bmNoYW5nZWQsIFFQUyBzY2FsZXMgbGluZWFybHk8L3RleHQ+CgogIDwhLS0gRGVjaXNpb24gZ3VpZGUgLS0+CiAgPHJlY3QgeD0iNTQ4IiB5PSIzOTYiIHdpZHRoPSIyNzQiIGhlaWdodD0iNTUiIHJ4PSI1IiBmaWxsPSIjZjNlNWY1IiBzdHJva2U9IiNjZTkzZDgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjY4NSIgeT0iNDEzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzdiMWZhMiI+Q2hvb3NpbmcgdGhlIG9wZXJhdGluZyBwb2ludDwvdGV4dD4KICA8dGV4dCB4PSI1NTgiIHk9IjQyOSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij4xLiBTZXQgcmVjYWxsIGZsb29yIChlLmcuIHJlY2FsbEAxMCDiiaUgMC45Mik8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSI0NDIiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+Mi4gU2V0IGxhdGVuY3kgY2VpbGluZyAoU0xBOiBwOTkg4omkIDVtcyk8L3RleHQ+CiAgPHRleHQgeD0iNTU4IiB5PSI0NTUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+My4gUGljayB0aGUgbG93ZXN0IGVmL25wcm9iZSBpbnNpZGUgYm90aCBjb25zdHJhaW50czwvdGV4dD4KPC9zdmc+Cg==",
+          "alt": "Recall@10 vs p50 latency Pareto curves for HNSW (M=32) and IVF (nlist=1024), showing operating points ef=16/32/64/128, SLA latency boundary, minimum-recall target, and the feasible operating zone"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key observations from the diagram above:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Both curves are convex -- each step of recall improvement requires a larger latency increase than the previous step."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HNSW (solid blue) dominates IVF (dashed orange) across most operating points at these index sizes: the same recall is achievable at lower latency."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The sweet spot (ef=64 for HNSW) sits inside the feasible zone where both the SLA latency ceiling and minimum-recall floor are simultaneously satisfied."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Points outside the zone require either accepting lower recall or violating the latency SLA."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How Parameters Move Along the Curve"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "HNSW -- ef (search beam width)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During a query, HNSW maintains a candidate priority queue of size "
+          },
+          {
+            "type": "text",
+            "text": "ef",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ".  A larger "
+          },
+          {
+            "type": "text",
+            "text": "ef",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " expands the beam: more nodes are evaluated at each layer, the graph is explored more thoroughly, and recall rises.  Latency scales roughly linearly with "
+          },
+          {
+            "type": "text",
+            "text": "ef",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " above a minimum floor set by the graph structure."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{cost} \\approx ef \\times \\bar{d}_{\\text{graph}} \\times L"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "\\bar{d}_{\\text{graph}}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the mean graph degree (approximately M in HNSW terminology) and L is the number of layers visited (O(log N)).  Doubling ef roughly doubles latency but does not double recall -- each additional evaluation has diminishing returns as the true neighbours are already in the queue."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF -- nprobe (number of cells to search)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF clusters the corpus into "
+          },
+          {
+            "type": "text",
+            "text": "nlist",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " Voronoi cells and, at query time, searches only the closest "
+          },
+          {
+            "type": "text",
+            "text": "nprobe",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " cells.  The latency cost is proportional to the fraction of the corpus scanned:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{latency} \\propto \\frac{nprobe}{nlist} \\times N \\times d"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall improves as "
+          },
+          {
+            "type": "text",
+            "text": "nprobe",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " rises because vectors near cell boundaries are found when the neighbouring cell is also probed.  Diminishing returns set in because the truly nearest vectors are concentrated in the closest cell(s)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Index-time parameters: M, ef_construction, nlist"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These parameters shift the entire frontier rather than tracing along it:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Parameter",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Index",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Effect on frontier",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Build-time cost",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Higher M shifts the curve up-left (better recall for same latency), but each node has more edges to traverse"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N x M x log N)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ef_construction"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Higher value improves graph quality; marginal gains beyond ~200"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N x ef_construction x log N)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nlist"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "More cells create tighter clusters; raises the recall ceiling but each cell is smaller so nprobe=1 finds fewer neighbours"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "k-means: O(N x nlist x d x iters)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Measuring the Trade-off -- Benchmark Protocol"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A robust benchmark produces a set of (recall, latency) pairs for each combination of index and query parameter.  The procedure:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Build the index on the full corpus with candidate index-time parameters."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Draw 1,000-10,000 evaluation queries (never overlap with the indexed corpus)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Compute ground truth with brute-force exact search (numpy or faiss IndexFlatL2)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For each query-time parameter value (e.g. ef in {16, 32, 64, 128, 256}), run all eval queries, record p50 and p99 latency, and compute Recall@K."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plot the resulting (recall, latency) pairs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Repeat for every index type to compare their frontiers."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import numpy as np\nimport faiss\nimport time\n\ndef benchmark(index, queries, ground_truth, k=10, ef_values=None, index_type='hnsw'):\n    \"\"\"\n    queries      : (Q, d) float32 array\n    ground_truth : (Q, k) int64 array of exact neighbour IDs\n    ef_values    : list of ints for efSearch (HNSW) or nprobe (IVF)\n    \"\"\"\n    Q = queries.shape[0]\n    results = []\n\n    for param_val in ef_values:\n        if index_type == 'hnsw':\n            faiss.downcast_index(index).hnsw.efSearch = param_val\n        else:\n            faiss.downcast_index(index).nprobe = param_val\n\n        # Warm-up run to populate CPU caches\n        index.search(queries[:10], k)\n\n        latencies, all_indices = [], []\n        for q in queries:\n            t0 = time.perf_counter()\n            _, I = index.search(q[None, :], k)\n            latencies.append((time.perf_counter() - t0) * 1000)  # ms\n            all_indices.append(I[0])\n\n        all_indices = np.array(all_indices)  # (Q, k)\n        recall = np.mean([\n            len(np.intersect1d(all_indices[i], ground_truth[i])) / k\n            for i in range(Q)\n        ])\n\n        results.append({\n            'param': param_val,\n            'recall_at_k': round(recall, 4),\n            'p50_ms': round(float(np.percentile(latencies, 50)), 2),\n            'p99_ms': round(float(np.percentile(latencies, 99)), 2),\n        })\n\n    return results\n\n# HNSW example\nrows = benchmark(hnsw_index, eval_queries, exact_ids, k=10,\n                 ef_values=[16, 32, 64, 128, 256], index_type='hnsw')\nfor r in rows:\n    print(f\"ef={r['param']:>4d}  recall={r['recall_at_k']:.4f}  \"\n          f\"p50={r['p50_ms']:.2f}ms  p99={r['p99_ms']:.2f}ms\")\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sample output from a 1M-vector benchmark (d=128, M=32):"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ef",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "p50 (ms)",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "p99 (ms)",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "QPS (1 thread)",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.879"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.41"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.82"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2,439"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.944"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.78"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.41"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1,282"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64 (*)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.971"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.47"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.61"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "680"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "128"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.988"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.89"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "5.12"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "346"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "256"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.995"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "5.72"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "9.87"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "175"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At ef=64 (*), the index is inside the SLA window (p99 <= 3 ms) with recall above 0.97.  ef=128 exceeds the p99 budget."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing an Operating Point"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pick an operating point in three steps:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "State the hard constraints.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Identify the latency SLA (p99 <= X ms) and the minimum acceptable recall (Recall@K >= Y).  These come from product requirements, not technical preferences."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Find the feasible zone.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " On the benchmarked Pareto curve, the feasible zone is where both constraints are simultaneously satisfied.  If no point is feasible, the index or hardware must change."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pick the highest-recall feasible point.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Within the feasible zone, choose the point with the highest recall -- you are leaving unused latency headroom, which costs nothing in production."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistake: choosing an operating point based on recall alone on a development machine, then deploying on hardware with different memory bandwidth.  Always benchmark on production-equivalent hardware."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Throughput vs Latency -- A Different Constraint"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Latency is not the same as throughput.  At a given operating point, adding CPU threads increases throughput (more queries per second) without changing per-query latency -- up to the point where threads compete for memory bandwidth or cross NUMA boundaries."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The planning formula for a service at QPS target Q with per-query latency L seconds and T threads:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "T = \\lceil Q \\times L \\rceil"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For QPS=1000 and L=1ms (0.001s), you need only one thread.  For QPS=1000 and L=5ms (0.005s), you need five threads.  This formula tells you whether a latency operating point is affordable at a given throughput target."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In memory-bandwidth-limited settings (large d, many concurrent threads), recall can degrade under high concurrency because cache misses increase.  Always benchmark at production concurrency, not single-threaded."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Re-ranking as a Recall-Latency Decoupling Mechanism"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Re-ranking is a two-stage strategy that decouples the recall-latency trade-off:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ANN search retrieves a candidate set of size K' >> K at low ef (fast, moderate recall)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A second exact pass re-scores the K' candidates using the original full-precision vectors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return the true top-K from the re-scored candidates."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because K' candidates are retrieved cheaply and exact scoring is done only on a small set, the overall recall can exceed what the ANN index alone achieves at any latency-feasible ef."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\nimport numpy as np\n\ndef two_stage_search(hnsw_index, corpus_vectors, query, k=10, k_prime=100, ef_search=32):\n    \"\"\"\n    Stage 1: ANN retrieves k_prime candidates quickly.\n    Stage 2: Exact re-scoring on those candidates only.\n    \"\"\"\n    faiss.downcast_index(hnsw_index).hnsw.efSearch = ef_search\n    _, candidate_ids = hnsw_index.search(query[None, :], k_prime)  # (1, k_prime)\n    candidate_ids = candidate_ids[0]\n\n    # Exact L2 distances on the small candidate pool\n    candidates = corpus_vectors[candidate_ids]  # (k_prime, d)\n    dists = np.linalg.norm(candidates - query, axis=1)  # (k_prime,)\n    top_k_local = np.argsort(dists)[:k]\n    return candidate_ids[top_k_local]\n\n# With ef=32 (fast) + re-ranking from 100 candidates:\n# recall climbs from ~0.944 to ~0.991 -- near ef=256 quality at ef=32 speed.\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Re-ranking cost is proportional to K' x d (dot products or L2), which is typically negligible compared to graph traversal.  The net effect shifts the Pareto frontier up and to the left -- better recall without proportional latency increase."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Algorithm Comparison at Equivalent Operating Points"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Different algorithms occupy different parts of the recall-latency space even after tuning:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Algorithm",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10 at 1ms p50",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10 at 5ms p50",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory/vector",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Build time",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Brute-force (exact)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.000"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.000 (trivially)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4d bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(1)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW M=32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.97"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.999"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4d + M*8 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "slow"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF nlist=1024"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.84"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.96"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4d bytes + inverted lists"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "fast"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF-PQ m=8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.77"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.92"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m bytes + lists"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "fast"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW + re-rank K'=100"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.99"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1.000"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4d + M*8 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "slow"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Numbers above are indicative for 1M SIFT128 vectors on a modern CPU; results vary with dimensionality, data distribution, and hardware.  Always benchmark on your own data."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Production Monitoring and Drift"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After deployment, the recall-latency operating point can drift due to:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Corpus growth:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " adding vectors shifts the distribution and may increase traversal depth.  Rebuild or update the index periodically."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Query distribution shift:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " if user queries move to a different region of embedding space, previously calibrated ef may be insufficient."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Memory pressure:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " as the index grows, more of it falls out of L3 cache, increasing latency at the same ef."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Monitor recall continuously by running your ground-truth eval set on a schedule -- not just at deployment time -- and alert when recall drops below the target floor.  Monitoring latency alone is insufficient; an index can be fast because it is wrong."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import numpy as np\n\nclass RecallMonitor:\n    def __init__(self, eval_queries, exact_ids, k=10, threshold=0.95):\n        self.eval_queries = eval_queries  # (Q, d)\n        self.exact_ids = exact_ids        # (Q, k) ground truth\n        self.k = k\n        self.threshold = threshold\n\n    def check(self, index):\n        _, I = index.search(self.eval_queries, self.k)\n        recall = float(np.mean([\n            len(np.intersect1d(I[i], self.exact_ids[i])) / self.k\n            for i in range(len(self.eval_queries))\n        ]))\n        if recall < self.threshold:\n            raise RuntimeError(\n                f'Recall@{self.k} dropped to {recall:.4f} '\n                f'(threshold {self.threshold}). Rebuild index or raise ef.'\n            )\n        return recall\n\n# Usage: schedule this to run daily against a fixed 1K-query eval set\nmonitor = RecallMonitor(eval_queries, exact_ids, k=10, threshold=0.95)\ncurrent_recall = monitor.check(live_index)\nprint(f'Recall@10 = {current_recall:.4f}')\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "ANN-Benchmarks -- Standard Evaluation Framework"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ANN-Benchmarks is the standard reproducible benchmarking harness for comparing ANN libraries.  It runs a Docker container per library, executes a standard protocol, and produces recall-latency plots for each dataset."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard benchmark datasets:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "SIFT1M:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " 1M 128-dim float32 vectors (visual descriptors). Oldest and most commonly cited."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GIST1M:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " 1M 960-dim vectors -- tests high-dimensionality behaviour."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GloVe-100:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " 1.2M 100-dim text embeddings -- inner-product distance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fashion-MNIST:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " 60K 784-dim image embeddings -- useful for small-scale tests."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key insight from ANN-Benchmarks: no single algorithm dominates across all datasets.  HNSW tends to win on high-recall, low-latency benchmarks.  IVF-PQ wins on memory-constrained deployments with billions of vectors.  Benchmarking on your own data and hardware is irreplaceable."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Using index defaults in production.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Default ef=10 or nprobe=1 often gives recall below 0.7.  Always benchmark and set parameters explicitly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Benchmarking at wrong concurrency.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Single-threaded latency underestimates real latency under load.  Measure at production QPS."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treating recall as a build-time property.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Recall depends on query-time parameters; the same index can give 0.7 or 0.999 depending on ef."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring tail latency.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " p50 can be within SLA while p99 blows through it.  Both must pass."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not measuring recall separately from end-to-end quality.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Application-level metrics (NDCG, MRR) can mask recall loss if re-ranking compensates.  Know both."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical Configuration Guide"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Below are starting-point configurations for common deployment scenarios.  Treat these as baselines to benchmark from, not final answers."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Scenario",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Index",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Index-time params",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Query-time start",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Typical Recall@10",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 1M vectors, strict SLA (p99 < 2ms)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "M=32, ef_construction=200"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ef=32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.94"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 1M vectors, relaxed SLA (p99 < 10ms)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "M=48, ef_construction=400"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ef=128"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.988"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "10M vectors, memory-constrained"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF-PQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nlist=4096, m=16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nprobe=64"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.88"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "100M+ vectors, GPU cluster"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IVF-PQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nlist=32768, m=32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nprobe=256"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.91"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Any size, highest recall required"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HNSW + re-rank"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "M=32, ef_construction=200"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ef=32, K'=200"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.998"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For the IVF family, a rule of thumb for choosing "
+          },
+          {
+            "type": "text",
+            "text": "nlist",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is to set it to approximately the square root of the corpus size: "
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "nlist \\approx \\sqrt{N}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This balances the centroid-search cost (proportional to nlist) against the per-cell scan cost (proportional to N/nlist).  With nlist = sqrt(N), both costs are O(sqrt(N)) and an nprobe that covers roughly sqrt(N) cells corresponds to scanning ~1/sqrt(N) of the corpus."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For HNSW, the M parameter controls average graph degree.  Higher M improves recall at any given ef, but increases index size (each node stores M outgoing edges as int32) and build time.  M=16 is a common memory-efficient choice; M=32 or M=64 are typical high-recall configurations."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\nimport numpy as np\n\ndef build_hnsw(corpus, M=32, ef_construction=200):\n    d = corpus.shape[1]\n    index = faiss.IndexHNSWFlat(d, M)\n    index.hnsw.efConstruction = ef_construction\n    index.add(corpus.astype('float32'))\n    return index\n\ndef build_ivf_flat(corpus, nlist=None):\n    d = corpus.shape[1]\n    N = corpus.shape[0]\n    if nlist is None:\n        nlist = int(np.sqrt(N))  # rule-of-thumb\n    quantiser = faiss.IndexFlatL2(d)\n    index = faiss.IndexIVFFlat(quantiser, d, nlist)\n    index.train(corpus.astype('float32'))\n    index.add(corpus.astype('float32'))\n    return index\n\ndef build_ivf_pq(corpus, nlist=None, m=8, nbits=8):\n    d = corpus.shape[1]\n    N = corpus.shape[0]\n    if nlist is None:\n        nlist = int(np.sqrt(N))\n    assert d % m == 0, 'Dimension must be divisible by m'\n    quantiser = faiss.IndexFlatL2(d)\n    index = faiss.IndexIVFPQ(quantiser, d, nlist, m, nbits)\n    index.train(corpus.astype('float32'))\n    index.add(corpus.astype('float32'))\n    return index\n\n# 1M vectors, d=128\nN, d = 1_000_000, 128\ncorpus = np.random.randn(N, d).astype('float32')\n\nhnsw = build_hnsw(corpus, M=32, ef_construction=200)\nivf  = build_ivf_flat(corpus, nlist=int(np.sqrt(N)))\nivfpq = build_ivf_pq(corpus, nlist=int(np.sqrt(N)), m=16)\n\nprint(f'HNSW size : {hnsw.sa_encode(corpus[:1]).nbytes * N / 1e9:.1f} GB (approx)')\nprint(f'IVF-PQ size: ~{N * 16 / 1e9:.2f} GB (m=16 bytes/vector)')\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall Under Query Distribution Shift"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall numbers from a benchmark eval set are only valid when the eval queries are representative of production queries.  When they are not -- because the product evolved, because user behaviour changed, or because the model producing embeddings was updated -- the measured recall can be optimistic."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Three signals that distribution shift is occurring:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Recall on the fixed eval set is stable, but downstream quality metrics drop.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " The eval set no longer covers the new query distribution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Average ef-candidate distance (mean distance to the ef-th explored node) rises over time.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Queries are landing in sparser regions of the graph."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fraction of queries returning fewer than K results increases.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Rare when data is dense, but common after model updates that shift the embedding distribution."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The correct response is to refresh the eval set from recent production queries (using shadow search to collect ground truth) and re-benchmark.  If recall has genuinely degraded, options are:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Raise ef/nprobe (immediate, no rebuild required)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rebuild the index on the updated corpus with better index-time parameters."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fine-tune or replace the embedding model and rebuild from scratch."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Periodically refreshing the eval set is therefore not optional -- it is a maintenance task on the same cadence as index rebuilds."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Build a recall-latency plot before committing to an index type. The shape of the curve tells you which algorithm fits your constraints."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set ef/nprobe to the highest value that satisfies the latency SLA -- never lower."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use re-ranking to gain 2-4 recall points at low marginal cost when the candidate pool is O(100)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor recall in production on a schedule with a fixed eval set. Alert on drops, not just latency spikes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Store benchmark results alongside the index configuration -- future engineers need to see the curve, not just the chosen point."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For billion-scale deployments, profile memory bandwidth utilisation before adding CPU threads; beyond a NUMA boundary, latency rises and recall may fall."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Recall@K measures the fraction of true top-K neighbours returned; latency measures how long one query takes. They trade off against each other."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Each ANN index traces a Pareto frontier in recall-latency space. A single query-time parameter (ef for HNSW, nprobe for IVF) moves a point along the frontier without rebuilding."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Index-time parameters (M, nlist) shift the entire frontier but require a rebuild."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Choose an operating point by stating latency and recall constraints, finding the feasible zone on the benchmarked curve, and picking the highest-recall feasible point."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Throughput (QPS) is separate from latency; plan threads as T = ceil(QPS x L_seconds)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Re-ranking on a small candidate set is the most cost-effective way to raise recall beyond the Pareto frontier of the ANN index alone."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor recall continuously in production; an index can become fast and wrong as data drifts."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

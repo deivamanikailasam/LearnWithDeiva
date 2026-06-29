@@ -1,0 +1,195 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Normalisation projects a vector onto the unit hypersphere — every vector is scaled so its magnitude (L2 norm) equals 1. For embedding similarity, normalisation is not optional polish: it makes dot-product search equal to cosine similarity, ensures numerical stability, and is required before most vector databases and FAISS indexes can produce correct rankings."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "L2 Normalisation" }]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{\\mathbf{v}} = \\frac{\\mathbf{v}}{\\|\\mathbf{v}\\|_2} = \\frac{\\mathbf{v}}{\\sqrt{\\sum_i v_i^2}}"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import numpy as np\n\nv = np.array([3.0, 4.0])\nnorm = np.linalg.norm(v)        # 5.0\nv_normalised = v / norm         # [0.6, 0.8]\nprint(np.linalg.norm(v_normalised))  # 1.0\n\n# Batch normalisation — efficient with broadcasting\nvecs = np.random.randn(1000, 384).astype(np.float32)\nnorms = np.linalg.norm(vecs, axis=1, keepdims=True)  # (1000, 1)\nvecs_norm = vecs / norms                              # (1000, 384)\nprint(np.linalg.norm(vecs_norm, axis=1).mean())       # 1.0000"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Normalising at Encode Time vs. Index Time" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The recommended approach is to normalise once at encode time and store the normalised vectors:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "from sentence_transformers import SentenceTransformer\nimport numpy as np, faiss\n\nmodel = SentenceTransformer(\"BAAI/bge-m3\")\n\ndocs = [\"cats are small carnivores\", \"dogs are loyal companions\"]\n\n# Option 1: normalise in the encode call (recommended)\nvecs = model.encode(docs, normalize_embeddings=True)  # shape (2, 1024), ‖v‖ = 1\n\n# Option 2: normalise manually after encoding\nvecs_raw = model.encode(docs)                                      # raw\nnorms = np.linalg.norm(vecs_raw, axis=1, keepdims=True)\nvecs_manual = vecs_raw / norms\n\n# Both produce identical results\nprint(np.allclose(vecs, vecs_manual))  # True\n\n# Store in FAISS with dot-product index (== cosine after normalisation)\nindex = faiss.IndexFlatIP(1024)\nindex.add(vecs.astype(np.float32))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "FAISS Built-in Normalisation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FAISS can normalise vectors automatically with " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "faiss.normalize_L2()" },
+          { "type": "text", "text": ", which normalises in-place. This is useful when you receive vectors that haven't been normalised yet." }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss, numpy as np\n\nvecs = np.random.randn(100, 1024).astype(np.float32)\nprint(np.linalg.norm(vecs[0]))   # e.g. 31.4 — not normalised\n\nfaiss.normalize_L2(vecs)         # in-place, modifies vecs\nprint(np.linalg.norm(vecs[0]))   # 1.0\n\n# Also normalise the query before searching\nquery = np.random.randn(1, 1024).astype(np.float32)\nfaiss.normalize_L2(query)\n\nindex = faiss.IndexFlatIP(1024)\nindex.add(vecs)\nscores, ids = index.search(query, k=5)\nprint(scores)  # all values in [-1, 1] since both sides are unit normalised"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Matryoshka Normalisation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Matryoshka representation learning (MRL) models (OpenAI text-embedding-3, nomic-embed-text-v1.5) train vectors so any prefix of the full-dimension vector is also a meaningful embedding. When using a truncated dimension, normalise the truncated vector separately — the prefix is NOT already unit-normalised."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "from openai import OpenAI\nimport numpy as np\n\nclient = OpenAI()\n\nresponse = client.embeddings.create(\n    model=\"text-embedding-3-small\",\n    input=[\"Matryoshka dolls nest inside each other.\"],\n)\nfull_vec = np.array(response.data[0].embedding)   # 1536-dim, already unit-normalised\nprint(np.linalg.norm(full_vec))   # 1.0\n\n# Truncate to 256 dims — the prefix is NOT unit-normalised\ntruncated = full_vec[:256]\nprint(np.linalg.norm(truncated))   # ~0.41 (some norm is in the dropped dims)\n\n# Must re-normalise after truncation\ntruncated_norm = truncated / np.linalg.norm(truncated)\nprint(np.linalg.norm(truncated_norm))   # 1.0"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Effect of Skipping Normalisation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Failure to normalise when using an inner-product index causes high-magnitude vectors to dominate rankings regardless of semantic relevance — a long document ranks higher than a short one on the same topic, simply because its embedding has larger magnitude."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import numpy as np, faiss\nfrom sentence_transformers import SentenceTransformer\n\nmodel = SentenceTransformer(\"BAAI/bge-m3\")\n\n# Short and long versions of the same content\nshort_doc = \"cats are small carnivores\"\nlong_doc = (\"Cats are small carnivorous mammals. They are obligate carnivores,\"\n            \" meaning they require nutrients found only in animal flesh. \"\n            \"Cats have been domesticated for approximately 9,500 years and are among \"\n            \"the most popular domestic pets in the world.\")\nquery = \"feline pets\"\n\nvecs_raw = model.encode([short_doc, long_doc]).astype(np.float32)\nnorms = np.linalg.norm(vecs_raw, axis=1)\nprint(f\"Short doc norm: {norms[0]:.2f}\")  # e.g. 0.94\nprint(f\"Long doc norm:  {norms[1]:.2f}\")  # e.g. 0.98 — slightly larger\n\n# Difference is subtle for most models since they use LayerNorm internally.\n# But for bag-of-words or TF-IDF embeddings, the effect is extreme.\n# Always normalise — it's cheap and never hurts."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Other Normalisation Types (Rarely Used)" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "L1 normalisation" },
+                  { "type": "text", "text": " (divide by sum of absolute values) — makes the vector a probability distribution. Used in topic models and some sparse representations. Not useful for dense embedding similarity." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Mean-centering" },
+                  { "type": "text", "text": " — subtract the mean vector of the corpus before L2 normalisation. Can improve nearest-neighbour recall when embeddings have a strong common component (isotropic bias). Rarely used in practice for text." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "marks": [{ "type": "bold" }], "text": "Whitening" },
+                  { "type": "text", "text": " — rotate and scale to make the covariance matrix the identity. Occasionally used in research to improve isotropy of embedding spaces, but complex to implement and rarely worth the effort for RAG." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "For almost all embedding use cases: use L2 normalisation, do it at encode time with normalize_embeddings=True, and use an inner-product index. The other normalisation types are specialist tools."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
