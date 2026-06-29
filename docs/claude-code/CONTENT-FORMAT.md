@@ -12,16 +12,16 @@ instructions after the subject id; otherwise this spec applies.
 
 ## Length and depth
 
-**DURATION REQUIREMENT (STRICT): Every sub-subtopic MUST compute to between 1 hour 30 minutes (1.5h) and 2 hours 30 minutes (2.5h). Both ends are hard limits — do not submit content below 1.5h or above 2.5h.**
+**DURATION REQUIREMENT (STRICT): Every sub-subtopic MUST compute to between 1 hour 30 minutes (1.5h) and 3 hours (3.0h). Both ends are hard limits — do not submit content below 1.5h or above 3.0h.**
 
-To target the 1.5h–2.5h window reliably, aim for content with roughly:
+To target the 1.5h–3.0h window reliably, aim for content with roughly:
 - 15–25 headings (h2/h3)
 - 3–6 code blocks totalling 100–200 lines of code
 - 1–2 SVG diagrams
 - 30–60 list items
 - 1,500–3,000 words of prose text
 
-These are calibration guides, not rigid counts. After authoring, mentally estimate whether the content reads as 1.5–2.5 hours of focused study. If it feels shorter, expand the thinnest sections. If it feels longer, trim repetition and merge overlapping sections.
+These are calibration guides, not rigid counts. After authoring, mentally estimate whether the content reads as 1.5–3.0 hours of focused study. If it feels shorter, expand the thinnest sections. If it feels longer, trim repetition and merge overlapping sections.
 
 - Maximize useful detail, not empty length.
 - Explain the topic thoroughly, from fundamentals to advanced points — cover all applicable content areas, but do not pad with repetition or boilerplate.
