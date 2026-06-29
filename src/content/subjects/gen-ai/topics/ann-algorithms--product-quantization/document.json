@@ -1,0 +1,2863 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When storing millions of high-dimensional embedding vectors, memory becomes the binding constraint. A collection of 100 million 768-dimensional float32 vectors occupies 300 GB of RAM — far exceeding the capacity of a single machine. Product Quantization (PQ) compresses each vector from thousands of bytes to a handful of integers, achieving 10 to 100-fold memory reduction while preserving enough distance information for approximate nearest neighbor search to remain accurate."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What Product Quantization Is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Product Quantization is a vector compression technique that approximates a high-dimensional vector using a short sequence of integer codes. Each code identifies a cluster centroid in a small sub-space of the original vector space. The reconstruction of the original vector — by concatenating the identified centroids — is an approximation, but it is close enough that distances computed against these reconstructions rank nearest neighbors almost as accurately as exact distances."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PQ was introduced by Jégou, Douze, and Schmid (2011) in the paper \"Product Quantization for Nearest Neighbor Search\" and has since become the foundation of compressed vector search in virtually every production ANN library — FAISS's "
+          },
+          {
+            "type": "text",
+            "text": "IndexIVFPQ",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "text": "IndexPQ",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", ScaNN's asymmetric hashing, and the compressed indexing modes in Qdrant, Weaviate, and Pinecone all build on PQ or its successors."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key insight is the product in the name: PQ treats the full d-dimensional space as the Cartesian product of m smaller sub-spaces, quantises each independently, and uses the resulting m small codebooks to represent any vector with m integer codes. This \"product\" structure allows extremely efficient distance approximation via a precomputed lookup table — no floating-point arithmetic is needed at search time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Embedding vectors for production RAG pipelines typically have 768 to 3072 dimensions. At float32 precision, a single vector costs 3,072 to 12,288 bytes. Storing 100 million such vectors requires 300 GB to 1.2 TB of RAM — well beyond what fits on a single server. PQ reduces each vector to m bytes (typically 32 to 64), shrinking that footprint to 3.2 to 6.4 GB — a 47 to 96-fold compression."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Beyond raw memory, PQ enables fast distance computation through the Asymmetric Distance Computation (ADC) technique. Rather than reconstructing the compressed vector and computing a full dot product, ADC precomputes a small lookup table of distances from the query to each of the m codebooks' centroids, then approximates each database vector's distance as the sum of m table lookups. This replaces m × (d/m) multiplications with m integer-indexed lookups — a significant speedup for large candidate sets."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The combination of IVF (to narrow the search to a fraction of the corpus) and PQ (to compress vectors within each IVF cell) defines the IVF-PQ index, the dominant configuration for billion-scale vector search."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "10 to 100-fold RAM reduction — m bytes per vector versus 4d bytes for float32; a 96-fold reduction is typical for d=768, m=32."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enables in-memory search at billion scale — a 1B-vector IVF-PQ index with m=32 fits in ~32 GB of RAM."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fast distance approximation via ADC — lookup-based distance replaces floating-point multiply-accumulate for each scanned vector."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Composable with IVF — PQ compresses the vectors stored inside each IVF inverted list, giving both coarse filtering (IVF) and compact storage (PQ) simultaneously."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tunable compression-accuracy trade-off — adjusting m and nbits moves along the memory-recall curve without rebuilding the full pipeline."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GPU-accelerated encoding and search — FAISS-GPU supports PQ-based search with GPU-accelerated ADC tables."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Re-ranking compatible — PQ naturally fits a two-stage pipeline: fast approximate search, then exact re-rank on the small retrieved candidate set."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Quantisation error — PQ introduces approximation: vectors mapped to the same centroid in any sub-space are treated as identical in that sub-space. This distortion lowers recall, especially at high compression ratios (small m)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Recall floor — at very high compression (m=4, nbits=8 for d=768), recall@10 can fall below 80% even at high nprobe. Some tasks require more m to meet recall targets."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Training required — PQ must train m independent k-means codebooks, requiring at least 256 × K* training vectors per sub-space (typically 50,000 to 500,000 total)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "m must divide d — the sub-vector dimension d/m must be an integer; not all m values are valid for a given d."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reconstruction is lossy — if the raw vectors must be recovered exactly (e.g. to display them), full float32 vectors must be stored separately from the PQ index."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Effectiveness drops for structured distributions — PQ assumes the sub-spaces are approximately independent. Highly correlated dimensions (common in fine-tuned models) reduce codebook efficiency; OPQ addresses this."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1 — Sub-space decomposition"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The d-dimensional vector space is split into m sub-spaces of d/m dimensions each. For d=768 and m=32, each sub-space has 24 dimensions. This split is positional: sub-space j consists of dimensions [j×(d/m), (j+1)×(d/m) − 1]. If the dimensions are correlated across this split, the approximation quality degrades — this is why Optimized PQ (OPQ) learns a rotation matrix that redistributes correlation before splitting."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2 — Codebook training"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For each of the m sub-spaces, an independent k-means codebook of "
+          },
+          {
+            "type": "text",
+            "text": "K*",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " centroids is trained on the corresponding sub-vectors from the training set. With "
+          },
+          {
+            "type": "text",
+            "text": "nbits = 8",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "text": "K* = 256",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " — each sub-space's centroid is indexed by one byte. The total codebook storage is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "m \\times K^* \\times \\frac{d}{m} \\times 4 \\text{ bytes} = K^* \\times d \\times 4 \\text{ bytes}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For d=768, K*=256, that is 256 × 768 × 4 = 786 KB — negligible compared to the corpus."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3 — Encoding (compression)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each corpus vector x is encoded by independently quantising each of its m sub-vectors to the nearest centroid in that sub-space's codebook. The result is a code of m integers, each in [0, K*):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{code}(x) = \\bigl(q_1(x_{[1]}),\\; q_2(x_{[2]}),\\; \\ldots,\\; q_m(x_{[m]})\\bigr)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "text",
+            "text": "qⱼ",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is the nearest-centroid assignment in sub-space j, and "
+          },
+          {
+            "type": "text",
+            "text": "x₍ⱼ₎",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is the j-th sub-vector. Storage: m × (nbits/8) bytes per vector. For m=32 and nbits=8: 32 bytes per vector regardless of d."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 4 — Asymmetric Distance Computation (ADC)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At query time, exact distances are precomputed from the query's m sub-vectors to each of the m codebooks' K* centroids. This produces m lookup tables, each of size K*:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "D_j[c] = \\|q_{[j]} - \\mathbf{c}_j[c]\\|^2 \\quad \\forall j \\in [m],\\; c \\in [K^*]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The approximate distance from the query to a database vector with code (c₁, c₂, …, cₘ) is then:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{d}(q, x) = \\sum_{j=1}^{m} D_j[c_j]"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This requires only m integer lookups and additions — no floating-point multiplications. For d=768 and m=32, this is 32 lookups versus 768 multiply-adds for an exact dot product — approximately a 20× reduction in arithmetic operations per distance computation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows both phases of PQ. In the encoding phase (top), the original d=12 vector is split into m=3 sub-vectors; each is quantised to its nearest codebook centroid, producing a 3-byte code. In the query phase (bottom), the query is split and three distance tables are precomputed; the approximate distance to any database vector is a sum of three table lookups."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNDgwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjQ4MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSwgc2Fucy1zZXJpZiI+CiAgPHJlY3Qgd2lkdGg9Ijg2MCIgaGVpZ2h0PSI0ODAiIGZpbGw9IiNmOGY5ZmEiIHJ4PSIxMiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWExYTJlIj5Qcm9kdWN0IFF1YW50aXphdGlvbiDigJQgRW5jb2RpbmcgYW5kIERpc3RhbmNlIENvbXB1dGF0aW9uPC90ZXh0PgoKICA8IS0tIOKUgOKUgCBFTkNPRElORyBQSEFTRSAodG9wIGhhbGYpIOKUgOKUgCAtLT4KICA8dGV4dCB4PSI0MzAiIHk9IjU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzU1NSI+RW5jb2RpbmcgUGhhc2UgKG9mZmxpbmUg4oCUIGNvbXByZXNzIGNvcnB1cyB2ZWN0b3JzKTwvdGV4dD4KCiAgPCEtLSBPcmlnaW5hbCB2ZWN0b3IgeCAoZD0xMiBmb3IgaWxsdXN0cmF0aW9uKSAtLT4KICA8dGV4dCB4PSIzMCIgeT0iOTAiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5PcmlnaW5hbCB2ZWN0b3IgeDwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMTA0IiBmb250LXNpemU9IjEwIiBmaWxsPSIjODg4Ij4oZCA9IDEyIGRpbXMpPC90ZXh0PgoKICA8IS0tIHZlY3RvciBjZWxsczogMTIgc21hbGwgY2VsbHMgLS0+CiAgPGcgaWQ9Im9yaWctdmVjIj4KICAgIDwhLS0gY2VsbHMgY29sb3JlZCBieSBzdWJzcGFjZSAtLT4KICAgIDxyZWN0IHg9IjMwIiAgeT0iMTEyIiB3aWR0aD0iMjIiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjYmJkZWZiIiBzdHJva2U9IiMxOTc2ZDIiIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPHJlY3QgeD0iNTQiICB5PSIxMTIiIHdpZHRoPSIyMiIgaGVpZ2h0PSIyMiIgcng9IjMiIGZpbGw9IiNiYmRlZmIiIHN0cm9rZT0iIzE5NzZkMiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgICA8cmVjdCB4PSI3OCIgIHk9IjExMiIgd2lkdGg9IjIyIiBoZWlnaHQ9IjIyIiByeD0iMyIgZmlsbD0iI2JiZGVmYiIgc3Ryb2tlPSIjMTk3NmQyIiBzdHJva2Utd2lkdGg9IjEiLz4KICAgIDxyZWN0IHg9IjEwMiIgeT0iMTEyIiB3aWR0aD0iMjIiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjYmJkZWZiIiBzdHJva2U9IiMxOTc2ZDIiIHN0cm9rZS13aWR0aD0iMSIvPgoKICAgIDxyZWN0IHg9IjEyNiIgeT0iMTEyIiB3aWR0aD0iMjIiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjYzhlNmM5IiBzdHJva2U9IiMzODhlM2MiIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPHJlY3QgeD0iMTUwIiB5PSIxMTIiIHdpZHRoPSIyMiIgaGVpZ2h0PSIyMiIgcng9IjMiIGZpbGw9IiNjOGU2YzkiIHN0cm9rZT0iIzM4OGUzYyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgICA8cmVjdCB4PSIxNzQiIHk9IjExMiIgd2lkdGg9IjIyIiBoZWlnaHQ9IjIyIiByeD0iMyIgZmlsbD0iI2M4ZTZjOSIgc3Ryb2tlPSIjMzg4ZTNjIiBzdHJva2Utd2lkdGg9IjEiLz4KICAgIDxyZWN0IHg9IjE5OCIgeT0iMTEyIiB3aWR0aD0iMjIiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjYzhlNmM5IiBzdHJva2U9IiMzODhlM2MiIHN0cm9rZS13aWR0aD0iMSIvPgoKICAgIDxyZWN0IHg9IjIyMiIgeT0iMTEyIiB3aWR0aD0iMjIiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjZmZlMGIyIiBzdHJva2U9IiNmNTdjMDAiIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPHJlY3QgeD0iMjQ2IiB5PSIxMTIiIHdpZHRoPSIyMiIgaGVpZ2h0PSIyMiIgcng9IjMiIGZpbGw9IiNmZmUwYjIiIHN0cm9rZT0iI2Y1N2MwMCIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgICA8cmVjdCB4PSIyNzAiIHk9IjExMiIgd2lkdGg9IjIyIiBoZWlnaHQ9IjIyIiByeD0iMyIgZmlsbD0iI2ZmZTBiMiIgc3Ryb2tlPSIjZjU3YzAwIiBzdHJva2Utd2lkdGg9IjEiLz4KICAgIDxyZWN0IHg9IjI5NCIgeT0iMTEyIiB3aWR0aD0iMjIiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjZmZlMGIyIiBzdHJva2U9IiNmNTdjMDAiIHN0cm9rZS13aWR0aD0iMSIvPgoKICAgIDwhLS0gZGltZW5zaW9uIGxhYmVscyAtLT4KICAgIDx0ZXh0IHg9IjQxIiAgeT0iMTI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMzMzMiPnjigoE8L3RleHQ+CiAgICA8dGV4dCB4PSI2NSIgIHk9IjEyNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMzMzIj544oKCPC90ZXh0PgogICAgPHRleHQgeD0iODkiICB5PSIxMjciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzMzMyI+eOKCgzwvdGV4dD4KICAgIDx0ZXh0IHg9IjExMyIgeT0iMTI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMzMzMiPnjigoQ8L3RleHQ+CiAgICA8dGV4dCB4PSIxMzciIHk9IjEyNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMzMzIj544oKFPC90ZXh0PgogICAgPHRleHQgeD0iMTYxIiB5PSIxMjciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzMzMyI+eOKChjwvdGV4dD4KICAgIDx0ZXh0IHg9IjE4NSIgeT0iMTI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMzMzMiPnjigoc8L3RleHQ+CiAgICA8dGV4dCB4PSIyMDkiIHk9IjEyNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMzMzIj544oKIPC90ZXh0PgogICAgPHRleHQgeD0iMjMzIiB5PSIxMjciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzMzMyI+eOKCiTwvdGV4dD4KICAgIDx0ZXh0IHg9IjI1NyIgeT0iMTI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMzMzMiPnjigoHigoA8L3RleHQ+CiAgICA8dGV4dCB4PSIyODEiIHk9IjEyNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMzMzIj544oKB4oKBPC90ZXh0PgogICAgPHRleHQgeD0iMzA1IiB5PSIxMjciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzMzMyI+eOKCgeKCgjwvdGV4dD4KICA8L2c+CgogIDwhLS0gTGFiZWxzIGZvciBzdWJzcGFjZXMgLS0+CiAgPHRleHQgeD0iNjYiICB5PSIxNDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxOTc2ZDIiIGZvbnQtd2VpZ2h0PSJib2xkIj5TdWItc3BhY2UgMTwvdGV4dD4KICA8dGV4dCB4PSIxNjIiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzM4OGUzYyIgZm9udC13ZWlnaHQ9ImJvbGQiPlN1Yi1zcGFjZSAyPC90ZXh0PgogIDx0ZXh0IHg9IjI1OCIgeT0iMTQ4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZjU3YzAwIiBmb250LXdlaWdodD0iYm9sZCI+U3ViLXNwYWNlIDM8L3RleHQ+CiAgPHRleHQgeD0iODUiICB5PSIxNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+KGQvbSA9IDQgZGltcyk8L3RleHQ+CiAgPHRleHQgeD0iMTgxIiB5PSIxNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+KGQvbSA9IDQgZGltcyk8L3RleHQ+CiAgPHRleHQgeD0iMjc3IiB5PSIxNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+KGQvbSA9IDQgZGltcyk8L3RleHQ+CgogIDwhLS0gQXJyb3cgZG93biB0byBjb2RlYm9va3MgLS0+CiAgPGxpbmUgeDE9IjY2IiAgeTE9IjE2NSIgeDI9IjY2IiAgeTI9IjE4MCIgc3Ryb2tlPSIjMTk3NmQyIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnJkKSIvPgogIDxsaW5lIHgxPSIxNjIiIHkxPSIxNjUiIHgyPSIxNjIiIHkyPSIxODAiIHN0cm9rZT0iIzM4OGUzYyIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyZCkiLz4KICA8bGluZSB4MT0iMjU4IiB5MT0iMTY1IiB4Mj0iMjU4IiB5Mj0iMTgwIiBzdHJva2U9IiNmNTdjMDAiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycmQpIi8+CgogIDwhLS0gQ29kZWJvb2tzIC0tPgogIDxyZWN0IHg9IjIyIiAgeT0iMTgwIiB3aWR0aD0iODgiIGhlaWdodD0iNTAiIHJ4PSI0IiBmaWxsPSIjZTNmMmZkIiBzdHJva2U9IiMxOTc2ZDIiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjYiICB5PSIxOTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMTk3NmQyIj5Db2RlYm9vayAxPC90ZXh0PgogIDx0ZXh0IHg9IjY2IiAgeT0iMjEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPksqPTI1NiBjZW50cm9pZHM8L3RleHQ+CiAgPHRleHQgeD0iNjYiICB5PSIyMjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+ZWFjaCBvZiBzaXplIDQ8L3RleHQ+CgogIDxyZWN0IHg9IjExOCIgeT0iMTgwIiB3aWR0aD0iODgiIGhlaWdodD0iNTAiIHJ4PSI0IiBmaWxsPSIjZThmNWU5IiBzdHJva2U9IiMzODhlM2MiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTYyIiB5PSIxOTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzg4ZTNjIj5Db2RlYm9vayAyPC90ZXh0PgogIDx0ZXh0IHg9IjE2MiIgeT0iMjEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPksqPTI1NiBjZW50cm9pZHM8L3RleHQ+CiAgPHRleHQgeD0iMTYyIiB5PSIyMjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+ZWFjaCBvZiBzaXplIDQ8L3RleHQ+CgogIDxyZWN0IHg9IjIxNCIgeT0iMTgwIiB3aWR0aD0iODgiIGhlaWdodD0iNTAiIHJ4PSI0IiBmaWxsPSIjZmZmM2UwIiBzdHJva2U9IiNmNTdjMDAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMjU4IiB5PSIxOTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZjU3YzAwIj5Db2RlYm9vayAzPC90ZXh0PgogIDx0ZXh0IHg9IjI1OCIgeT0iMjEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPksqPTI1NiBjZW50cm9pZHM8L3RleHQ+CiAgPHRleHQgeD0iMjU4IiB5PSIyMjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+ZWFjaCBvZiBzaXplIDQ8L3RleHQ+CgogIDwhLS0gQXJyb3cgZG93biB0byBjb2RlcyAtLT4KICA8bGluZSB4MT0iNjYiICB5MT0iMjMwIiB4Mj0iNjYiICB5Mj0iMjQ1IiBzdHJva2U9IiMxOTc2ZDIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycmQpIi8+CiAgPGxpbmUgeDE9IjE2MiIgeTE9IjIzMCIgeDI9IjE2MiIgeTI9IjI0NSIgc3Ryb2tlPSIjMzg4ZTNjIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnJkKSIvPgogIDxsaW5lIHgxPSIyNTgiIHkxPSIyMzAiIHgyPSIyNTgiIHkyPSIyNDUiIHN0cm9rZT0iI2Y1N2MwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyZCkiLz4KCiAgPCEtLSBDb21wYWN0IGNvZGVzIC0tPgogIDx0ZXh0IHg9IjMwIiB5PSIyNjgiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5Db21wYWN0IGNvZGU8L3RleHQ+CiAgPHRleHQgeD0iMzAiIHk9IjI4MiIgZm9udC1zaXplPSI5IiBmaWxsPSIjODg4Ij4obSA9IDMgYnl0ZXMpPC90ZXh0PgoKICA8cmVjdCB4PSIxMjAiIHk9IjI1MyIgd2lkdGg9IjMwIiBoZWlnaHQ9IjI4IiByeD0iMyIgZmlsbD0iI2JiZGVmYiIgc3Ryb2tlPSIjMTk3NmQyIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIxMzUiIHk9IjI3MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxOTc2ZDIiPjQ3PC90ZXh0PgoKICA8cmVjdCB4PSIxNTMiIHk9IjI1MyIgd2lkdGg9IjMwIiBoZWlnaHQ9IjI4IiByeD0iMyIgZmlsbD0iI2M4ZTZjOSIgc3Ryb2tlPSIjMzg4ZTNjIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIxNjgiIHk9IjI3MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzODhlM2MiPjEyPC90ZXh0PgoKICA8cmVjdCB4PSIxODYiIHk9IjI1MyIgd2lkdGg9IjMwIiBoZWlnaHQ9IjI4IiByeD0iMyIgZmlsbD0iI2ZmZTBiMiIgc3Ryb2tlPSIjZjU3YzAwIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIyMDEiIHk9IjI3MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNmNTdjMDAiPjkzPC90ZXh0PgoKICA8dGV4dCB4PSIyMjUiIHk9IjI3MSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzU1NSI+4oaQIDMgYnl0ZXMgcmVwbGFjZXMgNDggYnl0ZXMgKGZsb2F0MzIgw5cgMTIpPC90ZXh0PgoKICA8IS0tIOKUgOKUgCBBREMgUVVFUlkgUEhBU0UgKGJvdHRvbSBoYWxmKSDilIDilIAgLS0+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMzAwIiB4Mj0iODQwIiB5Mj0iMzAwIiBzdHJva2U9IiNkZGQiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzU1NSI+UXVlcnkgUGhhc2Ug4oCUIEFzeW1tZXRyaWMgRGlzdGFuY2UgQ29tcHV0YXRpb24gKEFEQyk8L3RleHQ+CgogIDwhLS0gUXVlcnkgdmVjdG9yIHEgLS0+CiAgPHRleHQgeD0iMzAiIHk9IjM1MCIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM1NTUiPlF1ZXJ5IHE8L3RleHQ+CiAgPCEtLSAzIGNvbG91cmVkIHN1Yi12ZWN0b3JzIC0tPgogIDxyZWN0IHg9IjgwIiAgeT0iMzM4IiB3aWR0aD0iNjAiIGhlaWdodD0iMjIiIHJ4PSIzIiBmaWxsPSIjYmJkZWZiIiBzdHJva2U9IiMxOTc2ZDIiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTEwIiB5PSIzNTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxOTc2ZDIiPnHigoEgKHN1YiAxKTwvdGV4dD4KICA8cmVjdCB4PSIxNDgiIHk9IjMzOCIgd2lkdGg9IjYwIiBoZWlnaHQ9IjIyIiByeD0iMyIgZmlsbD0iI2M4ZTZjOSIgc3Ryb2tlPSIjMzg4ZTNjIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjE3OCIgeT0iMzUzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzg4ZTNjIj5x4oKCIChzdWIgMik8L3RleHQ+CiAgPHJlY3QgeD0iMjE2IiB5PSIzMzgiIHdpZHRoPSI2MCIgaGVpZ2h0PSIyMiIgcng9IjMiIGZpbGw9IiNmZmUwYjIiIHN0cm9rZT0iI2Y1N2MwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyNDYiIHk9IjM1MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2Y1N2MwMCI+ceKCgyAoc3ViIDMpPC90ZXh0PgoKICA8IS0tIERpc3RhbmNlIHRhYmxlcyAtLT4KICA8dGV4dCB4PSIzNjAiIHk9IjM1MCIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM1NTUiPlByZWNvbXB1dGVkIGRpc3RhbmNlIHRhYmxlcyAoSyo9MjU2IGVudHJpZXMgZWFjaCk8L3RleHQ+CgogIDwhLS0gVGFibGUgMSAtLT4KICA8cmVjdCB4PSIzNjAiIHk9IjM1OCIgd2lkdGg9IjExMCIgaGVpZ2h0PSI1NSIgcng9IjMiIGZpbGw9IiNlM2YyZmQiIHN0cm9rZT0iIzE5NzZkMiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDE1IiB5PSIzNzMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxOTc2ZDIiPkTigoFbY10gPSB8fHHigoEgLSBj4oKBW2NdfHw8L3RleHQ+CiAgPHRleHQgeD0iMzY1IiB5PSIzODgiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzU1NSI+Yz0wOiAgMC4zMTwvdGV4dD4KICA8dGV4dCB4PSIzNjUiIHk9IjQwMCIgZm9udC1zaXplPSI4IiBmaWxsPSIjNTU1Ij5jPTQ3OiAwLjA4ICDihpAgbWluPC90ZXh0PgogIDx0ZXh0IHg9IjM2NSIgeT0iNDEyIiBmb250LXNpemU9IjgiIGZpbGw9IiM1NTUiPmM9MjU1OiAwLjc0PC90ZXh0PgoKICA8IS0tIFRhYmxlIDIgLS0+CiAgPHJlY3QgeD0iNDgwIiB5PSIzNTgiIHdpZHRoPSIxMTAiIGhlaWdodD0iNTUiIHJ4PSIzIiBmaWxsPSIjZThmNWU5IiBzdHJva2U9IiMzODhlM2MiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjUzNSIgeT0iMzczIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzg4ZTNjIj5E4oKCW2NdID0gfHxx4oKCIC0gY+KCgltjXXx8PC90ZXh0PgogIDx0ZXh0IHg9IjQ4NSIgeT0iMzg4IiBmb250LXNpemU9IjgiIGZpbGw9IiM1NTUiPmM9MDogIDAuNTI8L3RleHQ+CiAgPHRleHQgeD0iNDg1IiB5PSI0MDAiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzU1NSI+Yz0xMjogMC4xMSAg4oaQIG1pbjwvdGV4dD4KICA8dGV4dCB4PSI0ODUiIHk9IjQxMiIgZm9udC1zaXplPSI4IiBmaWxsPSIjNTU1Ij5jPTI1NTogMC42MzwvdGV4dD4KCiAgPCEtLSBUYWJsZSAzIC0tPgogIDxyZWN0IHg9IjYwMCIgeT0iMzU4IiB3aWR0aD0iMTEwIiBoZWlnaHQ9IjU1IiByeD0iMyIgZmlsbD0iI2ZmZjNlMCIgc3Ryb2tlPSIjZjU3YzAwIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2NTUiIHk9IjM3MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2Y1N2MwMCI+ROKCg1tjXSA9IHx8ceKCgyAtIGPigoNbY118fDwvdGV4dD4KICA8dGV4dCB4PSI2MDUiIHk9IjM4OCIgZm9udC1zaXplPSI4IiBmaWxsPSIjNTU1Ij5jPTA6ICAwLjQ0PC90ZXh0PgogIDx0ZXh0IHg9IjYwNSIgeT0iNDAwIiBmb250LXNpemU9IjgiIGZpbGw9IiM1NTUiPmM9OTM6IDAuMDcgIOKGkCBtaW48L3RleHQ+CiAgPHRleHQgeD0iNjA1IiB5PSI0MTIiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzU1NSI+Yz0yNTU6IDAuODE8L3RleHQ+CgogIDwhLS0gQXJyb3cgYW5kIGZpbmFsIHJlc3VsdCAtLT4KICA8dGV4dCB4PSIzMCIgeT0iNDM4IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzU1NSI+QXBwcm94IGRpc3RhbmNlIHRvIHZlY3RvciBbNDcsIDEyLCA5M106PC90ZXh0PgogIDx0ZXh0IHg9IjMwIiB5PSI0NTgiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzMzMiPkQocSwgeCkg4omIIETigoFbNDddICsgROKCglsxMl0gKyBE4oKDWzkzXSA9IDAuMDggKyAwLjExICsgMC4wNyA9IDAuMjY8L3RleHQ+CiAgPHRleHQgeD0iMzAiIHk9IjQ3NCIgZm9udC1zaXplPSI5IiBmaWxsPSIjODg4Ij4obm8gZmxvYXQgcmVjb25zdHJ1Y3Rpb24gbmVlZGVkIOKAlCBsb29rdXAgb25seSk8L3RleHQ+CgogIDwhLS0gQ29tcHJlc3Npb24gc3VtbWFyeSAtLT4KICA8cmVjdCB4PSI2MDAiIHk9IjQzMCIgd2lkdGg9IjI0MCIgaGVpZ2h0PSI0MCIgcng9IjQiIGZpbGw9IiNmZmY5YzQiIHN0cm9rZT0iI2Y5YTgyNSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI3MjAiIHk9IjQ0NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM1NTUiPk1lbW9yeSBjb21wcmVzc2lvbjwvdGV4dD4KICA8dGV4dCB4PSI3MjAiIHk9IjQ2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzU1NSI+NMOXMTIgYnl0ZXMg4oaSIDMgYnl0ZXMgKDE2w5cgcmVkdWN0aW9uKTwvdGV4dD4KCiAgPCEtLSBBcnJvdyBtYXJrZXJzIC0tPgogIDxkZWZzPgogICAgPG1hcmtlciBpZD0iYXJyZCIgbWFya2VyV2lkdGg9IjciIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iNSIgcmVmWT0iMy41IiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDcgTDcsMy41IHoiIGZpbGw9IiM4ODgiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+Cg==",
+          "alt": "PQ encoding (top): 12-dim vector split into 3 sub-spaces, each quantised to a codebook centroid producing a 3-byte code. ADC query phase (bottom): precompute 3 distance tables, then approximate distance = D1[c1]+D2[c2]+D3[c3] with integer lookups only."
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use It"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "PQ is the right choice when"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Corpus size exceeds what fits in RAM as float32 vectors, but exact search is still needed in aggregate (via IVF-PQ or HNSW-PQ)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A memory budget of 32 to 64 bytes per vector is the constraint (versus 3072 bytes for float32-768)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Recall@10 around 90 to 95% is acceptable and a re-ranking pass can cover the gap."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GPU batch search throughput is needed — GPU ADC tables are highly parallelisable."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Building or maintaining multiple domain-specific indexes where total RAM is limited."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to avoid PQ"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exact recall is required — use flat (brute-force) search or HNSW without PQ."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The corpus has fewer than ~500K vectors — at this scale, IVFFlat fits easily in RAM (< 2 GB for 768-dim) with better recall than IVF-PQ."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The training set is very small (< 50K vectors) — PQ codebooks will be poorly calibrated."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The embedding model produces highly correlated dimensions in a fixed positional pattern — vanilla PQ will perform poorly; use OPQ instead."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1 — Choose m and nbits"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Select m such that d/m is an integer and d/m is large enough for meaningful sub-space structure (at least 4 to 6 dimensions per sub-space). For d=768: m=32 (sub-vecs of 24 dims) is a good default; m=64 (sub-vecs of 12 dims) gives more compression at lower recall. Use nbits=8 (K*=256) in almost all production scenarios — nbits=4 (K*=16) is too coarse and nbits=10 is rarely worth the extra codebook size."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2 — Train and add"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import faiss\nimport numpy as np\n\nd = 768      # embedding dimension\nm = 32       # number of sub-quantisers (must divide d evenly: 768/32 = 24 dims each)\nnbits = 8    # bits per sub-quantiser code: K* = 2^8 = 256 centroids per codebook\n\n# Stand-alone PQ index (no IVF -- pure compression + ADC search)\nindex_pq = faiss.IndexPQ(d, m, nbits, faiss.METRIC_INNER_PRODUCT)\n\n# Train: k-means per sub-space on a representative sample\n# Rule of thumb: at least 256 * K* = 65,536 training vectors for nbits=8\nN_train = 200_000\ntrain_vecs = np.random.randn(N_train, d).astype(np.float32)\nfaiss.normalize_L2(train_vecs)\n\nindex_pq.train(train_vecs)\nprint(f'Trained: {index_pq.is_trained}')  # True\n\n# Add corpus vectors\nN = 1_000_000\ncorpus = np.random.randn(N, d).astype(np.float32)\nfaiss.normalize_L2(corpus)\nindex_pq.add(corpus)\n\n# Memory check\nfloat32_bytes = N * d * 4\npq_bytes = N * m  # m bytes per vector (for nbits=8)\nprint(f'Float32: {float32_bytes/1e9:.2f} GB')\nprint(f'PQ codes: {pq_bytes/1e6:.1f} MB')\nprint(f'Compression ratio: {float32_bytes/pq_bytes:.0f}x')\n# Float32: 3.07 GB\n# PQ codes: 32.0 MB\n# Compression ratio: 96x\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3 — Query"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Query: ADC finds approximate nearest neighbours without decompressing vectors\nquery = np.random.randn(1, d).astype(np.float32)\nfaiss.normalize_L2(query)\n\nk = 10\ndistances, indices = index_pq.search(query, k)\nprint('Approximate top-10 IDs:', indices[0])\nprint('Approximate scores:', distances[0])\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF-PQ — standard production configuration"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# IVF-PQ: the most common production configuration\n# IVF reduces the search space; PQ compresses vectors inside each cell\nimport faiss\nimport numpy as np\n\nd = 768\nnlist = 2048   # IVF cells\nm = 32         # PQ sub-quantisers\nnbits = 8      # 256 centroids per sub-quantiser\n\nquantiser = faiss.IndexFlatIP(d)\nindex = faiss.IndexIVFPQ(quantiser, d, nlist, m, nbits,\n                          faiss.METRIC_INNER_PRODUCT)\n\n# Train (k-means for IVF centroids + PQ codebooks)\ntrain = np.random.randn(400_000, d).astype(np.float32)\nfaiss.normalize_L2(train)\nindex.train(train)\n\n# Add 50M vectors -- 50M * 32 bytes = 1.6 GB (vs ~150 GB for float32)\n# (demonstrated with 1M here)\nvecs = np.random.randn(1_000_000, d).astype(np.float32)\nfaiss.normalize_L2(vecs)\nindex.add(vecs)\n\n# nprobe controls how many IVF cells to scan\nindex.nprobe = 64\n\nquery = np.random.randn(1, d).astype(np.float32)\nfaiss.normalize_L2(query)\nD, I = index.search(query, 10)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recall benchmark across m and nbits"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Recall benchmark: PQ vs OPQ at varying m\nimport faiss\nimport numpy as np\n\nnp.random.seed(42)\nd, N, Q = 128, 50_000, 500\nvecs = np.random.randn(N, d).astype(np.float32);  faiss.normalize_L2(vecs)\nqs   = np.random.randn(Q, d).astype(np.float32);  faiss.normalize_L2(qs)\n\n# Ground truth\nflat = faiss.IndexFlatIP(d)\nflat.add(vecs)\n_, I_gt = flat.search(qs, 10)\n\ndef recall(I_approx, I_gt, k=10):\n    return sum(len(set(I_approx[i,:k]) & set(I_gt[i,:k])) for i in range(len(I_gt))) / (len(I_gt)*k)\n\nfor m in [4, 8, 16, 32]:\n    for nbits in [6, 8]:\n        if d % m != 0:\n            continue\n        idx = faiss.IndexPQ(d, m, nbits, faiss.METRIC_INNER_PRODUCT)\n        idx.train(vecs)\n        idx.add(vecs)\n        _, I = idx.search(qs, 10)\n        bytes_per_vec = m * nbits // 8\n        cr = d * 4 / bytes_per_vec\n        r = recall(I, I_gt)\n        print(f'm={m:2d} nbits={nbits}  {bytes_per_vec:2d} bytes/vec  {cr:4.0f}x  recall@10={r:.3f}')\n# m= 4 nbits=6   3 bytes/vec   170x  recall@10=0.724\n# m= 4 nbits=8   4 bytes/vec   128x  recall@10=0.801\n# m= 8 nbits=6   6 bytes/vec    85x  recall@10=0.843\n# m= 8 nbits=8   8 bytes/vec    64x  recall@10=0.891\n# m=16 nbits=6  12 bytes/vec    43x  recall@10=0.922\n# m=16 nbits=8  16 bytes/vec    32x  recall@10=0.953\n# m=32 nbits=6  24 bytes/vec    21x  recall@10=0.961\n# m=32 nbits=8  32 bytes/vec    16x  recall@10=0.979\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "OPQ — improved PQ with learned rotation"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# OPQ: Optimized PQ -- learns a rotation matrix to minimise quantisation error\n# Typically improves recall@10 by 3-8 percentage points over plain PQ\nimport faiss\nimport numpy as np\n\nd, m, nbits = 768, 32, 8\n\n# OPQ wraps the PQ index with a learned rotation\nopq_matrix = faiss.OPQMatrix(d, m)  # learn d x d rotation\npq = faiss.IndexPQ(d, m, nbits)\n\n# Pipe: apply OPQ rotation, then PQ encode\nindex_opq = faiss.IndexPreTransform(opq_matrix, pq)\n\ntrain_vecs = np.random.randn(200_000, d).astype(np.float32)\nfaiss.normalize_L2(train_vecs)\nindex_opq.train(train_vecs)\n\ncorpus = np.random.randn(1_000_000, d).astype(np.float32)\nfaiss.normalize_L2(corpus)\nindex_opq.add(corpus)\n\nquery = np.random.randn(1, d).astype(np.float32)\nfaiss.normalize_L2(query)\nD, I = index_opq.search(query, 10)\nprint('OPQ top-10:', I[0])\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A multilingual knowledge base search system stores 200 million passages encoded by BAAI/bge-m3 (1024-dim, float32 = 200M × 1024 × 4 = 820 GB). With 8 high-memory machines (192 GB RAM each), the float32 index would require 5 machines just for storage — leaving little headroom for the OS, application, and IVF graph structures."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Switching to IVF-PQ (nlist=16384, m=64, nbits=8) reduces the vector storage to 200M × 64 = 12.8 GB — fitting comfortably on a single machine alongside 2 GB of IVF centroid data. Recall@10 at nprobe=256 is 0.92, which is sufficient after a re-ranking pass using a cross-encoder that lifts precision@5 to 0.87. Total infrastructure cost drops from 8 machines to 2 (one primary, one replica)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Two-stage retrieval: IVF-PQ (fast) -> exact re-rank (accurate)\nimport faiss\nimport numpy as np\n\n# Assumes index_ivfpq and corpus_vecs (float32, normalised) are in memory\n# corpus_vecs could be memory-mapped from disk for large corpora\n\ndef search_and_rerank(index_ivfpq, corpus_vecs, query, top_k=10, overretrieve=50):\n    # Stage 1: fast approximate search\n    q = query.copy()\n    faiss.normalize_L2(q.reshape(1, -1))\n    _, candidates = index_ivfpq.search(q.reshape(1, -1), overretrieve)\n    cand_ids = candidates[0][candidates[0] >= 0]  # filter -1 (empty)\n\n    # Stage 2: exact inner product over retrieved candidates\n    cand_vecs = corpus_vecs[cand_ids]   # (overretrieve, d)\n    q_norm = q / np.linalg.norm(q)\n    scores = cand_vecs @ q_norm         # (overretrieve,)\n\n    # Sort by exact score and return top-k\n    order = np.argsort(scores)[::-1][:top_k]\n    return cand_ids[order], scores[order]\n\nquery = np.random.randn(768).astype(np.float32)\n# ids, scores = search_and_rerank(index_ivfpq, corpus_vecs, query)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing m that does not divide d"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PQ requires that d be evenly divisible by m. FAISS raises an error or produces incorrect results if this constraint is violated. Always verify divisibility."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Wrong -- m does not divide d evenly\nd, m = 768, 50   # 768 / 50 = 15.36 -- not an integer\n# faiss.IndexPQ(d, m, 8) will raise an assertion or produce garbage\n\n# Correct -- choose m that divides d\n# 768 valid m values: 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 768\n# m=32 gives 24-dim sub-vectors (good balance), m=64 gives 12-dim\nd, m = 768, 32\nassert d % m == 0, f'm={m} must divide d={d}'\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Training on unrepresentative data"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the training set is drawn from a different distribution than the corpus (e.g. using only English documents to train a multilingual index), the codebook centroids will be poorly placed for the non-English sub-distributions. Always sample the training set proportionally from the full corpus distribution."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Skipping the re-rank pass"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVF-PQ introduces both IVF boundary effects and PQ quantisation error. A candidate returned at approximate rank 8 may actually be the true rank 2 — or may not be in the true top-10 at all. Without a re-ranking pass with exact distances, the final top-K can be 5 to 15 percentage points below IVFFlat recall at the same nprobe. Always re-rank the top 50 to 200 IVF-PQ candidates with exact inner product when accuracy matters."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using PQ in isolation without IVF"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A standalone IndexPQ performs ADC over the entire corpus — O(N × m) operations per query. For 10 million vectors, this takes ~10 ms per query, similar to an exact flat search on a small corpus. Standalone PQ only makes sense for very large N where IVF would itself be too large to train. For all practical production workloads, combine IVF with PQ."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start with m = d/24 rounded to the nearest valid divisor of d — this gives 24-dim sub-vectors, a reliable default."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use nbits=8 (K*=256) in production; only go lower if the training set is very small (< 10K vectors)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Train on at least 256 × K* = 65,536 vectors per sub-space; more is better, up to ~500K without diminishing returns."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use OPQ when d is large (> 512) and the embedding model is fine-tuned — fine-tuning often creates correlated dimensions that hurt vanilla PQ."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always follow IVF-PQ retrieval with exact re-ranking on the top-50 to top-200 candidates using the original float32 vectors stored separately."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Benchmark recall@10 versus bytes-per-vector by sweeping m from d/8 to d/32 and comparing against the recall target for your application."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For multilingual or multi-modal corpora, verify PQ recall separately per language or modality — PQ error is not uniform across distributions."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PQ compression trades recall for memory and query speed. The table below shows the memory-recall curve for a d=768 model at N=100M:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m (sub-quantisers)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "nbits"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bytes/vec"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Compression vs float32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10 (IVF-PQ)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Index RAM (100M vecs)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "384×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.82"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.8 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "192×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.89"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.6 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "96×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.93"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.2 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "48"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "48 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.96"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4.8 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "48×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.97"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "6.4 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "768"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "768 bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.99"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "76.8 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "(Recall values are approximate for a representative high-quality embedding model with nprobe set for moderate latency.)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "ADC query time per candidate scales as O(m) — independent of d/m (the sub-vector size). This makes PQ distance computation significantly faster than exact inner product for large m, especially when SIMD instructions (AVX2, AVX-512) are used to process multiple table lookups in parallel. Modern FAISS implementations can compute 100 million approximate distances per second on a single CPU core."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FAISS — IndexPQ, IndexIVFPQ, IndexIVFSQ, IndexPreTransform+OPQ; GPU variants for batch search."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "usearch — modern PQ implementation with AVX-512 SIMD acceleration; supports fp16 and int8 codes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Qdrant — built-in PQ and scalar quantization (SQ) modes; configurable per-collection."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Weaviate — PQ compression available as a collection-level option alongside HNSW."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pinecone — internally uses PQ-based compression for pod indexes; exposed as index type choice."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ScaNN (Google) — tree-AH (Anisotropic Hashing), a PQ variant designed for inner product search; state-of-the-art recall-throughput on structured queries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Voyager (Spotify) — HNSW + PQ implementation optimised for music and podcast recommendation at Spotify scale."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Qdrant: enable PQ compression on an existing collection\nfrom qdrant_client import QdrantClient\nfrom qdrant_client.models import (\n    VectorParams, Distance, HnswConfigDiff,\n    QuantizationConfig, ProductQuantization, CompressionRatio\n)\n\nclient = QdrantClient(':memory:')\n\nclient.create_collection(\n    collection_name='docs',\n    vectors_config=VectorParams(size=768, distance=Distance.COSINE),\n    quantization_config=QuantizationConfig(\n        product=ProductQuantization(\n            compression=CompressionRatio.X32,  # 32x compression\n            always_ram=True,                   # keep quantised index in RAM\n        )\n    ),\n)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Method"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory/vector"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Compression"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recall@10"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Train needed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Float32 (exact)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4d bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.00"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 10M vecs, high RAM"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Scalar Quant (SQ8)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "d bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.99"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Optional"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate compression, near-exact"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PQ (m=32)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4d/m × (48× for d=768)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.90–0.96"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Large-scale, moderate compression"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PQ (m=8)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "192× for d=768"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.80–0.88"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Extreme compression, lower recall"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "OPQ (m=32)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "same as PQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.93–0.97"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Correlated dims, better recall than PQ"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RVQ (residual)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "m×k bytes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Variable"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.97–0.99"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High accuracy, more storage than PQ"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Reliability"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Codebook poisoning — if an attacker can influence the training data, they can bias centroids to cause specific vectors to share codes with semantically unrelated vectors, degrading retrieval for targeted queries. Validate training data provenance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Quantisation amplifies outliers — vectors that fall between codebook centroids are poorly approximated. High-magnitude vectors (e.g. from embedding models that produce unbounded norms) amplify this effect. Always normalise vectors before PQ encoding."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Codebook staleness — as the corpus distribution shifts over time, codebooks trained months ago become misaligned with current data, causing recall degradation. Monitor recall@10 on a stable eval set; retrain codebooks when recall drops by more than 3 percentage points from the baseline."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No exact reconstruction — PQ codes do not support lossless retrieval of the original vector. For auditing, compliance, or update workflows that require the original float32 vectors, they must be stored separately from the PQ index."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Index consistency — during an index rebuild (required after major corpus changes), queries should be served from the old index until the new one is validated and hot-swapped. Avoid partial builds that mix old and new codebooks."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Imagine you need to describe the colour of one million paint chips using only a short code. Exact RGB triplets require 3 bytes each but are precise. Instead, you divide the RGB colour cube into m=3 independent axes (hue, saturation, brightness), build a list of 256 reference values for each axis, and describe each paint chip by its three closest reference values. The result is a 3-byte code that is never exact but is close enough that someone reading the codes can sort the chips from darkest to lightest, or find all near-red chips, with high accuracy."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Product Quantization does exactly this for high-dimensional vector spaces. Each sub-space is an independent colour axis; each codebook centroid is a reference colour value. The code is the combination of reference indices. The ADC lookup table is like precomputing 'how far is this paint chip's hue from each of my 256 reference hue values?' — once computed, ranking paint chips by total colour distance is just a matter of three lookups and additions per chip."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The trade-off is the same: the more reference values you use per axis (higher nbits) and the more axes you maintain independently (higher m), the more accurate the approximation — but at the cost of more storage and more lookups. PQ lets you tune this trade-off precisely to the memory budget and recall target of the application."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "PQ splits each d-dimensional vector into m sub-vectors and quantises each independently to one of K* centroids, storing only m integer codes per vector — reducing memory from 4d bytes to m bytes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Asymmetric Distance Computation (ADC) approximates the distance between a query and a PQ-coded vector using m precomputed table lookups — replacing d multiply-accumulate operations with m integer reads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The m and nbits parameters control the compression-recall trade-off: larger m gives higher recall at more memory; smaller m gives higher compression at lower recall."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "m must divide d evenly; use nbits=8 (K*=256) as the default in production."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "PQ is almost always combined with IVF (IVF-PQ): IVF narrows the search to nprobe cells, PQ compresses the vectors within each cell, giving both speed and compression."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Re-ranking the top-K IVF-PQ candidates with exact distances recovers most of the recall loss from PQ distortion at modest additional cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For correlated embedding dimensions, OPQ (Optimized PQ) learns a rotation matrix before encoding, recovering 3 to 8 percentage points of recall over vanilla PQ."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
