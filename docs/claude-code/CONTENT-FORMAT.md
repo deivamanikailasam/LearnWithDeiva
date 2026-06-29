@@ -12,48 +12,52 @@ instructions after the subject id; otherwise this spec applies.
 
 ## Length and depth
 
+**MINIMUM DEPTH REQUIREMENT (STRICT): Every sub-subtopic MUST be authored to a computed reading/study duration of at least 1 hour 30 minutes (1.5h). This is a hard floor — do not submit content that will compute below this threshold. To reliably hit 1.5h, aim for the depth and volume of the Stage 1 content (llm-apis / llm-applications) which consistently computes to 1.5h–2h per sub-subtopic. When in doubt, write more, not less.**
+
 - Maximize useful detail, not empty length.
-- Explain the topic thoroughly, from fundamentals to advanced points when relevant.
-- Cover all major sub-points needed to properly understand the topic.
+- Explain the topic thoroughly, from fundamentals to advanced points — cover all applicable content areas exhaustively, not just the "key" ones.
+- Cover every major sub-point needed to properly understand the topic. Do not stop at a high-level treatment of any point.
 - Prefer complete coverage over concise summaries; do not stop at a short summary if more useful detail can be added.
+- Each major section must have multiple paragraphs of explanation, not just a sentence or two.
+- Include multiple runnable code examples per topic — at minimum one simple introductory example and one production-realistic example.
 - Avoid filler, repetition, and generic statements; every paragraph must add new value.
 - Use clear section headings and structured formatting so long content stays readable.
 - When the topic is broad, break it into logical parts and explain each part thoroughly.
 - Include step-by-step guidance, comparisons, and real-world examples when helpful.
 - Lead with the most important sections in full detail, then continue with the remaining sections as far as possible.
 - Never intentionally shorten the content.
+- **If you finish authoring and the content feels brief, it is too brief. Add more detail, more examples, more explanation.**
 
 ## Content structure
 
-Organize the document into clearly labeled sections using headings. When
-relevant and helpful, cover these aspects (omit sections clearly not
-applicable):
+**MANDATORY: Cover ALL of the sections below in every sub-subtopic. Every section must be substantive — multiple paragraphs and/or code blocks per section. Do NOT omit any section. The only exception is if a section is completely inapplicable to the specific topic (e.g. "Security & reliability" for a purely mathematical concept) — in that case, combine it with the closest related section rather than skipping it entirely. When uncertain whether a section applies, include it.**
 
-1. What it is — definition and brief context
-2. Why it matters — purpose, importance, and problems it solves
-3. Benefits — key advantages and positive outcomes
-4. Trade-offs — limitations, downsides, and costs
-5. How it works — core mechanics or workflow
-6. Architecture — process / flow / component architecture (use a diagram here when it helps; see "Visuals")
-7. When to use it — typical scenarios, and when *not* to use it
-8. How to implement — practical, step-by-step guidance
-9. Examples — simple, illustrative examples
-10. Real-world example — production usage or realistic scenario (mention scale, constraints, architecture when appropriate)
-11. Common mistakes — pitfalls, misconceptions, and anti-patterns
-12. Best practices — practical recommendations and optimization tips
-13. Performance & scalability — behavior under load, bottlenecks, and scaling strategies
-14. Tooling & ecosystem — relevant tools, frameworks, and platforms
-15. Comparison with alternatives — concise comparison to related approaches (a table works well)
-16. Security & reliability — risks, failure modes, and mitigations
-17. Images / visuals — charts, diagrams, screenshots where they add real value (see "Visuals")
+Organize the document into clearly labeled sections using headings:
 
-For conceptual topics, also include:
+1. **What it is** — definition and brief context; two or more paragraphs
+2. **Why it matters** — purpose, importance, and problems it solves; explain the pain points this addresses with concrete examples
+3. **Benefits** — key advantages and positive outcomes; list with explanation of each
+4. **Trade-offs** — limitations, downsides, and costs; be honest and specific, not generic
+5. **How it works** — core mechanics or workflow; thorough multi-paragraph explanation with any relevant math/formulas using `blockMath`/`inlineMath` nodes
+6. **Architecture** — process / flow / component architecture; **REQUIRED: include a hand-authored SVG diagram showing the architecture or flow** (see "Visuals")
+7. **When to use it** — typical scenarios and when *not* to use it; include decision criteria
+8. **How to implement** — practical, step-by-step guidance; include a complete worked implementation with code
+9. **Examples** — at minimum two runnable code examples: one simple/introductory, one more realistic
+10. **Real-world example** — production usage or realistic scenario; mention scale, constraints, architecture choices; include code where applicable
+11. **Common mistakes** — pitfalls, misconceptions, and anti-patterns; code examples of the wrong way vs. the right way when possible
+12. **Best practices** — practical recommendations and optimization tips; actionable, specific guidance
+13. **Performance & scalability** — behavior under load, bottlenecks, scaling strategies; include benchmarks or complexity analysis
+14. **Tooling & ecosystem** — relevant tools, frameworks, platforms; include code showing how to use them
+15. **Comparison with alternatives** — concise comparison to related approaches; **use a comparison table**
+16. **Security & reliability** — risks, failure modes, mitigations; production hardening
+17. **Images / visuals** — at minimum one SVG diagram is REQUIRED in every document (see "Visuals" and section 6 above)
 
-- Mental model — an intuitive way to think about the concept.
-- Key takeaways — 3–7 concise bullets summarizing the most important points.
+For conceptual topics, ALSO include:
 
-If the topic is narrow or simple, group multiple related aspects into the same
-section and prioritize clarity over exhaustiveness.
+- **Mental model** — an intuitive way to think about the concept; use an analogy, visual description, or worked thought experiment
+- **Key takeaways** — 5–9 concise bullets summarizing the most important points (minimum 5 bullets)
+
+Every document MUST end with a Key takeaways section.
 
 ## Style and formatting
 
@@ -131,8 +135,9 @@ then run `npm run content:embed-images -- <document.json>`, which rewrites every
   no dependencies and crisp at any size.
 - **Data charts:** write a small `python3` + matplotlib script that saves a
   `.png`, then reference that file the same way.
-- Add a visual only where it genuinely aids understanding (architecture, a
-  multi-step flow, a comparison best shown graphically) — not decoratively.
+- **At least one SVG diagram is REQUIRED in every document.** The architecture section (section 6) must always have one. Add additional diagrams wherever they aid understanding.
+- Add visuals where they genuinely aid understanding (architecture, a
+  multi-step flow, a comparison best shown graphically). The minimum is one per document — include more when useful.
 
 Encoding rules:
 
