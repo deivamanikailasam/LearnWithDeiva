@@ -1,0 +1,516 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Validate Tool Arguments"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The LLM generates tool arguments as a JSON string. Even with a clear schema, it can produce arguments that are syntactically valid JSON but semantically wrong: a string where an integer is required, an enum value with the wrong casing, a date in the wrong format, or a negative number where only positive values make sense. Executing a tool with bad arguments can corrupt data, cause confusing errors, or silently produce wrong results."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Validation sits between argument parsing and tool execution. Its job: confirm the arguments are typed correctly, within allowed ranges, and structurally complete before any side effect runs."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The LLM is a probabilistic text generator, not a type-safe compiler. Validation is the contract enforcement layer that the schema alone cannot provide."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layer 1 \u2014 JSON Parsing"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first validation step is confirming the argument string is valid JSON. The LLM occasionally emits truncated or malformed JSON, especially for large argument objects or under token pressure. Always wrap the parse in a try/except and return the error as a tool result."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json\n\ndef parse_tool_args(raw: str) -> tuple[dict | None, str | None]:\n    \"\"\"Returns (args, None) on success, (None, error_message) on failure.\"\"\"\n    try:\n        args = json.loads(raw)\n    except json.JSONDecodeError as e:\n        return None, f\"Malformed JSON in tool call: {e}\"\n    if not isinstance(args, dict):\n        return None, f\"Expected a JSON object, got {type(args).__name__}\"\n    return args, None\n\ndef dispatch(tool_call) -> str:\n    args, err = parse_tool_args(tool_call.function.arguments)\n    if err:\n        return json.dumps({\"error\": err})\n    return execute_tool(tool_call.function.name, args)"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layer 2 \u2014 Schema Validation with jsonschema"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After JSON parsing, validate the argument object against the tool's parameter schema. The "
+          },
+          {
+            "type": "text",
+            "text": "jsonschema",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " library validates types, required fields, enum values, numeric ranges, and string patterns."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# pip install jsonschema\nimport json\nimport jsonschema\nfrom jsonschema import ValidationError, SchemaError\n\n# The schema is the same object you pass to the LLM as \"parameters\"\nSEARCH_SCHEMA = {\n    \"type\": \"object\",\n    \"properties\": {\n        \"query\":      {\"type\": \"string\", \"minLength\": 1},\n        \"top_k\":      {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 20},\n        \"department\": {\"type\": \"string\", \"enum\": [\"finance\", \"hr\", \"legal\", \"engineering\", \"all\"]},\n        \"include_metadata\": {\"type\": \"boolean\"},\n    },\n    \"required\": [\"query\"],\n    \"additionalProperties\": False,\n}\n\ndef validate_args(args: dict, schema: dict) -> str | None:\n    \"\"\"Returns None if valid, or an error message string if invalid.\"\"\"\n    try:\n        jsonschema.validate(args, schema)\n        return None\n    except ValidationError as e:\n        # e.path gives the field path; e.message gives the failure reason\n        field = \" -> \".join(str(p) for p in e.path) or \"root\"\n        return f\"Validation error at '{field}': {e.message}\"\n\n# Full dispatch pipeline\ndef dispatch_search(raw_args: str) -> str:\n    args, parse_err = parse_tool_args(raw_args)\n    if parse_err:\n        return json.dumps({\"error\": parse_err})\n\n    schema_err = validate_args(args, SEARCH_SCHEMA)\n    if schema_err:\n        return json.dumps({\"error\": schema_err})\n\n    return json.dumps(search_documents(**args))\n\n# Test \u2014 wrong enum value\nresult = dispatch_search('{\"query\": \"Q3 earnings\", \"department\": \"Finance\"}')\nprint(result)\n# {\"error\": \"Validation error at 'department': 'Finance' is not one of ['finance', 'hr', ...]\"}\n\n# Test \u2014 missing required field\nresult = dispatch_search('{\"top_k\": 5}')\nprint(result)\n# {\"error\": \"Validation error at 'root': 'query' is a required property\"}"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layer 3 \u2014 Pydantic Validation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pydantic combines parsing and validation in one step and supports field validators, cross-field checks, and automatic coercion. It is the most ergonomic option when you control the tool implementation."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pydantic import BaseModel, Field, field_validator, model_validator\nfrom typing import Optional\nimport json\n\nclass SearchArgs(BaseModel):\n    query: str = Field(min_length=1, description=\"Search query.\")\n    top_k: int = Field(default=5, ge=1, le=20)\n    department: str = Field(default=\"all\")\n    include_metadata: bool = Field(default=False)\n\n    @field_validator(\"department\")\n    @classmethod\n    def valid_department(cls, v: str) -> str:\n        allowed = {\"finance\", \"hr\", \"legal\", \"engineering\", \"all\"}\n        v = v.lower().strip()\n        if v not in allowed:\n            raise ValueError(f\"Must be one of {sorted(allowed)}, got {v!r}\")\n        return v\n\nclass DateRangeArgs(BaseModel):\n    start_date: str\n    end_date: str\n\n    @model_validator(mode=\"after\")\n    def end_after_start(self) -> \"DateRangeArgs\":\n        if self.end_date <= self.start_date:\n            raise ValueError(f\"end_date ({self.end_date}) must be after start_date ({self.start_date})\")\n        return self\n\ndef dispatch_with_pydantic(raw_args: str) -> str:\n    try:\n        args = SearchArgs.model_validate_json(raw_args)\n    except Exception as e:\n        return json.dumps({\"error\": f\"Argument validation failed: {e}\"})\n    return json.dumps(search_documents(\n        query=args.query,\n        top_k=args.top_k,\n        department=args.department,\n        include_metadata=args.include_metadata,\n    ))\n\n# Pydantic auto-coerces \"5\" -> 5 for integers, but strict mode disables this\nfrom pydantic import ConfigDict\n\nclass StrictSearchArgs(BaseModel):\n    model_config = ConfigDict(strict=True)  # no coercion\n    query: str\n    top_k: int = 5"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Semantic Validation \u2014 Business Rules"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Schema validation confirms types and ranges. Semantic validation enforces business rules that a JSON schema cannot express: the referenced record must exist, the date must not be in the past, the amount must not exceed the account balance."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from datetime import date\nimport json\n\ndef validate_booking_args(args: dict) -> str | None:\n    \"\"\"Return error string or None if valid.\"\"\"\n    # Rule 1: check-out must be after check-in\n    check_in = date.fromisoformat(args[\"check_in\"])\n    check_out = date.fromisoformat(args[\"check_out\"])\n    if check_out <= check_in:\n        return f\"check_out ({check_out}) must be after check_in ({check_in})\"\n\n    # Rule 2: check-in must not be in the past\n    today = date.today()\n    if check_in < today:\n        return f\"check_in ({check_in}) cannot be in the past (today is {today})\"\n\n    # Rule 3: room must exist in the database\n    room = get_room(args[\"room_id\"])\n    if room is None:\n        return f\"Room '{args['room_id']}' does not exist\"\n\n    # Rule 4: room must be available for the requested period\n    if not is_room_available(args[\"room_id\"], check_in, check_out):\n        return f\"Room '{args['room_id']}' is not available from {check_in} to {check_out}\"\n\n    return None   # all checks passed\n\ndef dispatch_booking(raw_args: str) -> str:\n    args, parse_err = parse_tool_args(raw_args)\n    if parse_err:\n        return json.dumps({\"error\": parse_err})\n\n    schema_err = validate_args(args, BOOKING_SCHEMA)\n    if schema_err:\n        return json.dumps({\"error\": schema_err})\n\n    semantic_err = validate_booking_args(args)\n    if semantic_err:\n        return json.dumps({\"error\": semantic_err})\n\n    return json.dumps(create_booking(**args))"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Returning Validation Errors to the LLM"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When validation fails, return a clear, actionable error as the tool result. The LLM reads this and may self-correct on its next tool call. The quality of the error message directly affects the LLM's ability to fix it."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Error quality",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Example",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Bad",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\"error\": \"Invalid input\""
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Better",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\"error\": \"Validation failed\""
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Good",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\"error\": \"department must be one of [finance, hr, legal, engineering, all], got \\\"Finance\\\"\""
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": {
+                          "type": "text",
+                          "text": "Best",
+                          "marks": [
+                            {
+                              "type": "bold"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\"error\": \"department: \\\"Finance\\\" is not valid. Use lowercase: \\\"finance\\\". Valid values: finance, hr, legal, engineering, all\""
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def format_validation_error(field: str, value, constraint: str, hint: str = \"\") -> dict:\n    \"\"\"Produce a structured, actionable error the LLM can act on.\"\"\"\n    msg = f\"Invalid value for '{field}': {value!r}. {constraint}.\"\n    if hint:\n        msg += f\" {hint}\"\n    return {\"error\": msg}\n\n# Examples:\nformat_validation_error(\n    \"department\", \"Finance\",\n    'Must be lowercase',\n    'Use \"finance\" instead of \"Finance\"'\n)\n# {'error': \"Invalid value for 'department': 'Finance'. Must be lowercase. Use \"finance\" instead of \"Finance\".\"}\n\nformat_validation_error(\n    \"check_in\", \"2024-01-01\",\n    'Cannot be in the past',\n    'Use a date from today (2025-06-29) or later'\n)\n# {'error': \"Invalid value for 'check_in': '2024-01-01'. Cannot be in the past. Use a date from today (2025-06-29) or later.\"}"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Validation Pipeline \u2014 Complete Pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Combine all three layers into a single, composable validation pipeline. Each layer returns early on failure; the tool only executes when all layers pass."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json\nfrom typing import Callable\n\ndef make_validated_tool(\n    schema: dict,\n    model_cls,                         # Pydantic model\n    business_validator: Callable,      # returns str | None\n    executor: Callable,                # the actual tool function\n):\n    \"\"\"\n    Returns a dispatch function that validates args through all three layers\n    and calls executor only when everything passes.\n    \"\"\"\n    def dispatch(raw_args: str) -> str:\n        # Layer 1: JSON parse\n        args, err = parse_tool_args(raw_args)\n        if err:\n            return json.dumps({\"error\": err})\n\n        # Layer 2: Schema validation\n        schema_err = validate_args(args, schema)\n        if schema_err:\n            return json.dumps({\"error\": schema_err})\n\n        # Layer 3: Pydantic (type coercion + field validators)\n        try:\n            validated = model_cls.model_validate(args)\n        except Exception as e:\n            return json.dumps({\"error\": f\"Type validation: {e}\"})\n\n        # Layer 4: Business rules\n        business_err = business_validator(validated.model_dump())\n        if business_err:\n            return json.dumps({\"error\": business_err})\n\n        # All layers passed \u2014 execute\n        try:\n            result = executor(**validated.model_dump())\n            return json.dumps(result, default=str)\n        except Exception as e:\n            return json.dumps({\"error\": f\"Tool execution error: {e}\"})\n\n    return dispatch\n\n# Wire it up:\ndispatch_booking = make_validated_tool(\n    schema=BOOKING_SCHEMA,\n    model_cls=BookingArgs,\n    business_validator=validate_booking_args,\n    executor=create_booking,\n)"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Validation is the guard between LLM text and real-world effects.",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " JSON parsing catches malformed output. Schema validation catches type and constraint violations. Business validation catches domain-rule violations. Clear error messages let the LLM self-correct. Without these layers, a single bad argument can corrupt data silently."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
