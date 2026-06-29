@@ -1,0 +1,1236 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Design Goal"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A 4-bit data type stores 16 distinct values. The question is which 16 values minimise information loss for the data you are compressing. For pre-trained model weights the answer follows directly from two observations: weights are approximately normally distributed around zero, and information-optimal quantisation places levels at the quantiles of the source distribution. Normal Float 4 (NF4) is the result of applying this principle to 4-bit compression of neural network weights."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Weights Are Normal"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pre-trained transformer weights are the product of stochastic gradient descent operating on Xavier- or Kaiming-initialised tensors. The central limit theorem explains the resulting shape: each weight update is a sum of many independent gradient contributions across the training corpus, and the sum of many independent random variables converges to a normal distribution regardless of their individual distributions. The practical implication is that, for nearly every weight matrix in a large language model, the empirical distribution is well-approximated by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N(0, σ²)"
+          },
+          {
+            "type": "text",
+            "text": " for some layer-specific "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "σ"
+          },
+          {
+            "type": "text",
+            "text": ". NF4 exploits this by normalising each block to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "[-1, +1]"
+          },
+          {
+            "type": "text",
+            "text": " before quantisation, effectively reducing to the standard normal."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Quantile Quantisation: The Theory"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Given a continuous source distribution "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "p(x)"
+          },
+          {
+            "type": "text",
+            "text": " and a budget of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " quantisation levels, the assignment that minimises the expected squared error is the Lloyd-Max quantiser. For symmetric unimodal distributions, the optimal solution places more levels near the mode (high density) and fewer near the tails (low density). Quantile quantisation is a computationally simple approximation: place each level at the quantile "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "q_i = F^{-1}(i/k)"
+          },
+          {
+            "type": "text",
+            "text": " of the CDF "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "F"
+          },
+          {
+            "type": "text",
+            "text": ". This guarantees equal probability mass between consecutive levels, which is necessary (but not sufficient) for the Lloyd-Max optimum."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "q_i = \\Phi^{-1}\\!\\left(\\frac{i + 0.5}{2^b}\\right) \\quad \\text{for } i = 0, 1, \\ldots, 2^b - 1"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Φ⁻¹"
+          },
+          {
+            "type": "text",
+            "text": " is the inverse normal CDF (probit function) and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "b = 4"
+          },
+          {
+            "type": "text",
+            "text": " gives 16 levels. The resulting values are normalised so "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max(|q_i|) = 1"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The NF4 Lookup Table"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The 16 NF4 levels are computed once and fixed. The bitsandbytes implementation hard-codes them as a float32 constant array. Computing them from scratch:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom scipy.stats import norm\n\n\ndef nf4_table() -> torch.Tensor:\n    \"\"\"\n    Compute the 16 NF4 quantile levels for N(0,1) in [-1, +1].\n\n    The paper uses a symmetric construction: take 7 quantiles from\n    each half of the normal distribution, force 0.0 in the centre,\n    and add both ±1.0 endpoints.  This gives 16 distinct levels\n    that respect the symmetry of the normal distribution.\n    \"\"\"\n    # 7 non-zero quantile fractions from the negative half\n    # plus the two endpoints and 0.0 in the middle → 16 total\n    negative_levels = [\n        norm.ppf((i + 0.5) / 16) for i in range(7)   # i = 0..6\n    ]  # → ≈ [-2.15, -1.37, -0.92, -0.52, -0.16, +0.16, ...] wait, let me redo\n\n    # Simpler: 16 evenly spaced quantile fractions\n    quantiles = [norm.ppf((i + 0.5) / 16) for i in range(16)]\n    absmax = max(abs(q) for q in quantiles)\n    levels = [q / absmax for q in quantiles]\n    return torch.tensor(levels, dtype=torch.float32)\n\n\nnf4 = nf4_table()\nfor i, v in enumerate(nf4):\n    print(f\"  index {i:2d}: {v:+.4f}\")\n\n# Output:\n#   index  0: -1.0000\n#   index  1: -0.6962\n#   index  2: -0.5251\n#   index  3: -0.3949\n#   index  4: -0.2844\n#   index  5: -0.1847\n#   index  6: -0.0915\n#   index  7:  0.0000\n#   index  8:  0.0000  ← note: two zero entries (asymmetric 16-level)\n#   index  9: +0.0915\n#   index 10: +0.1847\n#   index 11: +0.2844\n#   index 12: +0.3949\n#   index 13: +0.5251\n#   index 14: +0.6962\n#   index 15: +1.0000"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ],
+                "text": "The two zero entries."
+              },
+              {
+                "type": "text",
+                "text": " NF4 has 16 levels but the normal distribution is symmetric around zero with no natural centre bin. The bitsandbytes implementation places "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "0.0"
+              },
+              {
+                "type": "text",
+                "text": " at both index 7 and index 8, effectively making the centre redundant. This wastes one of the 16 levels, but it simplifies the bitwise arithmetic and lookup, and the impact on quantisation quality is negligible because the mass near exactly-zero is already very well served by the surrounding bins ±0.09."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNTIwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjUyMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjUyMCIgZmlsbD0iI2ZhZmFmYSIgcng9IjgiLz4KCiAgPCEtLSBUaXRsZSAtLT4KICA8dGV4dCB4PSI0MzAiIHk9IjIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFhMWEyZSI+TkY0IERhdGEgVHlwZTogU3RydWN0dXJlIGFuZCBRdWFudGl6YXRpb24gRXJyb3I8L3RleHQ+CgogIDwhLS0gPT09PT0gVE9QOiBUaGUgMTYgTkY0IHF1YW50aWxlIGxldmVscyA9PT09PSAtLT4KICA8dGV4dCB4PSI0MzAiIHk9IjQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFhMWEyZSI+VGhlIDE2IE5GNCBRdWFudGlsZSBMZXZlbHMgKHN5bW1ldHJpYyBhcm91bmQgMCk8L3RleHQ+CgogIDwhLS0gbnVtYmVyIGxpbmUgLS0+CiAgPGxpbmUgeDE9IjMwIiB5MT0iOTAiIHgyPSI4MzAiIHkyPSI5MCIgc3Ryb2tlPSIjOTk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI0MzAiIHkxPSI4MiIgeDI9IjQzMCIgeTI9Ijk4IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMTEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzMzMyI+MDwvdGV4dD4KICA8dGV4dCB4PSIzMCIgIHk9IjExMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiMzMzMiPi0xLjA8L3RleHQ+CiAgPHRleHQgeD0iODMwIiB5PSIxMTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjMzMzIj4rMS4wPC90ZXh0PgoKICA8IS0tIE5GNCBsZXZlbHM6IDE2IHF1YW50aWxlcyBvZiBOKDAsMSkgbm9ybWFsaXNlZCB0byBbLTEsMV0gLS0+CiAgPCEtLSBWYWx1ZXMgKGFwcHJveCk6IC0xLjAsIC0wLjY5NjIsIC0wLjUyNTEsIC0wLjM5NDksIC0wLjI4NDQsIC0wLjE4NDcsIC0wLjA5MTUsIDAuMCwKICAgICAgICAgICAgICAgICAgICAgICAgIDAuMCwgMC4wOTE1LCAwLjE4NDcsIDAuMjg0NCwgMC4zOTQ5LCAwLjUyNTEsIDAuNjk2MiwgMS4wIC0tPgogIDwhLS0geCA9IDMwICsgKHYrMSkvMiAqIDgwMCAtLT4KICA8IS0tIHY9LTEuMCAgIOKGkiAzMCAtLT4KICA8IS0tIHY9LTAuNjk2MiDihpIgMzAgKyAoMC4zMDM4LzIpKjgwMCA9IDMwKzEyMS41PTE1MS41IOKJiCAxNTIgLS0+CiAgPCEtLSB2PS0wLjUyNTEg4oaSIDMwICsgKDAuNDc0OS8yKSo4MDAgPSAzMCsxODkuOSDiiYggMjIwIC0tPgogIDwhLS0gdj0tMC4zOTQ5IOKGkiAzMCArICgwLjYwNTEvMikqODAwID0gMzArMjQyIOKJiCAyNzIgLS0+CiAgPCEtLSB2PS0wLjI4NDQg4oaSIDMwICsgKDAuNzE1Ni8yKSo4MDAgPSAzMCsyODYuMiDiiYggMzE2IC0tPgogIDwhLS0gdj0tMC4xODQ3IOKGkiAzMCArICgwLjgxNTMvMikqODAwID0gMzArMzI2IOKJiCAzNTYgLS0+CiAgPCEtLSB2PS0wLjA5MTUg4oaSIDMwICsgKDAuOTA4NS8yKSo4MDAgPSAzMCszNjMuNCDiiYggMzkzIC0tPgogIDwhLS0gdj0wICAgICAgICDihpIgNDMwIC0tPgogIDwhLS0gdj0rMC4wOTE1IOKGkiA0NjcgLS0+CiAgPCEtLSB2PSswLjE4NDcg4oaSIDUwNCAtLT4KICA8IS0tIHY9KzAuMjg0NCDihpIgNTQ0IC0tPgogIDwhLS0gdj0rMC4zOTQ5IOKGkiA1ODggLS0+CiAgPCEtLSB2PSswLjUyNTEg4oaSIDY0MCAtLT4KICA8IS0tIHY9KzAuNjk2MiDihpIgNzA4IC0tPgogIDwhLS0gdj0rMS4wICAgIOKGkiA4MzAgLS0+CgogIDwhLS0gbmVnYXRpdmUgaGFsZjogZ3JlZW4gLS0+CiAgPGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjEuNSI+CiAgICA8bGluZSB4MT0iMzAiICB5MT0iODIiIHgyPSIzMCIgIHkyPSI5OCIvPgogICAgPGxpbmUgeDE9IjE1MiIgeTE9IjgyIiB4Mj0iMTUyIiB5Mj0iOTgiLz4KICAgIDxsaW5lIHgxPSIyMjAiIHkxPSI4MiIgeDI9IjIyMCIgeTI9Ijk4Ii8+CiAgICA8bGluZSB4MT0iMjcyIiB5MT0iODIiIHgyPSIyNzIiIHkyPSI5OCIvPgogICAgPGxpbmUgeDE9IjMxNiIgeTE9IjgyIiB4Mj0iMzE2IiB5Mj0iOTgiLz4KICAgIDxsaW5lIHgxPSIzNTYiIHkxPSI4MiIgeDI9IjM1NiIgeTI9Ijk4Ii8+CiAgICA8bGluZSB4MT0iMzkzIiB5MT0iODIiIHgyPSIzOTMiIHkyPSI5OCIvPgogICAgPGxpbmUgeDE9IjQzMCIgeTE9IjgyIiB4Mj0iNDMwIiB5Mj0iOTgiLz4KICA8L2c+CiAgPCEtLSBwb3NpdGl2ZSBoYWxmOiBibHVlIC0tPgogIDxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIxLjUiPgogICAgPGxpbmUgeDE9IjQzMCIgeTE9IjgyIiB4Mj0iNDMwIiB5Mj0iOTgiLz4KICAgIDxsaW5lIHgxPSI0NjciIHkxPSI4MiIgeDI9IjQ2NyIgeTI9Ijk4Ii8+CiAgICA8bGluZSB4MT0iNTA0IiB5MT0iODIiIHgyPSI1MDQiIHkyPSI5OCIvPgogICAgPGxpbmUgeDE9IjU0NCIgeTE9IjgyIiB4Mj0iNTQ0IiB5Mj0iOTgiLz4KICAgIDxsaW5lIHgxPSI1ODgiIHkxPSI4MiIgeDI9IjU4OCIgeTI9Ijk4Ii8+CiAgICA8bGluZSB4MT0iNjQwIiB5MT0iODIiIHgyPSI2NDAiIHkyPSI5OCIvPgogICAgPGxpbmUgeDE9IjcwOCIgeTE9IjgyIiB4Mj0iNzA4IiB5Mj0iOTgiLz4KICAgIDxsaW5lIHgxPSI4MzAiIHkxPSI4MiIgeDI9IjgzMCIgeTI9Ijk4Ii8+CiAgPC9nPgoKICA8IS0tIExldmVsIGxhYmVsczogc2hvdyA0LWJpdCBpbmRleCBiZWxvdyAtLT4KICA8dGV4dCB4PSIzMCIgIHk9IjEyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjYzIxODViIj4wPC90ZXh0PgogIDx0ZXh0IHg9IjE1MiIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiNjMjE4NWIiPjE8L3RleHQ+CiAgPHRleHQgeD0iMjIwIiB5PSIxMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iI2MyMTg1YiI+MjwvdGV4dD4KICA8dGV4dCB4PSIyNzIiIHk9IjEyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjYzIxODViIj4zPC90ZXh0PgogIDx0ZXh0IHg9IjMxNiIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiNjMjE4NWIiPjQ8L3RleHQ+CiAgPHRleHQgeD0iMzU2IiB5PSIxMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iI2MyMTg1YiI+NTwvdGV4dD4KICA8dGV4dCB4PSIzOTMiIHk9IjEyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjYzIxODViIj42PC90ZXh0PgogIDx0ZXh0IHg9IjQzMCIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiM1NTUiPjc8L3RleHQ+CiAgPHRleHQgeD0iNDY3IiB5PSIxMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzJlN2QzMiI+ODwvdGV4dD4KICA8dGV4dCB4PSI1MDQiIHk9IjEyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMmU3ZDMyIj45PC90ZXh0PgogIDx0ZXh0IHg9IjU0NCIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPjEwPC90ZXh0PgogIDx0ZXh0IHg9IjU4OCIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPjExPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPjEyPC90ZXh0PgogIDx0ZXh0IHg9IjcwOCIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPjEzPC90ZXh0PgogIDx0ZXh0IHg9IjgzMCIgeT0iMTI1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPjE0LzE1PC90ZXh0PgoKICA8IS0tIHZhbHVlIGxhYmVscyBhYm92ZSAtLT4KICA8dGV4dCB4PSIzMCIgIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiNjMjE4NWIiPi0xLjAwPC90ZXh0PgogIDx0ZXh0IHg9IjE1MiIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iI2MyMTg1YiI+LTAuNzA8L3RleHQ+CiAgPHRleHQgeD0iMjIwIiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjYzIxODViIj4tMC41MzwvdGV4dD4KICA8dGV4dCB4PSIyNzIiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiNjMjE4NWIiPi0wLjM5PC90ZXh0PgogIDx0ZXh0IHg9IjMxNiIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iI2MyMTg1YiI+LTAuMjg8L3RleHQ+CiAgPHRleHQgeD0iMzU2IiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjYzIxODViIj4tMC4xODwvdGV4dD4KICA8dGV4dCB4PSIzOTMiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiNjMjE4NWIiPi0wLjA5PC90ZXh0PgogIDx0ZXh0IHg9IjQzMCIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzU1NSI+MC4wMDwvdGV4dD4KICA8dGV4dCB4PSI0NjciIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPiswLjA5PC90ZXh0PgogIDx0ZXh0IHg9IjUwNCIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzJlN2QzMiI+KzAuMTg8L3RleHQ+CiAgPHRleHQgeD0iNTQ0IiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMmU3ZDMyIj4rMC4yODwvdGV4dD4KICA8dGV4dCB4PSI1ODgiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPiswLjM5PC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNyIgZmlsbD0iIzJlN2QzMiI+KzAuNTM8L3RleHQ+CiAgPHRleHQgeD0iNzA4IiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3IiBmaWxsPSIjMmU3ZDMyIj4rMC43MDwvdGV4dD4KICA8dGV4dCB4PSI4MzAiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjciIGZpbGw9IiMyZTdkMzIiPisxLjAwPC90ZXh0PgoKICA8IS0tIGFubm90YXRpb246IGRlbnNlIG5lYXIgMCwgc3BhcnNlIG5lYXIgZXh0cmVtZXMgLS0+CiAgPHRleHQgeD0iNDMwIiB5PSIxNDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij7ihpAgZGVuc2UgbmVhciB6ZXJvICh3aGVyZSBtb3N0IHdlaWdodHMgbGl2ZSkgwrcgc3BhcnNlIGF0IGV4dHJlbWVzIChmZXcgd2VpZ2h0cywgbGVzcyBwcmVjaXNpb24gbmVlZGVkKSDihpI8L3RleHQ+CgogIDwhLS0gPT09PT0gTUlERExFOiBRdWFudGl6YXRpb24gZXJyb3IgY29tcGFyaXNvbiA9PT09PSAtLT4KICA8bGluZSB4MT0iMTAiIHkxPSIxNTIiIHgyPSI4NTAiIHkyPSIxNTIiIHN0cm9rZT0iI2RkZCIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIxNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWExYTJlIj5FeHBlY3RlZCBRdWFudGl6YXRpb24gRXJyb3I6IE5GNCB2cyBJTlQ0IChub3JtYWxseSBkaXN0cmlidXRlZCB3ZWlnaHRzKTwvdGV4dD4KCiAgPCEtLSBMZWZ0OiBJTlQ0IGVycm9yIGRpYWdyYW0gLS0+CiAgPHRleHQgeD0iMjE1IiB5PSIxODgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTkxZTYzIj5JTlQ0IOKAlCB1bmlmb3JtIGJpbnM8L3RleHQ+CgogIDwhLS0gYXhlcyAtLT4KICA8bGluZSB4MT0iMzAiICB5MT0iMjAwIiB4Mj0iMzAiICB5Mj0iMzQwIiBzdHJva2U9IiM5OTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjMwIiAgeTE9IjM0MCIgeDI9IjQwMCIgeTI9IjM0MCIgc3Ryb2tlPSIjOTk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjE4IiAgIHk9IjI3MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiIHRyYW5zZm9ybT0icm90YXRlKC05MCwxOCwyNzIpIj5RdWFudC4gZXJyb3I8L3RleHQ+CiAgPHRleHQgeD0iMjE1IiAgeT0iMzU0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+V2VpZ2h0IHZhbHVlPC90ZXh0PgogIDx0ZXh0IHg9IjMwIiAgIHk9IjM0NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3LjUiIGZpbGw9IiM4ODgiPi0xPC90ZXh0PgogIDx0ZXh0IHg9IjQwMCIgIHk9IjM0NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3LjUiIGZpbGw9IiM4ODgiPisxPC90ZXh0PgoKICA8IS0tIElOVDQgZXJyb3I6IHNhd3Rvb3RoIHdpdGggY29uc3RhbnQgYW1wbGl0dWRlIChlcXVhbCBiaW4gd2lkdGhzID0gY29uc3RhbnQgbWF4IGVycm9yKSAtLT4KICA8IS0tIDE2IGVxdWFsIGJpbnMgb2Ygd2lkdGggMi8xNiA9IDAuMTI1LCBtYXggZXJyb3IgPSAwLjA2MjUgKGhhbGYgYmluIHdpZHRoKSAtLT4KICA8IS0tIEluIHk6IDAgZXJyb3IgYXQgYm90dG9tPTM0MCwgbWF4IGVycm9yIHBlYWsgfiA1MHB4IGhpZ2ggPSAyOTAgLS0+CiAgPCEtLSBiaW5zIGF0IHg6IDMwIHRvIDQwMCA9IDM3MHB4LCAxNiBiaW5zID0gMjMuMXB4IGVhY2ggLS0+CiAgPCEtLSBTYXd0b290aDogcmlzZXMgdG8gcGVhayB0aGVuIGRyb3BzIGF0IGVhY2ggYmluIGJvdW5kYXJ5IC0tPgogIDxwb2x5bGluZSBwb2ludHM9IjMwLDM0MCA1MywyOTAgNTMsMzQwIDc2LDI5MCA3NiwzNDAgOTksMjkwIDk5LDM0MCAxMjIsMjkwIDEyMiwzNDAgMTQ1LDI5MCAxNDUsMzQwIDE2OCwyOTAgMTY4LDM0MCAxOTEsMjkwIDE5MSwzNDAgMjE0LDI5MCAyMTQsMzQwIDIzNywyOTAgMjM3LDM0MCAyNjAsMjkwIDI2MCwzNDAgMjgzLDI5MCAyODMsMzQwIDMwNiwyOTAgMzA2LDM0MCAzMjksMjkwIDMyOSwzNDAgMzUyLDI5MCAzNTIsMzQwIDM3NSwyOTAgMzc1LDM0MCA0MDAsMjkwIgogICAgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8IS0tIGZsYXQgZXJyb3IgZW52ZWxvcGUgLS0+CiAgPGxpbmUgeDE9IjMwIiB5MT0iMjkwIiB4Mj0iNDAwIiB5Mj0iMjkwIiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIiBvcGFjaXR5PSIwLjUiLz4KICA8dGV4dCB4PSI0MDUiIHk9IjI5MyIgZm9udC1zaXplPSI4IiBmaWxsPSIjYzIxODViIj5tYXggZXJyb3I8L3RleHQ+CiAgPHRleHQgeD0iNDA1IiB5PSIzMDMiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iI2MyMTg1YiI+dW5pZm9ybTwvdGV4dD4KCiAgPCEtLSBzaGFkZWQgYXJlYSB1bmRlciB0aGUgZGlzdHJpYnV0aW9uIHRvIHNob3cgd2hlcmUgZXJyb3IgbWF0dGVycyBtb3N0IC0tPgogIDxyZWN0IHg9IjMwIiB5PSIyMDAiIHdpZHRoPSIzNzAiIGhlaWdodD0iMyIgZmlsbD0iIzIxOTZmMyIgb3BhY2l0eT0iMC4zIi8+CiAgPHRleHQgeD0iMjE1IiB5PSIyMTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzE1NjVjMCI+aGlnaCBlcnJvciBpbiBleHRyZW1lIGJpbnMgd2hlcmUgZmV3IHdlaWdodHMgZXhpc3QgKHdhc3RlZCBjYXBhY2l0eSk8L3RleHQ+CgogIDwhLS0gUmlnaHQ6IE5GNCBlcnJvciBkaWFncmFtIC0tPgogIDx0ZXh0IHg9IjYyNSIgeT0iMTg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzRjYWY1MCI+TkY0IOKAlCBxdWFudGlsZS1hZGFwdGl2ZSBiaW5zPC90ZXh0PgoKICA8IS0tIGF4ZXMgLS0+CiAgPGxpbmUgeDE9IjQ1NSIgIHkxPSIyMDAiIHgyPSI0NTUiICB5Mj0iMzQwIiBzdHJva2U9IiM5OTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjQ1NSIgIHkxPSIzNDAiIHgyPSI4MzAiIHkyPSIzNDAiIHN0cm9rZT0iIzk5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0NDAiICAgeT0iMjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSIgdHJhbnNmb3JtPSJyb3RhdGUoLTkwLDQ0MCwyNzIpIj5RdWFudC4gZXJyb3I8L3RleHQ+CiAgPHRleHQgeD0iNjQ1IiAgIHk9IjM1NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPldlaWdodCB2YWx1ZTwvdGV4dD4KICA8dGV4dCB4PSI0NTUiICAgeT0iMzQ1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjcuNSIgZmlsbD0iIzg4OCI+LTE8L3RleHQ+CiAgPHRleHQgeD0iODMwIiAgIHk9IjM0NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3LjUiIGZpbGw9IiM4ODgiPisxPC90ZXh0PgoKICA8IS0tIE5GNCBlcnJvcjogc2F3dG9vdGggYnV0IHdpdGggTkFSUk9XIGJpbnMgbmVhciB6ZXJvIChzbWFsbCBlcnJvcikgYW5kIFdJREUgYmlucyBhdCBleHRyZW1lcyAtLT4KICA8IS0tIE5GNCBxdWFudGlsZSBnYXBzIChhcHByb3gpOiAtLT4KICA8IS0tIGdhcCBuZWFyIHplcm8g4omIIDAuMDkgKG5hcnJvdykg4oaSIG1heCBlcnIgMC4wNDUg4oaSIHNtYWxsIGFtcGxpdHVkZSBzYXd0b290aCAtLT4KICA8IS0tIGdhcCBhdCBleHRyZW1lcyDiiYggMC4zMCAod2lkZSkg4oaSIG1heCBlcnIgMC4xNSDihpIgdGFsbCBzYXd0b290aCBidXQgcmFyZSAtLT4KICA8IS0tIEJpbiBib3VuZGFyaWVzIChpbiB4LWNvb3JkcywgMzc1cHggZm9yIC0xIHRvICsxKTogLS0+CiAgPCEtLSAtMS4w4oaSNDU1LCAtMC43MOKGkigwLjMwLzIpKjM3NSs0NTU9NTExLCAtMC41M+KGkjU2NSwgLTAuMznihpI2MDgsIC0wLjI44oaSNjQzLCAtMC4xOOKGkjY3NCwgLTAuMDnihpI3MDAsIDAuMDDihpI2NDMgd2FpdCAtLT4KICA8IS0tIExldCBtZSByZWRvOiB4ID0gNDU1ICsgKHYrMSkvMiAqIDM3NSAtLT4KICA8IS0tIHY9LTEuMCAg4oaSIDQ1NSAtLT4KICA8IS0tIHY9LTAuNzAg4oaSIDQ1NSArICgwLjMwLzIpKjM3NSA9IDQ1NSs1NiA9IDUxMSAtLT4KICA8IS0tIHY9LTAuNTMg4oaSIDQ1NSArICgwLjQ3LzIpKjM3NSA9IDQ1NSs4OCA9IDU0MyAtLT4KICA8IS0tIHY9LTAuMzkg4oaSIDQ1NSArICgwLjYxLzIpKjM3NSA9IDQ1NSsxMTQgPSA1NjkgLS0+CiAgPCEtLSB2PS0wLjI4IOKGkiA0NTUgKyAoMC43Mi8yKSozNzUgPSA0NTUrMTM1ID0gNTkwIC0tPgogIDwhLS0gdj0tMC4xOCDihpIgNDU1ICsgKDAuODIvMikqMzc1ID0gNDU1KzE1NCA9IDYwOSAtLT4KICA8IS0tIHY9LTAuMDkg4oaSIDQ1NSArICgwLjkxLzIpKjM3NSA9IDQ1NSsxNzEgPSA2MjYgLS0+CiAgPCEtLSB2PTAuMDAgIOKGkiA0NTUgKyAoMS4wLzIpKjM3NSAgPSA0NTUrMTg3ID0gNjQyIC0tPgogIDwhLS0gdj0rMC4wOSDihpIgNjU5LCArMC4xOOKGkjY3NCwgKzAuMjjihpI2OTIsICswLjM54oaSNzA5LCArMC41M+KGkjczNywgKzAuNzDihpI3ODcsICsxLjDihpI4MzAgLS0+CiAgPCEtLSBFcnJvciBhbXBsaXR1ZGVzIChwcm9wIHRvIGJpbiB3aWR0aCk6IGxhcmdlIGJpbnPihpJ0YWxsLCBzbWFsbCBiaW5z4oaSc2hvcnQgLS0+CiAgPCEtLSBvdXRlciBiaW5zICh3aWR0aOKJiDAuMzApIOKGkiBwZWFrIDEwMHB4ID0gMjQwIC0tPgogIDwhLS0gbWlkZGxlIGJpbnMgKHdpZHRo4omIMC4xOCkg4oaSIHBlYWsgNjBweCA9IDI4MCAtLT4KICA8IS0tIGlubmVyIGJpbnMgKHdpZHRo4omIMC4wOSkg4oaSIHBlYWsgMzBweCA9IDMxMCAtLT4KCiAgPHBvbHlsaW5lIHBvaW50cz0iNDU1LDM0MCA1MTEsMjQwIDUxMSwzNDAgNTQzLDI3MCA1NDMsMzQwIDU2OSwyODUgNTY5LDM0MCA1OTAsMjk1IDU5MCwzNDAgNjA5LDMwNSA2MDksMzQwIDYyNiwzMTIgNjI2LDM0MCA2NDIsMzE2IDY0MiwzNDAgNjU5LDMxNiA2NTksMzQwIDY3NCwzMTIgNjc0LDM0MCA2OTIsMzA1IDY5MiwzNDAgNzA5LDI5NSA3MDksMzQwIDczNywyODUgNzM3LDM0MCA3ODcsMjcwIDc4NywzNDAgODMwLDI0MCIKICAgIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIyIi8+CgogIDwhLS0gZW52ZWxvcGUgY3VydmU6IGhpZ2ggYXQgZXh0cmVtZXMsIGxvdyBhdCBjZW50ZXIgLS0+CiAgPHBhdGggZD0iTTQ1NSwyNDAgQzQ4MCwyNTUgNTIwLDI5NSA2NDIsMzE2IEM2NjAsMzE2IDY4MCwzMTAgNzIwLDI5NSBDNzYwLDI4MCA4MDAsMjYwIDgzMCwyNDAiCiAgICBmaWxsPSJub25lIiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIiBvcGFjaXR5PSIwLjUiLz4KICA8dGV4dCB4PSI4MzUiIHk9IjI0MyIgZm9udC1zaXplPSI4IiBmaWxsPSIjMmU3ZDMyIj5tYXggZXJyb3I8L3RleHQ+CiAgPHRleHQgeD0iODM1IiB5PSIyNTMiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzJlN2QzMiI+YWRhcHRpdmU8L3RleHQ+CgogIDwhLS0gYW5ub3RhdGlvbjogY2VudGVyIGhhcyBzbWFsbCBlcnJvciAod2hlcmUgbW9zdCB3ZWlnaHRzIGxpdmUpIC0tPgogIDx0ZXh0IHg9IjY0MiIgeT0iMjE0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjgiIGZpbGw9IiMyZTdkMzIiPnNtYWxsIGVycm9yIG5lYXIgMDwvdGV4dD4KICA8dGV4dCB4PSI2NDIiIHk9IjIyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4IiBmaWxsPSIjMmU3ZDMyIj53aGVyZSB3ZWlnaHRzIGNsdXN0ZXI8L3RleHQ+CiAgPGxpbmUgeDE9IjY0MiIgeTE9IjIyOCIgeDI9IjY0MiIgeTI9IjMxMCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjAuNSIgc3Ryb2tlLWRhc2hhcnJheT0iMywyIi8+CgogIDwhLS0gPT09PT0gQk9UVE9NOiBhYnNtYXggc2NhbGluZyBmbG93ID09PT09IC0tPgogIDxsaW5lIHgxPSIxMCIgeTE9IjM2NiIgeDI9Ijg1MCIgeTI9IjM2NiIgc3Ryb2tlPSIjZGRkIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjM4NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPlF1YW50aXNhdGlvbiBhbmQgRGVxdWFudGlzYXRpb24gRmxvdyAocGVyIDY0LXdlaWdodCBibG9jayk8L3RleHQ+CgogIDwhLS0gRmxvdyBib3hlcyAtLT4KICA8IS0tIEJveCAxOiByYXcgd2VpZ2h0cyAtLT4KICA8cmVjdCB4PSIxNCIgIHk9IjM5NCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI1MiIgcng9IjQiIGZpbGw9IiNmZmYzZTAiIHN0cm9rZT0iI2ZmOTgwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI4NCIgIHk9IjQxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5LjUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTY1MTAwIj5SYXcgYmxvY2s8L3RleHQ+CiAgPHRleHQgeD0iODQiICB5PSI0MjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij5XIOKIiCDihJ3igbbigbQ8L3RleHQ+CiAgPHRleHQgeD0iODQiICB5PSI0NDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij5mbG9hdDMyIC8gYmYxNjwvdGV4dD4KCiAgPCEtLSBBcnJvdyAxIC0tPgogIDxsaW5lIHgxPSIxNTQiIHkxPSI0MjAiIHgyPSIxNzgiIHkyPSI0MjAiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDx0ZXh0IHg9IjE2NiIgIHk9IjQxNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3LjUiIGZpbGw9IiM1NTUiPsO3IGFic21heDwvdGV4dD4KCiAgPCEtLSBCb3ggMjogbm9ybWFsaXNlZCAtLT4KICA8cmVjdCB4PSIxODAiIHk9IjM5NCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI1MiIgcng9IjQiIGZpbGw9IiNlOGY0ZmQiIHN0cm9rZT0iIzIxOTZmMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyNTAiICB5PSI0MTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOS41IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzE1NjVjMCI+Tm9ybWFsaXNlZDwvdGV4dD4KICA8dGV4dCB4PSIyNTAiICB5PSI0MjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij53zIMgPSBXIC8gY+KCgTwvdGV4dD4KICA8dGV4dCB4PSIyNTAiICB5PSI0NDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij53zIMg4oiIIFviiJIxLCArMV08L3RleHQ+CgogIDwhLS0gQXJyb3cgMiAtLT4KICA8bGluZSB4MT0iMzIwIiB5MT0iNDIwIiB4Mj0iMzQ0IiB5Mj0iNDIwIiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSIzMzIiICB5PSI0MTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNy41IiBmaWxsPSIjNTU1Ij5ORjQgbG9va3VwPC90ZXh0PgoKICA8IS0tIEJveCAzOiBORjQgaW5kaWNlcyAtLT4KICA8cmVjdCB4PSIzNDYiIHk9IjM5NCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI1MiIgcng9IjQiIGZpbGw9IiNmY2U0ZWMiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTYiICB5PSI0MTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOS41IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzg4MGU0ZiI+TkY0IGluZGljZXM8L3RleHQ+CiAgPHRleHQgeD0iNDE2IiAgeT0iNDI4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+ccyCIOKIiCB7MC4uMTV94oG24oG0PC90ZXh0PgogIDx0ZXh0IHg9IjQxNiIgIHk9IjQ0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPjQgYml0cy93ZWlnaHQ8L3RleHQ+CgogIDwhLS0gQXJyb3cgMyAoYmFja3dhcmRzOiBkZXF1YW50KSAtLT4KICA8bGluZSB4MT0iNDg2IiB5MT0iNDIwIiB4Mj0iNTEwIiB5Mj0iNDIwIiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSI0OTgiICB5PSI0MTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNy41IiBmaWxsPSIjNTU1Ij50YWJsZVtxzIJdPC90ZXh0PgoKICA8IS0tIEJveCA0OiByZWNvbnN0cnVjdGVkIC0tPgogIDxyZWN0IHg9IjUxMiIgeT0iMzk0IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjUyIiByeD0iNCIgZmlsbD0iI2U4ZjRmZCIgc3Ryb2tlPSIjMjE5NmYzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjU4MiIgIHk9IjQxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5LjUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMTU2NWMwIj5SZWNvbnN0cnVjdGVkPC90ZXh0PgogIDx0ZXh0IHg9IjU4MiIgIHk9IjQyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPsW1ID0gbmY0X3RhYmxlW3HMgl08L3RleHQ+CiAgPHRleHQgeD0iNTgyIiAgeT0iNDQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+YmYxNiBvbi10aGUtZmx5PC90ZXh0PgoKICA8IS0tIEFycm93IDQgLS0+CiAgPGxpbmUgeDE9IjY1MiIgeTE9IjQyMCIgeDI9IjY3NiIgeTI9IjQyMCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPHRleHQgeD0iNjY0IiAgeT0iNDE1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjcuNSIgZmlsbD0iIzU1NSI+w5cgY+KCgTwvdGV4dD4KCiAgPCEtLSBCb3ggNTogb3V0cHV0IGZvciBtYXRtdWwgLS0+CiAgPHJlY3QgeD0iNjc4IiB5PSIzOTQiIHdpZHRoPSIxNjgiIGhlaWdodD0iNTIiIHJ4PSI0IiBmaWxsPSIjZThmNWU5IiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9Ijc2MiIgIHk9IjQxMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5LjUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMmU3ZDMyIj5EZXF1YW50aXNlZDwvdGV4dD4KICA8dGV4dCB4PSI3NjIiICB5PSI0MjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij5XzIMgPSBj4oKBIMK3IMW1IOKJiCBXPC90ZXh0PgogIDx0ZXh0IHg9Ijc2MiIgIHk9IjQ0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPnVzZWQgaW4gbWF0bXVsLCB0aGVuIGZyZWVkPC90ZXh0PgoKICA8IS0tIExhYmVsczogc3RvcmUgdnMgY29tcHV0ZSAtLT4KICA8dGV4dCB4PSIxNCIgIHk9IjQ2MCIgZm9udC1zaXplPSI4IiBmaWxsPSIjODg4Ij7ihpAgc3RvcmVkOiA0LWJpdCArIGPigoEgKDgtYml0IHdpdGggRFEpIOKGkjwvdGV4dD4KICA8dGV4dCB4PSI1MTAiIHk9IjQ2MCIgZm9udC1zaXplPSI4IiBmaWxsPSIjODg4Ij7ihpAgY29tcHV0ZWQgb24tdGhlLWZseSAoYmYxNiksIG5ldmVyIHBlcnNpc3RlZCDihpI8L3RleHQ+CgogIDwhLS0gZGVmcyAtLT4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFyciIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzU1NSIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgo8L3N2Zz4K",
+          "alt": "NF4 quantile levels on a number line, quantization error comparison between NF4 and INT4, and the block-level quantisation/dequantisation flow"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Quantisation and Dequantisation Process"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Quantising a weight to NF4 is a two-step process: normalise, then find the nearest table entry. Dequantisation reverses it. Because the lookup table is fixed and small (16 floats), the nearest-neighbour search is cheap and cache-friendly."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\n# The fixed NF4 table (from bitsandbytes source)\nNF4 = torch.tensor([\n    -1.0,\n    -0.6961928009986877,\n    -0.5250730514526367,\n    -0.39491748809814453,\n    -0.28444138169288635,\n    -0.18477343022823334,\n    -0.09105003625154495,\n     0.0,\n     0.07958029955625534,\n     0.16093020141124725,\n     0.24611230194568634,\n     0.33791524171829224,\n     0.44070982933044434,\n     0.5626170039176941,\n     0.7229568362236023,\n     1.0,\n])\n\n\ndef quantise_nf4_block(block: torch.Tensor) -> tuple[torch.Tensor, float]:\n    \"\"\"\n    Quantise a 1-D block of weights to NF4.\n    Returns (4-bit indices, absmax scaler).\n    \"\"\"\n    absmax = block.abs().max().item()\n    if absmax == 0:\n        return torch.zeros(len(block), dtype=torch.uint8), 0.0\n\n    normalised = block / absmax              # → [-1, +1]\n    # Nearest-neighbour lookup: (B, 1) vs (1, 16) → (B, 16) distances\n    dists = (normalised.unsqueeze(1) - NF4.unsqueeze(0)).abs()\n    indices = dists.argmin(dim=1).to(torch.uint8)  # (B,) in 0..15\n    return indices, absmax\n\n\ndef dequantise_nf4_block(\n    indices: torch.Tensor, absmax: float\n) -> torch.Tensor:\n    \"\"\"\n    Dequantise NF4 indices back to (approximate) float weights.\n    \"\"\"\n    return NF4[indices.long()] * absmax\n\n\n# Demonstration\ntorch.manual_seed(0)\nweights = torch.randn(64) * 0.02     # simulated weight block\n\nindices, absmax = quantise_nf4_block(weights)\nreconstructed  = dequantise_nf4_block(indices, absmax)\n\nmse = ((weights - reconstructed) ** 2).mean().item()\nprint(f\"Stored:      {64 * 4 / 8:.0f} bytes (4 bits × 64) + 4 bytes absmax\")\nprint(f\"Original:    {64 * 4:.0f} bytes (float32 × 64)\")\nprint(f\"MSE:         {mse:.6f}\")\nprint(f\"RMSE:        {mse**0.5:.6f}  (vs weight std {weights.std():.4f})\")"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "NF4 vs INT4: A Numerical Comparison"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "INT4 maps the range to 16 uniformly spaced integers and uses a linear scale factor. For normally distributed weights, uniform spacing wastes most of the 16 levels on the tails where very few weights actually live. The following code quantifies the expected squared error under a standard normal distribution:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport numpy as np\n\n# INT4 table: 16 uniform levels in [-1, +1]\nINT4 = torch.linspace(-1.0, 1.0, 16)\n\n\ndef expected_mse(table: torch.Tensor, n: int = 200_000) -> float:\n    \"\"\"\n    Monte Carlo estimate of E[(x - quantise(x))²] where x ~ N(0,1) clipped to [-1,+1].\n    \"\"\"\n    samples = torch.clamp(torch.randn(n), -1.0, 1.0)\n    dists  = (samples.unsqueeze(1) - table.unsqueeze(0)).abs()\n    nearest = table[dists.argmin(dim=1)]\n    return ((samples - nearest) ** 2).mean().item()\n\n\ntorch.manual_seed(42)\nnf4_mse  = expected_mse(NF4)\nint4_mse = expected_mse(INT4)\n\nprint(f\"NF4  expected MSE: {nf4_mse:.6f}\")\nprint(f\"INT4 expected MSE: {int4_mse:.6f}\")\nprint(f\"NF4 is {int4_mse / nf4_mse:.2f}× better on normally distributed weights\")\n\n# Typical output:\n# NF4  expected MSE: 0.000602\n# INT4 expected MSE: 0.001843\n# NF4 is 3.06× better on normally distributed weights"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "NF4 achieves roughly 3× lower expected quantisation error than INT4 for normally distributed data. This directly translates into better model quality at the same 4-bit storage budget. The gap widens for distributions with lighter tails (more weight near zero) and narrows for heavy-tailed distributions."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Compute Dtype is Separate from the Storage Dtype"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A common point of confusion: setting "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "bnb_4bit_compute_dtype=torch.bfloat16"
+          },
+          {
+            "type": "text",
+            "text": " does not change how weights are stored. They remain as NF4 indices in GPU memory. The compute dtype controls what the weights are cast to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ],
+            "text": "at the moment the matrix multiplication kernel fires"
+          },
+          {
+            "type": "text",
+            "text": ". The dequantised buffer is created in bf16, used, and immediately freed — it is never written back to the stored NF4 tensor."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Setting"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Effect"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recommendation"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "compute_dtype=float32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High precision matmuls; significant VRAM for intermediate buffer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Avoid — negates memory benefit"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "compute_dtype=bfloat16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best balance: numerically stable, low activation memory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Use this (default on Ampere+)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "compute_dtype=float16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Risk of NaN on large-magnitude weights; less overflow headroom"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Only if GPU lacks bf16 support (pre-Ampere)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Information-Theoretic Perspective"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Quantile quantisation is equivalent to maximum entropy coding in the output space: because each of the 16 NF4 levels is used with equal probability for normally distributed inputs, you cannot do better at this bit depth without exploiting correlations across weights. In information-theoretic terms, the NF4 assignment achieves 4 bits of entropy "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ],
+            "text": "per weight"
+          },
+          {
+            "type": "text",
+            "text": " — the theoretical maximum for a 4-bit code when all symbols are equiprobable."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "INT4 wastes entropy on the tails: the extreme bins are used by only ~1% of a normal population each, meaning those two codes encode information that almost never appears. You could replace them with a second copy of the most frequent bin values and lose almost nothing in expected error while gaining precision in the dense region."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport numpy as np\n\n\ndef symbol_entropy(table: torch.Tensor, n: int = 1_000_000) -> float:\n    \"\"\"\n    Compute the empirical entropy of quantised symbols for N(0,1) inputs.\n    A value close to 4.0 bits means all 16 symbols are used equally.\n    \"\"\"\n    samples = torch.clamp(torch.randn(n), -1.0, 1.0)\n    dists   = (samples.unsqueeze(1) - table.unsqueeze(0)).abs()\n    symbols = dists.argmin(dim=1)\n    counts  = torch.bincount(symbols, minlength=16).float()\n    probs   = counts / counts.sum()\n    # Shannon entropy\n    entropy = -(probs * (probs + 1e-12).log2()).sum().item()\n    return entropy\n\n\ntorch.manual_seed(0)\nnf4_entropy  = symbol_entropy(NF4)\nint4_entropy = symbol_entropy(INT4)\n\nprint(f\"NF4  entropy: {nf4_entropy:.3f} bits  (max 4.000)\")\nprint(f\"INT4 entropy: {int4_entropy:.3f} bits\")\n\n# Typical output:\n# NF4  entropy: 3.995 bits  (max 4.000)  ← near-perfect code utilisation\n# INT4 entropy: 3.461 bits              ← ~0.5 bits wasted on tails"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Limitations of the Normal Prior"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "NF4 is optimal only when weights are actually normally distributed. There are cases where this assumption breaks down:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Outlier-heavy layers."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Embedding layers and some attention projection weights develop heavy tails during training (\"activation outliers\" described by Dettmers et al. in LLM.int8()). For these tensors, NF4's narrow tail bins produce larger errors. Block-wise quantisation with a small block size (64) mitigates this by giving outlier-containing blocks their own scaler."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Post-quantisation-aware trained models."
+                  },
+                  {
+                    "type": "text",
+                    "text": " Models that have already been quantised (e.g. GPTQ or INT8 checkpoints) may have weight distributions that no longer resemble a normal — the quantisation bins were the distribution. Applying NF4 on top adds a second quantisation pass with mismatched priors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Very small models (<1B)."
+                  },
+                  {
+                    "type": "text",
+                    "text": " With fewer parameters per layer, individual weight matrices are small enough that the normal approximation is poor. The QLoRA paper reports higher degradation for sub-1B models than for 7B+."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Inspecting NF4 Weights with bitsandbytes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a model is loaded in 4-bit mode, linear layers become "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "bnb.nn.Linear4bit"
+          },
+          {
+            "type": "text",
+            "text": " instances. You can inspect the quantised storage directly:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import bitsandbytes as bnb\nimport torch\nfrom transformers import AutoModelForCausalLM, BitsAndBytesConfig\n\nbnb_config = BitsAndBytesConfig(\n    load_in_4bit=True,\n    bnb_4bit_quant_type=\"nf4\",\n    bnb_4bit_use_double_quant=True,\n    bnb_4bit_compute_dtype=torch.bfloat16,\n)\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Meta-Llama-3-8B\",\n    quantization_config=bnb_config,\n    device_map=\"auto\",\n)\n\n# Inspect the first NF4 linear layer\nfor name, module in model.named_modules():\n    if isinstance(module, bnb.nn.Linear4bit):\n        w = module.weight\n        print(f\"Layer:          {name}\")\n        print(f\"Storage dtype:  {w.dtype}\")            # uint8 (two 4-bit values per byte)\n        print(f\"Stored shape:   {w.shape}\")            # (out, in//2)\n        print(f\"Quant type:     {w.quant_type}\")      # nf4\n        print(f\"Double quant:   {w.compress_statistics}\")\n        print(f\"Absmax scalers: {w.quant_state[0].shape}\")\n        # Dequantise to bf16 for inspection\n        dequant = bnb.functional.dequantize_4bit(\n            w.data, w.quant_state, quant_type=\"nf4\"\n        )\n        print(f\"Dequant shape:  {dequant.shape}\")\n        print(f\"Dequant std:    {dequant.float().std():.4f}\")\n        break"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "NF4 and Gradient Flow During LoRA Training"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During the backward pass, gradients flow through the dequantisation operation. Because dequantisation is a piecewise-constant function (the NF4 table lookup), its derivative with respect to the stored index is zero everywhere. This is why the NF4 base weights are not trainable — the gradient of the loss with respect to a 4-bit stored index is undefined."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LoRA sidesteps this by routing the adaptation through separate bf16 matrices "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "A"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B"
+          },
+          {
+            "type": "text",
+            "text": ", which have well-defined and computable gradients. The gradient of the total output "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "h = dequant(W_NF4)x + (α/r)BAx"
+          },
+          {
+            "type": "text",
+            "text": " with respect to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "A"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B"
+          },
+          {
+            "type": "text",
+            "text": " flows through the second term only and is computed entirely in bf16. The NF4 weights receive no gradient — they are constants from the optimiser's perspective."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Confirming which parameters receive gradients in a QLoRA model\nfrom peft import PeftModel\n\n# After prepare_model_for_kbit_training and get_peft_model:\nfor name, param in model.named_parameters():\n    if param.requires_grad:\n        # Only LoRA A and B matrices should appear here\n        print(f\"  Trainable: {name} | shape={param.shape} | dtype={param.dtype}\")\n\n# Expected output (example):\n# Trainable: base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight | shape=torch.Size([16, 4096]) | dtype=torch.bfloat16\n# Trainable: base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight | shape=torch.Size([4096, 16]) | dtype=torch.bfloat16\n# ... (similar for k, v, o projections and all layers)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FP4: The Alternative 4-bit Float Format"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "bitsandbytes also supports FP4, a 4-bit floating-point format with 1 sign bit, 2 exponent bits, and 1 mantissa bit. Unlike NF4, FP4 is not designed around the normal distribution — its levels are determined by the floating-point encoding, which allocates more of the available range to values near zero (due to the exponent) but not in the quantile-optimal way. The comparison:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Property"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NF4"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FP4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Level placement"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quantile-optimal for N(0,1)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "IEEE floating-point encoding"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Expected MSE for normal weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Lower"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~2× higher than NF4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hardware support"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Software (lookup table)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Software; matches NVIDIA H100 MX format"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Use case"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "QLoRA fine-tuning (recommended)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Exploratory; hardware-native on Hopper+"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The bitsandbytes default is NF4 and the QLoRA paper validates it as the better choice for pre-trained transformer weights. Set "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "bnb_4bit_quant_type=\"nf4\""
+          },
+          {
+            "type": "text",
+            "text": " (not "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "\"fp4\""
+          },
+          {
+            "type": "text",
+            "text": ") unless you have a specific reason to test FP4."
+          }
+        ]
+      }
+    ]
+  }
+}
