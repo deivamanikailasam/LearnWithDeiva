@@ -1,0 +1,2126 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ (Generative Pre-trained Transformer Quantization, Frantar et al., 2022) is a post-training quantization method that reduces LLM weights to INT4 or INT3 precision while preserving near-FP16 accuracy. Unlike round-to-nearest (RTN) quantization, which independently rounds each weight to the nearest integer, GPTQ uses second-order (Hessian) information to compensate for the error introduced by quantizing each weight — adjusting remaining unquantized weights in the same layer to cancel out accumulated rounding error. It was the first method to quantize 175B-parameter models to INT4 in under four GPU-hours on a single A100."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Round-to-Nearest Fails at INT4"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Naive RTN quantization clips each weight independently to the nearest representable value. At INT8, this introduces small, uncorrelated rounding errors that mostly cancel out across a layer. At INT4 (only 16 levels per weight), rounding errors are large and structured — they do not cancel, and they compound across the depth of the network. The quality degradation is significant: RTN INT4 on Llama-2 7B raises perplexity from 5.47 to above 7.0, a visible degradation. GPTQ closes most of this gap by exploiting correlations between weights."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mathematical Foundation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ builds on the Optimal Brain Quantization (OBQ) framework, which frames quantization as a constrained optimisation problem. For a single linear layer with weight matrix W ∈ ℝ^(d_out × d_in) and input activations X ∈ ℝ^(d_in × n) collected over a calibration set, the quantization error in layer output is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "E(W, \\hat{W}) = \\|WX - \\hat{W}X\\|_F^2"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where Ŵ is the quantized weight matrix. The Hessian of this loss with respect to W is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "H = 2XX^\\top \\in \\mathbb{R}^{d_\\mathrm{in} \\times d_\\mathrm{in}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "H captures the sensitivity of the layer output to changes in each weight: a large H_{ii} means weight column i has high activation variance and any rounding error there will have large impact on the output. GPTQ processes weights column by column (each column corresponds to one input feature). After quantizing column q, the optimal correction to the remaining columns to compensate for the rounding error is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\delta W_{:,p} = -\\frac{W_{:,q} - \\hat{W}_{:,q}}{[H^{-1}]_{qq}} \\cdot [H^{-1}]_{qp}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This closed-form update requires only H⁻¹, which is precomputed once per layer using a Cholesky decomposition — O(d³) upfront cost amortised over all weights in the layer."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNDMwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjQzMCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIj4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFyciIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iNiIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBvbHlnb24gcG9pbnRzPSIwIDAsOCAzLDAgNiIgZmlsbD0iIzY0NzQ4YiIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI4NjAiIGhlaWdodD0iNDMwIiBmaWxsPSIjZjhmYWZjIiByeD0iMTIiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjI2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE0IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFlMjkzYiI+R1BUUTogTGF5ZXItV2lzZSBTZWNvbmQtT3JkZXIgUXVhbnRpemF0aW9uPC90ZXh0PgoKICA8IS0tIFdlaWdodCBtYXRyaXggVyAobGVmdCkgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjUwIiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjE2MCIgcng9IjgiIGZpbGw9IiNlZmY2ZmYiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iMTEwIiB5PSI3NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxZTQwYWYiPldlaWdodCBNYXRyaXggVzwvdGV4dD4KICA8dGV4dCB4PSIxMTAiIHk9IjkzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjM2I4MmY2Ij5GUDE2IGxheWVyIHdlaWdodHM8L3RleHQ+CiAgPCEtLSBHcmlkIHJlcHJlc2VudGF0aW9uIG9mIHdlaWdodCBtYXRyaXggLS0+CiAgPHJlY3QgeD0iMzUiIHk9IjEwNSIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI5MCIgcng9IjQiIGZpbGw9IndoaXRlIiBzdHJva2U9IiM5M2M1ZmQiIHN0cm9rZS13aWR0aD0iMSIvPgogIDxsaW5lIHgxPSI4NSIgeTE9IjEwNSIgeDI9Ijg1IiB5Mj0iMTk1IiBzdHJva2U9IiM5M2M1ZmQiIHN0cm9rZS13aWR0aD0iMC44Ii8+CiAgPGxpbmUgeDE9IjEzNSIgeTE9IjEwNSIgeDI9IjEzNSIgeTI9IjE5NSIgc3Ryb2tlPSIjOTNjNWZkIiBzdHJva2Utd2lkdGg9IjAuOCIvPgogIDxsaW5lIHgxPSIzNSIgeTE9IjEzNSIgeDI9IjE4NSIgeTI9IjEzNSIgc3Ryb2tlPSIjOTNjNWZkIiBzdHJva2Utd2lkdGg9IjAuOCIvPgogIDxsaW5lIHgxPSIzNSIgeTE9IjE2NSIgeDI9IjE4NSIgeTI9IjE2NSIgc3Ryb2tlPSIjOTNjNWZkIiBzdHJva2Utd2lkdGg9IjAuOCIvPgogIDwhLS0gSGlnaGxpZ2h0IGZpcnN0IGNvbHVtbiBiZWluZyBxdWFudGl6ZWQgLS0+CiAgPHJlY3QgeD0iMzUiIHk9IjEwNSIgd2lkdGg9IjUwIiBoZWlnaHQ9IjkwIiByeD0iMCIgZmlsbD0iI2JmZGJmZSIgb3BhY2l0eT0iMC43Ii8+CiAgPHRleHQgeD0iNjAiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMWU0MGFmIj5jb2wgcTwvdGV4dD4KICA8dGV4dCB4PSIxMTAiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjM2I4MmY2Ij7ihpI8L3RleHQ+CiAgPHRleHQgeD0iMTYwIiB5PSIxNDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzNiODJmNiI+cmVtYWluaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjExMCIgeT0iMjEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiPnF1YW50aXplIGNvbC1ieS1jb2wg4oaSPC90ZXh0PgoKICA8IS0tIEFycm93IHJpZ2h0IC0tPgogIDxsaW5lIHgxPSIyMDAiIHkxPSIxMzAiIHgyPSIyNDAiIHkyPSIxMzAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIEhlc3NpYW4gYm94IC0tPgogIDxyZWN0IHg9IjI0MCIgeT0iNTAiIHdpZHRoPSIxOTAiIGhlaWdodD0iMTYwIiByeD0iOCIgZmlsbD0iI2YwZmRmNCIgc3Ryb2tlPSIjMjJjNTVlIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIzMzUiIHk9Ijc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzE2NjUzNCI+SGVzc2lhbiBIPC90ZXh0PgogIDx0ZXh0IHg9IjMzNSIgeT0iOTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxNTgwM2QiPkggPSAyIFggWOG1gDwvdGV4dD4KICA8dGV4dCB4PSIzMzUiIHk9IjExMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzE1ODAzZCI+WDogY2FsaWJyYXRpb24gYWN0aXZhdGlvbnM8L3RleHQ+CiAgPCEtLSBIZXNzaWFuIGludmVyc2Ugbm90YXRpb24gLS0+CiAgPHJlY3QgeD0iMjU1IiB5PSIxMjUiIHdpZHRoPSIxNjAiIGhlaWdodD0iNzAiIHJ4PSI0IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjODZlZmFjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzMzUiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzE2NjUzNCI+SOKBu8K5IChDaG9sZXNreSk8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIxNjciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxNTgwM2QiPnByZWNvbXB1dGVkIG9uY2U8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIxODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxNTgwM2QiPnBlciBsYXllciwgTyhkwrMpPC90ZXh0PgoKICA8IS0tIEFycm93IHJpZ2h0IC0tPgogIDxsaW5lIHgxPSI0MzAiIHkxPSIxMzAiIHgyPSI0NzAiIHkyPSIxMzAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIFdlaWdodCB1cGRhdGUgYm94IC0tPgogIDxyZWN0IHg9IjQ3MCIgeT0iNTAiIHdpZHRoPSIyMDAiIGhlaWdodD0iMTYwIiByeD0iOCIgZmlsbD0iI2ZlZjNjNyIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI1NzAiIHk9Ijc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSI+Q2xvc2VkLUZvcm0gVXBkYXRlPC90ZXh0PgogIDx0ZXh0IHg9IjU3MCIgeT0iOTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNiNDUzMDkiPkFmdGVyIHF1YW50aXppbmcgY29sIHE6PC90ZXh0PgogIDxyZWN0IHg9IjQ4NSIgeT0iMTA4IiB3aWR0aD0iMTcwIiBoZWlnaHQ9Ijg1IiByeD0iNCIgZmlsbD0id2hpdGUiIHN0cm9rZT0iI2ZjZDM0ZCIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTcwIiB5PSIxMzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5MjQwMGUiPmVycl9xID0gKHdfcSDiiJIgcXVhbnQod19xKSk8L3RleHQ+CiAgPHRleHQgeD0iNTcwIiB5PSIxNDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5MjQwMGUiPiAgICAgICAgICAgIC8gW0jigbvCuV1fcXE8L3RleHQ+CiAgPHRleHQgeD0iNTcwIiB5PSIxNjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5MjQwMGUiPldfcmVtIC09IGVycl9xIOKKlyBbSOKBu8K5XV86cTwvdGV4dD4KICA8dGV4dCB4PSI1NzAiIHk9IjE4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2I0NTMwOSI+Y29tcGVuc2F0ZXMgZG93bnN0cmVhbSBjb2xzPC90ZXh0PgoKICA8IS0tIEFycm93IHJpZ2h0IC0tPgogIDxsaW5lIHgxPSI2NzAiIHkxPSIxMzAiIHgyPSI3MTAiIHkyPSIxMzAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIFF1YW50aXplZCBtb2RlbCBvdXRwdXQgLS0+CiAgPHJlY3QgeD0iNzEwIiB5PSI1MCIgd2lkdGg9IjEzMCIgaGVpZ2h0PSIxNjAiIHJ4PSI4IiBmaWxsPSIjZmRmNGZmIiBzdHJva2U9IiNhODU1ZjciIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9Ijc3NSIgeT0iODAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjN2UyMmNlIj5JTlQ0IExheWVyPC90ZXh0PgogIDx0ZXh0IHg9Ijc3NSIgeT0iOTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5MzMzZWEiPjQtYml0IHdlaWdodHM8L3RleHQ+CiAgPHRleHQgeD0iNzc1IiB5PSIxMTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5MzMzZWEiPkZQMTYgc2NhbGVzPC90ZXh0PgogIDx0ZXh0IHg9Ijc3NSIgeT0iMTM0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTMzM2VhIj5wZXIgZ3JvdXAtMTI4PC90ZXh0PgogIDx0ZXh0IHg9Ijc3NSIgeT0iMTUyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTMzM2VhIj4y4oCTM8OXIG1lbTwvdGV4dD4KICA8dGV4dCB4PSI3NzUiIHk9IjE3MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzkzMzNlYSI+cmVkdWN0aW9uPC90ZXh0PgoKICA8IS0tIEJvdHRvbToga2V5IHByb3BlcnRpZXMgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjIzMCIgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNzUiIHJ4PSI4IiBmaWxsPSIjZjFmNWY5IiBzdHJva2U9IiM5NGEzYjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjUzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzMzNDE1NSI+R1BUUSBLZXkgUHJvcGVydGllczwvdGV4dD4KCiAgPHJlY3QgeD0iMzUiIHk9IjI2NSIgd2lkdGg9IjI0MCIgaGVpZ2h0PSIxMjAiIHJ4PSI2IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjOTNjNWZkIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxNTUiIHk9IjI4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxZTQwYWYiPlNlY29uZC1PcmRlciBPcHRpbWl6YXRpb248L3RleHQ+CiAgPHRleHQgeD0iMTU1IiB5PSIzMDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzYjgyZjYiPlVzZXMgSGVzc2lhbiAoY3VydmF0dXJlIGluZm8pPC90ZXh0PgogIDx0ZXh0IHg9IjE1NSIgeT0iMzIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjM2I4MmY2Ij5ub3QganVzdCBtYWduaXR1ZGUgb2Ygd2VpZ2h0czwvdGV4dD4KICA8dGV4dCB4PSIxNTUiIHk9IjMzOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzNiODJmNiI+Q29tcGVuc2F0ZXMgZXJyb3IgaW4gcmVtYWluaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjE1NSIgeT0iMzU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjM2I4MmY2Ij53ZWlnaHRzIGFmdGVyIGVhY2ggY29sdW1uIHF1YW50PC90ZXh0PgogIDx0ZXh0IHg9IjE1NSIgeT0iMzc0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjM2I4MmY2Ij5+M+KAkzQgR1BVLWhvdXJzIGZvciAxNzVCIG1vZGVsPC90ZXh0PgoKICA8cmVjdCB4PSIzMDUiIHk9IjI2NSIgd2lkdGg9IjI0MCIgaGVpZ2h0PSIxMjAiIHJ4PSI2IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjODZlZmFjIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0MjUiIHk9IjI4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxNjY1MzQiPkdyb3VwLVNpemUgUXVhbnRpemF0aW9uPC90ZXh0PgogIDx0ZXh0IHg9IjQyNSIgeT0iMzA0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMTU4MDNkIj5FYWNoIDEyOCB3ZWlnaHRzIHNoYXJlIG9uZTwvdGV4dD4KICA8dGV4dCB4PSI0MjUiIHk9IjMyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzE1ODAzZCI+c2NhbGUgKyB6ZXJvLXBvaW50IHRlbnNvcjwvdGV4dD4KICA8dGV4dCB4PSI0MjUiIHk9IjMzOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzE1ODAzZCI+Z3JvdXBfc2l6ZT0xMjggYmFsYW5jZXM8L3RleHQ+CiAgPHRleHQgeD0iNDI1IiB5PSIzNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxNTgwM2QiPmFjY3VyYWN5IHZzIG92ZXJoZWFkPC90ZXh0PgogIDx0ZXh0IHg9IjQyNSIgeT0iMzc0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMTU4MDNkIj5ncm91cF9zaXplPTMyOiBiZXN0IHF1YWxpdHk8L3RleHQ+CgogIDxyZWN0IHg9IjU3NSIgeT0iMjY1IiB3aWR0aD0iMjUwIiBoZWlnaHQ9IjEyMCIgcng9IjYiIGZpbGw9IndoaXRlIiBzdHJva2U9IiNmY2QzNGQiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjcwMCIgeT0iMjg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSI+VHlwaWNhbCBSZXN1bHRzIChMbGFtYS0yIDdCKTwvdGV4dD4KICA8dGV4dCB4PSI3MDAiIHk9IjMwNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2I0NTMwOSI+RlAxNiBiYXNlbGluZSBwZXJwbGV4aXR5OiA1LjQ3PC90ZXh0PgogIDx0ZXh0IHg9IjcwMCIgeT0iMzIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjYjQ1MzA5Ij5JTlQ4IEdQVFE6IDUuNTIgKCswLjA1KTwvdGV4dD4KICA8dGV4dCB4PSI3MDAiIHk9IjMzOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2I0NTMwOSI+SU5UNCBnMTI4IEdQVFE6IDUuNjUgKCswLjE4KTwvdGV4dD4KICA8dGV4dCB4PSI3MDAiIHk9IjM1NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2I0NTMwOSI+SU5UNCBnMzIgR1BUUTogNS41NyAoKzAuMTApPC90ZXh0PgogIDx0ZXh0IHg9IjcwMCIgeT0iMzc0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTI0MDBlIj40w5cgbWVtb3J5IHJlZHVjdGlvbjwvdGV4dD4KPC9zdmc+",
+          "alt": "GPTQ layer-wise quantization: weight matrix W → Hessian H = 2XXᵀ → closed-form weight update after quantizing each column → INT4 layer output with FP16 scale factors per group of 128 weights."
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ Algorithm"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The full GPTQ algorithm for a single linear layer processes columns in an arbitrary order (the paper shows order doesn't matter for quality but sequential order is simpler to implement). Three insights enable it to run efficiently on GPU:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Arbitrary column order: optimal correction is valid regardless of which columns have been quantized — there is no need to process columns in a specific order determined by importance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Lazy batch updates: instead of updating all remaining columns after each column quantization, batch 128 columns of updates and apply them together. This is 128× more FLOPs-efficient."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cholesky preconditioning: rather than repeatedly recomputing H⁻¹ after each column is eliminated, decompose H once with Cholesky and apply successive rank-1 updates using the already-computed triangular factors."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\nfrom auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig\n\n# ── Step 1: configure quantization ─────────────────────────────────────────\nquantize_config = BaseQuantizeConfig(\n    bits=4,              # INT4 weights\n    group_size=128,      # one scale + zero-point per 128 weights\n    desc_act=False,      # disable activation reordering (faster, slightly lower accuracy)\n    sym=True,            # symmetric quantization (no zero-point offset)\n)\n\n# ── Step 2: load base model in FP16 ────────────────────────────────────────\nmodel_id = \"meta-llama/Llama-2-7b-hf\"\nmodel = AutoGPTQForCausalLM.from_pretrained(\n    model_id,\n    quantize_config,\n    torch_dtype=torch.float16,\n    device_map=\"auto\",\n)\ntokenizer = AutoTokenizer.from_pretrained(model_id)\n\n# ── Step 3: prepare calibration dataset ────────────────────────────────────\n# GPTQ needs 128-512 representative samples; wikitext-2 is the standard\nfrom datasets import load_dataset\n\ndataset = load_dataset(\"wikitext\", \"wikitext-2-raw-v1\", split=\"train\")\n# Filter empty lines and tokenise to 2048-token chunks\ncalib_texts = [t for t in dataset[\"text\"] if len(t) > 50][:512]\ncalib_data = [\n    tokenizer(text, return_tensors=\"pt\", truncation=True, max_length=2048)\n    for text in calib_texts\n]\n\n# ── Step 4: run GPTQ quantization (layer by layer) ─────────────────────────\n# This takes ~15-40 min for a 7B model on an A100; ~4 hours for 70B\nmodel.quantize(calib_data)\n\n# ── Step 5: save the quantized model ────────────────────────────────────────\nsave_dir = \"./llama-2-7b-gptq-4bit-128g\"\nmodel.save_quantized(save_dir, use_safetensors=True)\ntokenizer.save_pretrained(save_dir)\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The calibration dataset should match your deployment domain. For a general-purpose model use wikitext-2 or C4; for a code model use the-stack samples; for a medical model use domain-specific text. Using 512 samples is typical — quality plateaus quickly beyond this."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Loading and Running GPTQ Models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Saved GPTQ models can be loaded directly from HuggingFace Hub (many GPTQ models are pre-quantized by the community) or from a local directory:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from auto_gptq import AutoGPTQForCausalLM\nfrom transformers import AutoTokenizer, pipeline\n\n# Load pre-quantized GPTQ model (e.g., from TheBloke on HuggingFace Hub)\nmodel_name_or_path = \"TheBloke/Llama-2-7B-GPTQ\"\n\nmodel = AutoGPTQForCausalLM.from_quantized(\n    model_name_or_path,\n    device_map=\"auto\",\n    use_safetensors=True,\n    disable_exllama=False,   # use exllama CUDA kernel for INT4 (fast)\n    # inject_fused_attention=True,  # fused attention for additional speedup\n)\ntokenizer = AutoTokenizer.from_pretrained(model_name_or_path)\n\n# Use HuggingFace pipeline for generation\ngenerator = pipeline(\n    \"text-generation\",\n    model=model,\n    tokenizer=tokenizer,\n)\nresult = generator(\n    \"The capital of France is\",\n    max_new_tokens=50,\n    do_sample=False,\n)\nprint(result[0][\"generated_text\"])\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "HuggingFace Transformers also supports GPTQ models natively via the `GPTQConfig` class, without requiring auto_gptq as a separate package:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig\n\n# Quantize and load in a single step with native HF support (transformers ≥ 4.35)\nquantization_config = GPTQConfig(\n    bits=4,\n    group_size=128,\n    dataset=[\"wikitext2\"],  # built-in calibration dataset\n    tokenizer=tokenizer,\n)\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Llama-2-7b-hf\",\n    quantization_config=quantization_config,\n    device_map=\"auto\",\n    torch_dtype=torch.float16,\n)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Group-Size Quantization"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ stores weights in INT4 but scale factors in FP16. A per-tensor scale is too coarse at INT4 — outlier weights in one part of a row would set a large scale, wasting most of the 4-bit range on small weights. Group-size quantization solves this by assigning one scale (and optionally a zero-point for asymmetric quantization) to each contiguous block of weights along the input dimension:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{W}_{i,j} = \\mathrm{round}\\!\\left(\\frac{W_{i,j}}{s_{i,\\lfloor j/g \\rfloor}}\\right), \\quad s_{i,k} = \\frac{\\max\\bigl(|W_{i, kg:(k+1)g}|\\bigr)}{2^{b-1}-1}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where g is the group size and b is the bit width (4 for INT4). Common settings:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "group_size"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory overhead (scales)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Use case"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None (per-tensor)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0%"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Worst INT4 quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Rarely used"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1024"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.2% of weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Maximum compression"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "128 (default)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.6% of weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Good — near RTN INT8"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Standard choice"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.1% of weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Better"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quality-sensitive"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "6.25% of weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best INT4 quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Highest quality INT4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "ExLlama Kernels: Achieving Inference Speedup"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ models must dequantize weights at inference time — converting INT4 to FP16 before the matrix multiply. Naive dequantization is a bandwidth-bound operation that can reduce effective throughput. The ExLlama and ExLlama2 custom CUDA kernels fuse dequantization with the GEMM (General Matrix Multiplication), achieving 2–3× faster inference than pure FP16 on consumer GPUs with large batch sizes:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# ExLlama v2 kernel via auto_gptq (recommended for NVIDIA GPUs)\nfrom auto_gptq import AutoGPTQForCausalLM\n\nmodel = AutoGPTQForCausalLM.from_quantized(\n    \"TheBloke/Llama-2-7B-GPTQ\",\n    device_map=\"cuda:0\",\n    use_safetensors=True,\n    disable_exllama=False,       # False = use ExLlama v1 kernel\n    # For ExLlama v2 (faster):\n    # exllama_config={\"version\": 2},\n)\n\n# Benchmark token generation speed\nimport time\ntokenizer = AutoTokenizer.from_pretrained(\"TheBloke/Llama-2-7B-GPTQ\")\nprompt_ids = tokenizer(\"Hello world\", return_tensors=\"pt\").input_ids.cuda()\n\nstart = time.perf_counter()\noutput = model.generate(prompt_ids, max_new_tokens=200, do_sample=False)\nelapsed = time.perf_counter() - start\n\ntokens_generated = output.shape[-1] - prompt_ids.shape[-1]\nprint(f\"Speed: {tokens_generated / elapsed:.1f} tokens/sec\")\n# GPTQ INT4 on RTX 4090 ≈ 80–120 tokens/sec for Llama-2 7B\n# FP16 on RTX 4090 ≈ 50–70 tokens/sec (limited by memory bandwidth)\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Counter-intuitively, GPTQ INT4 can be faster than FP16 on memory-bandwidth-limited hardware like consumer GPUs. FP16 uses 2 bytes per parameter; INT4 uses 0.5 bytes. Loading weights from VRAM to compute units takes 4× less time, so the compute units are fed faster despite the dequantization overhead."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ vs Other Quantization Methods"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Method"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Calibration"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Algorithm"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "INT4 Quality"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Speed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Main Limitation"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RTN (round-to-nearest)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Independent rounding"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Poor"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No error compensation"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GPTQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~512 samples, 15–40 min/7B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Layer-wise Hessian"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Good (≈ RTN INT8)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast (ExLlama)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Calibration data needed"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~128 samples, 5–10 min/7B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Activation-aware scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Good (≈ GPTQ)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Less accurate on outlier-heavy models"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "bitsandbytes NF4"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None (no calibration)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NF4 + double quantization"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Good for fine-tuning"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Not optimised for inference throughput"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GGUF (K-quant)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Block-wise k-means"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Excellent at Q5/Q6"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU+GPU"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Higher bit-rates needed for best quality"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Fine-Tuning GPTQ Models with LoRA"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ INT4 models can be fine-tuned with LoRA adapters without dequantizing the base weights. The frozen INT4 weights act as the base model; only the small LoRA rank decomposition matrices are trained in FP16 or BF16. This combination is sometimes called \"GPTQ+LoRA\" and enables instruction-tuning a 13B model on a 24 GB GPU:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer\nfrom auto_gptq import AutoGPTQForCausalLM\nfrom peft import get_peft_model, LoraConfig, TaskType\n\n# Load GPTQ base model\nmodel = AutoGPTQForCausalLM.from_quantized(\n    \"TheBloke/Llama-2-13B-GPTQ\",\n    device_map=\"auto\",\n    use_safetensors=True,\n)\n\n# Wrap with LoRA (only LoRA matrices are trainable; GPTQ weights stay INT4)\nlora_config = LoraConfig(\n    task_type=TaskType.CAUSAL_LM,\n    r=64,                     # LoRA rank\n    lora_alpha=128,\n    target_modules=[\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\",\n                    \"gate_proj\", \"up_proj\", \"down_proj\"],\n    lora_dropout=0.05,\n    bias=\"none\",\n)\nmodel = get_peft_model(model, lora_config)\nmodel.print_trainable_parameters()\n# trainable params: 83,886,080 || all params: 13,498,368,000 || 0.62% trainable\n\n# The training loop is identical to standard LoRA fine-tuning:\n# from transformers import Trainer, TrainingArguments ...\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "GPTQ+LoRA does not jointly optimise the base weights and adapters — the INT4 rounding is fixed. For best results on a specific domain, re-quantize from a LoRA-merged FP16 checkpoint rather than fine-tuning on top of a GPTQ model."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical Checklist"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Choose group_size=128 ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "as the default. Drop to 32 if accuracy is critical; raise to 256 if VRAM is extremely limited."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a domain-matched calibration set ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "of 512 samples. Wikitext-2 is fine for general text; use code samples for coding models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enable ExLlama or ExLlama2 kernels ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "for inference — they give 1.5–2.5× throughput over naive dequantization on NVIDIA GPUs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Evaluate perplexity ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "on a held-out split (e.g., wikitext-2 test) before deploying. A perplexity jump of >0.5 over FP16 baseline suggests calibration data mismatch or too few samples."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For fine-tuning after GPTQ: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "use LoRA on the quantized base if you just need lightweight domain adaptation; re-quantize from a full FP16 merged checkpoint if you need best final quality."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "desc_act=True ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "(activation reordering) improves accuracy ~0.1–0.3 perplexity points by processing columns in order of decreasing activation variance, at the cost of slightly slower quantization."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Activation Reordering (desc_act)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Activation reordering (the desc_act option) is an optional enhancement that processes weight columns in decreasing order of their activation magnitude rather than arbitrary column order. The motivation: columns with the highest activation variance have the most impact on the layer output, and quantizing high-impact columns early (when the Hessian estimate is still accurate and uncontaminated by prior rounding errors) produces better quantization decisions."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To determine column ordering, GPTQ computes the diagonal of the Hessian H = 2XXᵀ over the calibration set. Columns are sorted by their Hessian diagonal value — equivalently, by the L2 norm of the corresponding input activation across the calibration batch:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{order} = \\mathrm{argsort}\\!\\Bigl(-\\mathrm{diag}(H)\\Bigr) = \\mathrm{argsort}\\!\\Bigl(-\\|X_{i,:}\\|_2^2\\Bigr)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After quantization, the weight columns are permuted back to their original order before saving, so the model's behaviour is identical to the unordered version — activation reordering is a purely internal quantization optimisation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical impact: desc_act=True improves perplexity by 0.05–0.3 points for INT4 quantization, with diminishing returns at INT8. The trade-off is slightly slower quantization (an additional sort over d_in columns per layer) and a small increase in memory during the quantization process."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Enable activation reordering during quantization\nfrom auto_gptq import BaseQuantizeConfig\n\nquantize_config = BaseQuantizeConfig(\n    bits=4,\n    group_size=128,\n    desc_act=True,      # True: reorder columns by activation magnitude\n                        # Recommended for quality-critical deployments\n    sym=False,          # asymmetric quantization (separate zero-point per group)\n                        # asymmetric is typically 0.1–0.2pp better than symmetric\n)\n# With desc_act=True, TheBloke's GPTQ models typically report\n# better perplexity numbers than desc_act=False at the same bit-width.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Evaluating GPTQ Quality"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Perplexity on wikitext-2 test is the standard evaluation for GPTQ quality. Always evaluate the quantized model against the FP16 baseline before deployment — a jump of more than 0.3 perplexity points indicates a problem with calibration data or config:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport math\nfrom datasets import load_dataset\nfrom transformers import AutoTokenizer\nfrom auto_gptq import AutoGPTQForCausalLM\n\ndef evaluate_perplexity(\n    model,\n    tokenizer,\n    dataset_name: str = \"wikitext\",\n    dataset_config: str = \"wikitext-2-raw-v1\",\n    stride: int = 512,\n    max_length: int = 2048,\n) -> float:\n    \"\"\"Compute sliding-window perplexity on the test split.\n    Uses stride=512 to avoid boundary effects.\n    \"\"\"\n    dataset = load_dataset(dataset_name, dataset_config, split=\"test\")\n    text = \"\\n\\n\".join(dataset[\"text\"])\n    encodings = tokenizer(text, return_tensors=\"pt\")\n    seq_len = encodings.input_ids.shape[1]\n\n    nlls = []\n    prev_end_loc = 0\n    for begin_loc in range(0, seq_len, stride):\n        end_loc = min(begin_loc + max_length, seq_len)\n        trg_len = end_loc - prev_end_loc  # tokens we evaluate this window\n        input_ids = encodings.input_ids[:, begin_loc:end_loc].cuda()\n        target_ids = input_ids.clone()\n        target_ids[:, :-trg_len] = -100  # mask tokens already evaluated\n\n        with torch.no_grad():\n            outputs = model(input_ids, labels=target_ids)\n            nll = outputs.loss * trg_len\n\n        nlls.append(nll.float())\n        prev_end_loc = end_loc\n        if end_loc == seq_len:\n            break\n\n    ppl = math.exp(torch.stack(nlls).sum() / seq_len)\n    return ppl\n\nmodel = AutoGPTQForCausalLM.from_quantized(\n    \"./llama-2-7b-gptq-4bit-128g\",\n    device_map=\"cuda:0\",\n    use_safetensors=True,\n)\ntokenizer = AutoTokenizer.from_pretrained(\"meta-llama/Llama-2-7b-hf\")\nppl = evaluate_perplexity(model, tokenizer)\nprint(f\"Wikitext-2 perplexity (GPTQ INT4 g128): {ppl:.2f}\")\n# Expected: 5.65–5.70 for Llama-2 7B with desc_act=False\n# Expected: 5.57–5.62 with desc_act=True, group_size=128\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Beyond perplexity, evaluate on your target benchmarks (MMLU, HumanEval, GSM8K, etc.) using the lm-evaluation-harness library. Perplexity degradation does not always correlate with downstream task degradation — a model can have higher perplexity but better MMLU scores after fine-tuning, for instance."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory Footprint"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GPTQ INT4 with group_size=128 stores each weight in 4 bits plus FP16 scale factors for each group of 128 weights. The total memory per parameter is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{bits per weight} = 4 + \\frac{16}{128} = 4.125 \\text{ bits}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Compared to FP16 (16 bits per weight), this is a 3.88× compression ratio. For Llama-2 models:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FP16 VRAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GPTQ INT4 g128 VRAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Compression"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fits on"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-2 7B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "13.5 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.9 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RTX 3060 (12 GB)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-2 13B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "25 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "7.0 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.6×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RTX 3080/3090 (10–24 GB)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-2 70B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "130 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "37 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2× RTX 4090 or 1× A100"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-3 70B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "140 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "40 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2× RTX 4090 or 1× A100"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These figures are for weights only. Add KV cache (proportional to batch size × context length), activations, and model-loading overhead. A practical rule of thumb: GPTQ INT4 requires roughly (parameter count × 0.55 GB) total VRAM for single-batch inference."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GPTQ ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "quantizes LLM weights to INT4 by minimising layer-wise output error using second-order (Hessian) information. After quantizing each column, it corrects remaining columns with a closed-form update."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The core formula: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "δW_{:,p} = −(err_q / [H⁻¹]_{qq}) · [H⁻¹]_{qp} propagates rounding error from quantized columns into compensating adjustments in remaining columns."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Group-size quantization ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "(group_size=128) assigns independent FP16 scales to groups of 128 INT4 weights, recovering most of the accuracy lost to per-tensor scaling."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ExLlama/ExLlama2 kernels ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "fuse INT4 dequantization with GEMM, enabling GPTQ models to run faster than FP16 on memory-bandwidth-limited consumer GPUs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GPTQ+LoRA ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "combines frozen INT4 base weights with trainable FP16 LoRA adapters, enabling instruction-tuning 13B+ models on a single 24 GB GPU."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
