@@ -100,6 +100,8 @@ in order. Do not skip validation. Do not stop early on the happy path.
    This reads the document content and writes computed `hours` + `hoursSource: "computed"` to
    `topic.json`. Never skip this step.
 
+   **Duration gate: must be ≥ 1.5h AND ≤ 3.0h.**
+
    **If computed hours < 1.5:**
    The document is too short. Extend it by inserting new sections (additional examples,
    deeper code walkthroughs, an operational considerations section, a comparison table,
@@ -107,6 +109,13 @@ in order. Do not skip validation. Do not stop early on the happy path.
    - Re-run validation: `node scripts/validate-tiptap.mjs <path>`
    - Re-run duration: `node scripts/update-computed-durations.mjs ...`
    - Repeat until hours ≥ 1.5. Do NOT commit a document below the threshold.
+
+   **If computed hours > 3.0:**
+   The document is too long. Trim it by removing redundant sections, shortening verbose
+   code examples to show only the key lines, or collapsing repetitive bullet lists. Then:
+   - Re-run validation: `node scripts/validate-tiptap.mjs <path>`
+   - Re-run duration: `node scripts/update-computed-durations.mjs ...`
+   - Repeat until hours ≤ 3.0. Do NOT commit a document above the threshold.
 
 6. **Rebuild app data.** Run `npm run gen:content`.
 
@@ -163,8 +172,9 @@ in order. Do not skip validation. Do not stop early on the happy path.
 4.  write document.json  (must include ≥1 image/SVG)    # author content
 4b. node scripts/validate-tiptap.mjs <doc>               # structural + image gate
 5.  npm run content:embed-images -- <doc>                # (if FILE: placeholders used)
-5b. node scripts/update-computed-durations.mjs ...        # duration gate (≥1.5h)
+5b. node scripts/update-computed-durations.mjs ...        # duration gate (≥1.5h AND ≤3h)
     → if < 1.5h: extend → re-validate (4b) → recompute
+    → if > 3.0h: trim  → re-validate (4b) → recompute
 6.  npm run gen:content                                   # rebuild public/data
 7.  ls -lh public/data/subjects/.../sections/<id>.json   # render gate
 8.  git add + git commit + git push                       # persist
@@ -177,6 +187,6 @@ in order. Do not skip validation. Do not stop early on the happy path.
 
 - One sub-subtopic per step. Never batch.
 - Never modify a sub-subtopic that already has content.
-- Gates that must all pass before commit: TipTap validation (4b), duration ≥ 1.5h (5b), rendered file exists (7).
+- Gates that must all pass before commit: TipTap validation (4b), duration ≥ 1.5h AND ≤ 3.0h (5b), rendered file exists (7).
 - If any step fails irrecoverably (validation errors after two fix attempts, push keeps failing),
   STOP and report the failure clearly. Do not push a broken or short document.
