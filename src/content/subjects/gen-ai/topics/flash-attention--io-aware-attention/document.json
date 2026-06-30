@@ -1,0 +1,1578 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard attention is memory-bandwidth-bound, not compute-bound. The bottleneck is not the number of floating-point operations but the volume of data moving between GPU HBM (high-bandwidth memory) and the compute units. FlashAttention is described as IO-aware because its design is driven entirely by minimising HBM transfers rather than minimising FLOPs. This section explains why the IO bottleneck exists and how the tiling strategy eliminates it."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The GPU Memory Hierarchy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Modern GPUs have two main memory levels relevant to attention:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "HBM (High-Bandwidth Memory): "
+                  },
+                  {
+                    "type": "text",
+                    "text": "40\u201380 GB, bandwidth ~2 TB/s on A100. All model weights, activations, and the KV-cache live here. Reads/writes to HBM are the primary bottleneck for memory-bound kernels."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "SRAM (on-chip, shared memory + registers): "
+                  },
+                  {
+                    "type": "text",
+                    "text": "~20 MB total across all SMs, bandwidth ~19 TB/s \u2014 about 9\u00d7 faster than HBM. Data in SRAM can be reused at near-compute speed with no additional HBM traffic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The gap between HBM bandwidth (2 TB/s) and peak compute (312 TFLOP/s on A100 BF16) gives an arithmetic intensity threshold of about 312/2 = 156 FLOP/byte. A kernel must perform at least 156 FLOPs per byte transferred from HBM to be compute-bound rather than memory-bound."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4MjAgNDAwIiB3aWR0aD0iODIwIiBoZWlnaHQ9IjQwMCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTMiPgogIDxyZWN0IHdpZHRoPSI4MjAiIGhlaWdodD0iNDAwIiByeD0iMTAiIGZpbGw9IiNmOGY5ZmEiIHN0cm9rZT0iI2RlZTJlNiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjI4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE1IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzIxMjUyOSI+R1BVIE1lbW9yeSBIaWVyYXJjaHk6IFN0YW5kYXJkIEF0dGVudGlvbiB2cyBGbGFzaEF0dGVudGlvbjwvdGV4dD4KCiAgPCEtLSBMZWZ0IHBhbmVsOiBTdGFuZGFyZCBhdHRlbnRpb24gLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjQ1IiB3aWR0aD0iMzc1IiBoZWlnaHQ9IjMzMCIgcng9IjgiIGZpbGw9IiNmZmYwZjMiIHN0cm9rZT0iI2U2Mzk0NiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyMDciIHk9IjY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzZlMWExYSIgZm9udC1zaXplPSIxNCI+U3RhbmRhcmQgQXR0ZW50aW9uIChJTy11bmF3YXJlKTwvdGV4dD4KCiAgPCEtLSBIQk0gLS0+CiAgPHJlY3QgeD0iNDUiIHk9Ijg1IiB3aWR0aD0iMzI1IiBoZWlnaHQ9Ijk1IiByeD0iNiIgZmlsbD0iI2U2Mzk0NiIgb3BhY2l0eT0iMC44NSIvPgogIDx0ZXh0IHg9IjIwNyIgeT0iMTA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZvbnQtc2l6ZT0iMTMiPkhCTSDigJQgODAgR0IgQCAyIFRCL3M8L3RleHQ+CiAgPHRleHQgeD0iMjA3IiB5PSIxMjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmZmM4YzgiIGZvbnQtc2l6ZT0iMTEiPlEsIEssIFYgIOKGkiAgd3JpdGUgUyAoTsOXTikgIOKGkiAgcmVhZCBTICDihpIgIHdyaXRlIFAgIOKGkiAgcmVhZCBQLFYgIOKGkiAgd3JpdGUgTzwvdGV4dD4KICA8dGV4dCB4PSIyMDciIHk9IjE0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0id2hpdGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5IQk0gSU86IM6YKE5kICsgTsKyKSAg4oCUIGRvbWluYXRlZCBieSBOwrIgbWF0cml4PC90ZXh0PgogIDx0ZXh0IHg9IjIwNyIgeT0iMTYyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmZjOGM4IiBmb250LXNpemU9IjExIj5BdCBOPTQwOTYsIGQ9NjQ6IH4xIEdCIHRyYW5zZmVycmVkIHBlciBmb3J3YXJkIHBhc3M8L3RleHQ+CgogIDwhLS0gQXJyb3dzOiBtYW55IHJvdW5kIHRyaXBzIC0tPgogIDxsaW5lIHgxPSIyMDciIHkxPSIxODAiIHgyPSIyMDciIHkyPSIyMjAiIHN0cm9rZT0iI2U2Mzk0NiIgc3Ryb2tlLXdpZHRoPSIzIiBtYXJrZXItZW5kPSJ1cmwoI2FycnIpIi8+CiAgPGxpbmUgeDE9IjIwNyIgeTE9IjIyMCIgeDI9IjIwNyIgeTI9IjE4MCIgc3Ryb2tlPSIjZTYzOTQ2IiBzdHJva2Utd2lkdGg9IjMiIG1hcmtlci1lbmQ9InVybCgjYXJycikiLz4KICA8dGV4dCB4PSIyNTAiIHk9IjIwNiIgZmlsbD0iI2U2Mzk0NiIgZm9udC1zaXplPSIxMSI+bWFueSByb3VuZCB0cmlwczwvdGV4dD4KCiAgPCEtLSBTUkFNIC0tPgogIDxyZWN0IHg9IjQ1IiB5PSIyMjAiIHdpZHRoPSIzMjUiIGhlaWdodD0iNjAiIHJ4PSI2IiBmaWxsPSIjYWRiNWJkIi8+CiAgPHRleHQgeD0iMjA3IiB5PSIyNDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IndoaXRlIiBmb250LXdlaWdodD0iYm9sZCI+U1JBTSDigJQgMjAgTUIgQCAxOSBUQi9zPC90ZXh0PgogIDx0ZXh0IHg9IjIwNyIgeT0iMjY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjhmOWZhIiBmb250LXNpemU9IjExIj5Pbmx5IGhvbGRzIG9uZSBlbGVtZW50IGF0IGEgdGltZSDigJQgYmFyZWx5IHVzZWQ8L3RleHQ+CgogIDx0ZXh0IHg9IjIwNyIgeT0iMzEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNmUxYTFhIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCI+Qm90dGxlbmVjazogSEJNIGJhbmR3aWR0aDwvdGV4dD4KICA8dGV4dCB4PSIyMDciIHk9IjMzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzQ5NTA1NyIgZm9udC1zaXplPSIxMSI+TsOXTiBtYXRyaXggd3JpdHRlbiB0aGVuIGltbWVkaWF0ZWx5IHJlYWQgYmFjazwvdGV4dD4KICA8dGV4dCB4PSIyMDciIHk9IjM1MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzQ5NTA1NyIgZm9udC1zaXplPSIxMSI+4oaSIFNSQU0ncyA5w5cgQlcgYWR2YW50YWdlIGlzIHdhc3RlZDwvdGV4dD4KCiAgPCEtLSBSaWdodCBwYW5lbDogRmxhc2hBdHRlbnRpb24gLS0+CiAgPHJlY3QgeD0iNDI1IiB5PSI0NSIgd2lkdGg9IjM3NSIgaGVpZ2h0PSIzMzAiIHJ4PSI4IiBmaWxsPSIjZTlmNWZmIiBzdHJva2U9IiM0MzYxZWUiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjEyIiB5PSI2OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTNhNmUiIGZvbnQtc2l6ZT0iMTQiPkZsYXNoQXR0ZW50aW9uIChJTy1hd2FyZSwgdGlsZWQpPC90ZXh0PgoKICA8IS0tIEhCTSAtLT4KICA8cmVjdCB4PSI0NTAiIHk9Ijg1IiB3aWR0aD0iMzI1IiBoZWlnaHQ9Ijc1IiByeD0iNiIgZmlsbD0iIzQzNjFlZSIgb3BhY2l0eT0iMC44NSIvPgogIDx0ZXh0IHg9IjYxMiIgeT0iMTA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZvbnQtc2l6ZT0iMTMiPkhCTSDigJQgODAgR0IgQCAyIFRCL3M8L3RleHQ+CiAgPHRleHQgeD0iNjEyIiB5PSIxMjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNjOGQ4ZmYiIGZvbnQtc2l6ZT0iMTEiPlEsIEssIFYgbG9hZGVkIGluIGJsb2NrcyDigJQgTyB3cml0dGVuIG9uY2Ug4oCUIE7Dl04gbWF0cml4IE5FVkVSIG1hdGVyaWFsaXNlZDwvdGV4dD4KICA8dGV4dCB4PSI2MTIiIHk9IjE0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0id2hpdGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5IQk0gSU86IM6YKE7CsmQgLyBNKSAg4oCUIE0gPSBTUkFNIHNpemU8L3RleHQ+CgogIDwhLS0gQXJyb3dzOiBvbmUtd2F5LCBlZmZpY2llbnQgLS0+CiAgPGxpbmUgeDE9IjYxMiIgeTE9IjE2MCIgeDI9IjYxMiIgeTI9IjIyMCIgc3Ryb2tlPSIjNDM2MWVlIiBzdHJva2Utd2lkdGg9IjMiIG1hcmtlci1lbmQ9InVybCgjYXJyYikiLz4KICA8dGV4dCB4PSI2NTAiIHk9IjE5NiIgZmlsbD0iIzQzNjFlZSIgZm9udC1zaXplPSIxMSI+b25lLXBhc3MgcGVyIHRpbGU8L3RleHQ+CgogIDwhLS0gU1JBTSB0aWxlcyAtLT4KICA8cmVjdCB4PSI0NTAiIHk9IjIyMCIgd2lkdGg9IjE1NSIgaGVpZ2h0PSI2MCIgcng9IjYiIGZpbGw9IiM0MzYxZWUiIG9wYWNpdHk9IjAuNyIvPgogIDx0ZXh0IHg9IjUyNyIgeT0iMjQ3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC13ZWlnaHQ9ImJvbGQiPlEgdGlsZSAoQnLDl2QpPC90ZXh0PgogIDx0ZXh0IHg9IjUyNyIgeT0iMjY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYzhkOGZmIiBmb250LXNpemU9IjExIj5pbiBTUkFNPC90ZXh0PgoKICA8cmVjdCB4PSI2MTUiIHk9IjIyMCIgd2lkdGg9IjE1NSIgaGVpZ2h0PSI2MCIgcng9IjYiIGZpbGw9IiM3MjA5YjciIG9wYWNpdHk9IjAuNyIvPgogIDx0ZXh0IHg9IjY5MiIgeT0iMjQ3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC13ZWlnaHQ9ImJvbGQiPkssIFYgdGlsZXMgKEJjw5dkKTwvdGV4dD4KICA8dGV4dCB4PSI2OTIiIHk9IjI2NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyYjRmZiIgZm9udC1zaXplPSIxMSI+c3RyZWFtZWQgdGhyb3VnaCBTUkFNPC90ZXh0PgoKICA8dGV4dCB4PSI2MTIiIHk9IjMxNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzFhM2E2ZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiPkFsbCBhcml0aG1ldGljIGRvbmUgaW4gU1JBTTwvdGV4dD4KICA8dGV4dCB4PSI2MTIiIHk9IjMzNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzQ5NTA1NyIgZm9udC1zaXplPSIxMSI+T25saW5lIHNvZnRtYXgga2VlcHMgcnVubmluZyAobSwgbCwgTykgaW4gcmVnaXN0ZXJzPC90ZXh0PgogIDx0ZXh0IHg9IjYxMiIgeT0iMzU1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMmRjNjUzIiBmb250LXdlaWdodD0iYm9sZCIgZm9udC1zaXplPSIxMSI+4oaSIDLigJM0w5cgZmFzdGVyIGF0IE49MTAyNCwgNeKAkznDlyBmYXN0ZXIgYXQgTj00MDk2PC90ZXh0PgoKICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFycnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjYiIHJlZlg9IjgiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+PHBvbHlnb24gcG9pbnRzPSIwIDAsIDggMywgMCA2IiBmaWxsPSIjZTYzOTQ2Ii8+PC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnJiIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI2IiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPjxwb2x5Z29uIHBvaW50cz0iMCAwLCA4IDMsIDAgNiIgZmlsbD0iIzQzNjFlZSIvPjwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+",
+          "alt": "GPU memory hierarchy: standard attention vs FlashAttention IO pattern"
+        }
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "IO Complexity of Standard Attention"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard attention computes "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "\\text{Attn}(Q,K,V) = \\text{softmax}(QK^T/\\sqrt{d})V"
+            }
+          },
+          {
+            "type": "text",
+            "text": ". A na\u00efve implementation in PyTorch or cuDNN materialises the full N\u00d7N score matrix S and the probability matrix P in HBM. The IO cost at each step:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Read Q, K from HBM: "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "2Nd"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Write S = QK^T/\u221ad to HBM: "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "N^2"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Read S, write P = softmax(S) to HBM: "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "2N^2"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Read P, V from HBM, write O to HBM: "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "N^2 + Nd + Nd"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Total HBM reads + writes:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{IO}_{\\text{standard}} = \\Theta(Nd + N^2)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For practical values (N = 4096, d = 64, FP16 = 2 bytes):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{IO}_{\\text{standard}} \\approx 2 \\cdot (4096^2) \\cdot 2\\,\\text{bytes} \\approx 64\\,\\text{MB per head}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With 32 attention heads, a single forward pass transfers about 2 GB through HBM \u2014 at 2 TB/s that takes ~1 ms just for data movement, independent of computation. The arithmetic intensity is roughly "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "4N^2 d / (4N^2 + 2Nd) \\approx d"
+            }
+          },
+          {
+            "type": "text",
+            "text": " FLOPs/byte, which for d = 64 is only 64 \u2014 well below the 156 threshold, confirming that standard attention is heavily memory-bound."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The IO-Aware Approach: Tiling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key observation is that softmax is the only operation that prevents computing attention entirely in SRAM: it requires the full row of S to compute the denominator. FlashAttention (Dao et al., 2022) overcomes this with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ],
+            "text": "online softmax"
+          },
+          {
+            "type": "text",
+            "text": " \u2014 an algorithm that computes softmax incrementally as K blocks are streamed through, maintaining a running maximum and normalisation constant."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The tiling strategy divides the computation as follows:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Divide Q into "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "T_r = \\lceil N/B_r \\rceil"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " row blocks of size "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "B_r \\times d"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Divide K, V into "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "T_c = \\lceil N/B_c \\rceil"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " column blocks of size "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "B_c \\times d"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For each outer block (Q tile), iterate over all K, V tiles. All arithmetic happens in SRAM; only the final output tile O is written to HBM."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Block sizes "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "B_r"
+            }
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "B_c"
+            }
+          },
+          {
+            "type": "text",
+            "text": " are chosen so that one Q tile and one K, V tile together fit in SRAM: "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "4 B_r d + 4 B_c d \\leq M"
+            }
+          },
+          {
+            "type": "text",
+            "text": " where M is the SRAM size in elements. A typical choice on A100 is B_r = B_c = 64 or 128 depending on d."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Online Softmax: Making Tiling Exact"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard softmax over a row "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "s = [s_1, \\ldots, s_N]"
+            }
+          },
+          {
+            "type": "text",
+            "text": " requires two passes: one to find the maximum for numerical stability, one to compute the exponents and sum. Online softmax merges these into a single pass by maintaining a running state:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\begin{aligned}\nm_j &= \\max(m_{j-1},\\, \\text{rowmax}(S_{ij})) \\\\\n\\tilde{P}_{ij} &= \\exp(S_{ij} - m_j) \\\\\nl_j &= e^{m_{j-1} - m_j} l_{j-1} + \\text{rowsum}(\\tilde{P}_{ij}) \\\\\nO_i &= e^{m_{j-1} - m_j} O_{i,j-1} + \\tilde{P}_{ij} V_j\n\\end{aligned}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After processing all T_c K, V blocks, the output tile is normalised: O_i \u2190 O_i / l_{T_c}. The running maximum m_j and sum l_j are kept in registers (not HBM), adding negligible cost."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\ndef flash_attention_reference(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,\n                               Br: int = 64, Bc: int = 64) -> torch.Tensor:\n    \"\"\"\n    Pure-Python reference implementation of FlashAttention tiling.\n    Numerically equivalent to standard attention, but never materialises the full N\u00d7N matrix.\n    Q, K, V: [N, d] (single head, no batch dim for clarity)\n    \"\"\"\n    N, d = Q.shape\n    scale = d ** -0.5\n    O = torch.zeros(N, d, dtype=Q.dtype, device=Q.device)\n    l = torch.zeros(N, dtype=Q.dtype, device=Q.device)     # normalisation denominators\n    m = torch.full((N,), float(\"-inf\"), dtype=Q.dtype, device=Q.device)  # running max\n\n    Tr = (N + Br - 1) // Br\n    Tc = (N + Bc - 1) // Bc\n\n    for i in range(Tr):\n        Qi = Q[i*Br : (i+1)*Br]               # [Br, d] \u2014 this tile stays \"in SRAM\"\n        Oi = O[i*Br : (i+1)*Br]\n        li = l[i*Br : (i+1)*Br]\n        mi = m[i*Br : (i+1)*Br]\n\n        for j in range(Tc):\n            Kj = K[j*Bc : (j+1)*Bc]           # [Bc, d] \u2014 stream K, V tiles\n            Vj = V[j*Bc : (j+1)*Bc]           # [Bc, d]\n\n            Sij = (Qi @ Kj.T) * scale          # [Br, Bc] attention scores \u2014 in registers\n            mij = Sij.max(dim=-1).values        # [Br]\n\n            m_new = torch.maximum(mi, mij)\n            Pij = torch.exp(Sij - m_new.unsqueeze(-1))     # [Br, Bc] unnormalised\n            lij = Pij.sum(dim=-1)\n\n            # Rescale previous accumulation and add current block\n            alpha = torch.exp(mi - m_new)      # correction factor [Br]\n            Oi = alpha.unsqueeze(-1) * Oi + Pij @ Vj\n            li = alpha * li + lij\n            mi = m_new\n\n        O[i*Br : (i+1)*Br] = Oi / li.unsqueeze(-1)   # normalise\n\n    return O"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Python reference above runs in O(N\u00b2d) FLOPs \u2014 identical to standard attention \u2014 but never writes more than O(N d) elements to HBM (the input and output tiles). The real FlashAttention is implemented as a CUDA kernel using shared memory; the Python version here demonstrates the correctness of the algorithm."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention IO Complexity"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With block sizes "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "B_r = B_c = \\Theta(M/d)"
+            }
+          },
+          {
+            "type": "text",
+            "text": ", the total HBM IO of FlashAttention is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{IO}_{\\text{flash}} = \\Theta\\!\\left(\\frac{N^2 d}{M}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where M is the SRAM size in elements. The improvement ratio over standard attention:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\frac{\\text{IO}_{\\text{standard}}}{\\text{IO}_{\\text{flash}}} = \\Theta\\!\\left(\\frac{M}{d}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "On A100, M \u2248 10M elements and d = 64, so the theoretical IO reduction is ~150\u00d7. In practice, other overheads limit the gain, but the asymptotic scaling still makes FlashAttention dramatically more memory-efficient at long sequence lengths:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sequence length N"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Standard attention IO"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FlashAttention IO"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Practical speedup"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "512"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.1 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.5\u20132\u00d7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1024"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~16 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.2 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2\u20133\u00d7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2048"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~64 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.4 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3\u20135\u00d7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4096"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~256 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.8 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "5\u20139\u00d7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8192"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1 GB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1.6 MB/head"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8\u201315\u00d7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Arithmetic Intensity Analysis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Arithmetic intensity (AI) = FLOPs / bytes transferred from HBM. Comparing the two implementations:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Standard attention: "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "\\text{AI} \\approx \\frac{4N^2 d}{4N^2} = d"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " FLOPs/byte. For d = 64 this is 64 FLOP/byte \u2014 well below A100's compute:BW ratio of ~156 FLOP/byte. The kernel is memory-bound."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "FlashAttention: "
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "\\text{AI} \\approx \\frac{4N^2 d}{N^2 d / M} = 4M"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " FLOPs/byte. M \u2248 10M elements gives AI \u2248 40M FLOP/byte \u2014 far above the compute-bound threshold. The kernel is compute-bound."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the fundamental improvement: FlashAttention shifts attention from memory-bound to compute-bound, extracting the full compute potential of the GPU."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def attention_arithmetic_intensity(N: int, d: int, M_elements: int = 10_000_000) -> dict:\n    \"\"\"\n    Compute arithmetic intensity (FLOPs per HBM byte) for standard vs FlashAttention.\n    M_elements: SRAM size in float16 elements (A100 \u2248 10M)\n    \"\"\"\n    flops = 4 * N * N * d                         # same for both (2*N\u00b2d matmul + softmax)\n\n    # Standard: IO dominated by N\u00d7N matrix (simplified, in elements)\n    io_standard = 4 * N * N + 2 * N * d           # read/write S, P + Q, K, V, O\n    ai_standard = flops / (io_standard * 2)        # 2 bytes per float16 element\n\n    # FlashAttention: IO is N\u00b2d/M elements (approximate, from the paper bound)\n    io_flash = max(N * N * d / M_elements, 2 * 3 * N * d)  # at least read Q,K,V\n    ai_flash = flops / (io_flash * 2)\n\n    return {\n        \"N\": N,\n        \"d\": d,\n        \"flops\": flops,\n        \"standard_io_MB\": io_standard * 2 / 1e6,\n        \"flash_io_MB\": io_flash * 2 / 1e6,\n        \"standard_ai\": ai_standard,\n        \"flash_ai\": ai_flash,\n        \"is_flash_compute_bound\": ai_flash > 156,   # A100 threshold in FLOP/byte\n    }\n\nfor N in [512, 1024, 2048, 4096, 8192]:\n    r = attention_arithmetic_intensity(N, d=64)\n    print(f\"N={r['N']:5d}  std_io={r['standard_io_MB']:7.1f}MB  \"\n          f\"flash_io={r['flash_io_MB']:5.2f}MB  \"\n          f\"std_ai={r['standard_ai']:5.1f}  flash_ai={r['flash_ai']:8.0f}  \"\n          f\"compute-bound={r['is_flash_compute_bound']}\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical Implications"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Long contexts: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Standard attention is quadratic in both compute and IO; FlashAttention is quadratic in compute but sub-quadratic in IO. At N = 8192, FlashAttention uses ~600\u00d7 less HBM bandwidth, enabling contexts that would otherwise OOM."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "No N\u00d7N materialisation: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The full attention matrix is never stored in HBM. This eliminates the O(N\u00b2) memory footprint and enables gradient checkpointing for backward pass (recomputing attention in chunks rather than storing it)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Exact computation: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "FlashAttention is numerically equivalent to standard attention (up to floating-point rounding), not an approximation. There is no quality trade-off."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Fused kernel: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "All steps \u2014 QK^T, softmax, PV \u2014 happen in a single CUDA kernel launch, eliminating the overhead of multiple kernel launches and HBM round trips between steps."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Flash Attention 2 and 3: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Subsequent versions further optimise work partitioning across warps (FA2) and exploit WGMMA/TMA instructions on H100 (FA3), achieving 70\u201385% of theoretical peak FLOP utilization on A100/H100."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Verifying the Reference Implementation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The correctness of the tiling approach can be verified by comparing the output of the Python reference implementation against standard PyTorch attention on random inputs:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\ndef standard_attention(Q, K, V):\n    \"\"\"Reference: full N\u00d7N materialisation.\"\"\"\n    d = Q.shape[-1]\n    scores = (Q @ K.transpose(-2, -1)) / (d ** 0.5)\n    weights = F.softmax(scores, dim=-1)\n    return weights @ V\n\ndef flash_attention_reference(Q, K, V, Br=64, Bc=64):\n    \"\"\"Tiled online-softmax attention (from earlier code, single head [N, d]).\"\"\"\n    N, d = Q.shape\n    scale = d ** -0.5\n    O = torch.zeros(N, d, dtype=Q.dtype, device=Q.device)\n    l = torch.zeros(N, dtype=Q.dtype, device=Q.device)\n    m = torch.full((N,), float(\"-inf\"), dtype=Q.dtype, device=Q.device)\n\n    Tr = (N + Br - 1) // Br\n    Tc = (N + Bc - 1) // Bc\n\n    for i in range(Tr):\n        Qi = Q[i*Br:(i+1)*Br]\n        Oi = O[i*Br:(i+1)*Br].clone()\n        li = l[i*Br:(i+1)*Br].clone()\n        mi = m[i*Br:(i+1)*Br].clone()\n\n        for j in range(Tc):\n            Kj = K[j*Bc:(j+1)*Bc]\n            Vj = V[j*Bc:(j+1)*Bc]\n            Sij = (Qi @ Kj.T) * scale\n            mij = Sij.max(dim=-1).values\n            m_new = torch.maximum(mi, mij)\n            Pij = torch.exp(Sij - m_new.unsqueeze(-1))\n            lij = Pij.sum(dim=-1)\n            alpha = torch.exp(mi - m_new)\n            Oi = alpha.unsqueeze(-1) * Oi + Pij @ Vj\n            li = alpha * li + lij\n            mi = m_new\n\n        O[i*Br:(i+1)*Br] = Oi / li.unsqueeze(-1)\n\n    return O\n\ntorch.manual_seed(42)\nN, d = 256, 64\nQ = torch.randn(N, d)\nK = torch.randn(N, d)\nV = torch.randn(N, d)\n\nout_std   = standard_attention(Q.unsqueeze(0), K.unsqueeze(0), V.unsqueeze(0)).squeeze(0)\nout_flash = flash_attention_reference(Q, K, V, Br=32, Bc=32)\n\nmax_diff = (out_std - out_flash).abs().max().item()\nprint(f\"Max absolute diff: {max_diff:.2e}\")  # expect < 1e-5\nassert max_diff < 1e-4, f\"Implementation mismatch: {max_diff}\"\nprint(\"Reference implementation matches standard attention \u2713\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Backward Pass and Gradient Checkpointing"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The backward pass of standard attention requires storing the N\u00d7N probability matrix P to compute gradients. FlashAttention avoids this with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ],
+            "text": "recomputation"
+          },
+          {
+            "type": "text",
+            "text": ": during the backward pass, the forward tiling is re-run to reconstruct the local P blocks on the fly, trading extra compute for O(N d) memory instead of O(N\u00b2)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is gradient checkpointing applied at the attention level. The memory saving is the same as the forward pass: O(N\u00b2) \u2192 O(N d). The extra compute cost in the backward pass is one additional forward sweep through Q, K, V, which is small relative to the backward FLOPs."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention stores only the log-sum-exp values L = m + log(l) per row (size N) to rescale gradients efficiently. This avoids re-running the full forward sweep without those values:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "L_i = m_i + \\log(l_i) \\in \\mathbb{R}^N \\quad \\text{(stored from forward, size } O(N) \\text{)}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The backward pass uses L to compute the softmax gradient without materialising P:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\frac{\\partial \\mathcal{L}}{\\partial Q_i} = \\text{softmax}(S_i) \\cdot \\left(\\frac{\\partial \\mathcal{L}}{\\partial O_i} V^T - \\delta_i \\mathbf{1}^T\\right) \\cdot \\frac{1}{\\sqrt{d}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "\\delta_i = \\text{rowsum}\\!\\left(O_i \\cdot \\frac{\\partial \\mathcal{L}}{\\partial O_i}\\right)"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is a scalar per row. The backward CUDA kernel tiles Q, K, V and the output gradient dO identically to the forward, recomputing each P block locally."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Causal (Masked) Attention"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Decoder-only language models use causal (lower-triangular) masking to prevent each token from attending to future tokens. Standard attention applies a mask to S before softmax. FlashAttention handles masking at the tile level:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Tiles entirely below the diagonal: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "No masking needed; compute normally."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Tiles entirely above the diagonal: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Entire tile is masked to \u2212\u221e; skip the "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "PV"
+                  },
+                  {
+                    "type": "text",
+                    "text": " computation for this tile (zero contribution). This saves ~50% of the total computation for autoregressive decoding."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Diagonal tiles: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Mixed \u2014 apply the causal mask within the tile before computing the local softmax."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def flash_causal_attention(Q, K, V, Br=64, Bc=64):\n    \"\"\"\n    Causal (lower-triangular) masked FlashAttention.\n    Position i attends only to positions j <= i.\n    \"\"\"\n    N, d = Q.shape\n    scale = d ** -0.5\n    O = torch.zeros(N, d, dtype=Q.dtype)\n    l = torch.zeros(N, dtype=Q.dtype)\n    m = torch.full((N,), float(\"-inf\"), dtype=Q.dtype)\n\n    Tr = (N + Br - 1) // Br\n    Tc = (N + Bc - 1) // Bc\n\n    for i in range(Tr):\n        row_start = i * Br\n        row_end   = min((i + 1) * Br, N)\n        Qi = Q[row_start:row_end]\n        Oi = O[row_start:row_end].clone()\n        li = l[row_start:row_end].clone()\n        mi = m[row_start:row_end].clone()\n        rows = torch.arange(row_start, row_end).unsqueeze(1)  # [Br, 1]\n\n        for j in range(Tc):\n            col_start = j * Bc\n            col_end   = min((j + 1) * Bc, N)\n\n            # Skip tiles entirely above the diagonal\n            if col_start > row_end - 1:\n                break\n\n            Kj = K[col_start:col_end]\n            Vj = V[col_start:col_end]\n            Sij = (Qi @ Kj.T) * scale         # [Br, Bc]\n\n            # Apply causal mask inside diagonal tiles\n            cols = torch.arange(col_start, col_end).unsqueeze(0)  # [1, Bc]\n            mask = cols > rows                 # True where j > i (future positions)\n            Sij = Sij.masked_fill(mask, float(\"-inf\"))\n\n            mij = Sij.max(dim=-1).values\n            m_new = torch.maximum(mi, mij)\n            Pij = torch.exp(Sij - m_new.unsqueeze(-1))\n            lij = Pij.sum(dim=-1)\n            alpha = torch.exp(mi - m_new)\n            Oi = alpha.unsqueeze(-1) * Oi + Pij @ Vj\n            li = alpha * li + lij\n            mi = m_new\n\n        O[row_start:row_end] = Oi / li.unsqueeze(-1)\n\n    return O"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using FlashAttention in Practice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "flash-attn"
+          },
+          {
+            "type": "text",
+            "text": " package provides optimised CUDA kernels. For most use cases, the easiest entry point is via PyTorch's built-in scaled_dot_product_attention, which selects FlashAttention automatically when available:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\n\n# PyTorch 2.0+ \u2014 uses FlashAttention when available, falls back to efficient_attention or math\n# Q, K, V: [batch, heads, seq, head_dim]\noutput = F.scaled_dot_product_attention(Q, K, V, is_causal=True)\n\n# Explicit flash-attn package (more control, required for non-standard configs)\nfrom flash_attn import flash_attn_func, flash_attn_varlen_func\n\n# Standard: Q, K, V shape [batch, seqlen, nheads, headdim]\nout = flash_attn_func(Q, K, V, causal=True)\n\n# Variable-length sequences in a single batch (packed / unpadded)\n# cu_seqlens_q/k: cumulative sequence lengths [batch+1], dtype int32\nout, softmax_lse = flash_attn_varlen_func(\n    q_flat, k_flat, v_flat,\n    cu_seqlens_q=cu_seqlens,\n    cu_seqlens_k=cu_seqlens,\n    max_seqlen_q=max_seqlen,\n    max_seqlen_k=max_seqlen,\n    causal=True,\n    return_attn_probs=False,\n)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "flash_attn_varlen_func"
+          },
+          {
+            "type": "text",
+            "text": " variant is important for training: packing variable-length sequences into a single batch without padding eliminates wasted computation on pad tokens and further improves GPU utilisation."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IO-aware attention recognises that standard attention's bottleneck is HBM bandwidth, not arithmetic throughput. By tiling the computation into blocks that fit in SRAM and using online softmax to merge the two softmax passes into one streaming pass, FlashAttention reduces HBM IO from "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "\\Theta(Nd + N^2)"
+            }
+          },
+          {
+            "type": "text",
+            "text": " to "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "\\Theta(N^2 d / M)"
+            }
+          },
+          {
+            "type": "text",
+            "text": ", shifting the kernel from memory-bound to compute-bound. The improvement is proportional to M/d \u2014 larger SRAM or smaller head dimension yields greater benefit. At sequence length 4096, practical speedups of 5\u20139\u00d7 over standard attention have been reported, with no accuracy loss. This efficiency gain is the foundation for training and serving long-context models."
+          }
+        ]
+      }
+    ]
+  }
+}
