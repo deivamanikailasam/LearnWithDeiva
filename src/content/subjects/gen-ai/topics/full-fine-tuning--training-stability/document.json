@@ -1,0 +1,3323 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training a large language model end-to-end on a domain corpus is a numerically sensitive process. Unlike LoRA, where the frozen base model provides a stable gradient landscape, full fine-tuning updates every parameter simultaneously, making it easy to destabilize the model with an inappropriate learning rate, poor precision settings, or pathological data batches. Understanding and preventing training instability is the difference between a successful domain-adapted model and wasted weeks of GPU compute."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What Training Stability Means in Full Fine-Tuning"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training stability refers to the model's loss decreasing smoothly and monotonically across steps, without abrupt spikes, divergence, or oscillation. A stable training run shows a loss curve that descends steadily in the first warmup phase and then follows a smooth, gradually flattening trajectory through the rest of training. The gradient norms remain bounded and consistent — not spiking to orders of magnitude above their average, and not collapsing to near-zero (which indicates vanishing gradients)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In full fine-tuning, instability manifests in several distinct ways: isolated loss spikes (where loss jumps 2–10× for one or a few steps before partially recovering), sustained divergence (where loss climbs and never returns), NaN propagation (a single NaN in the gradient poisons all subsequent steps), and silent degradation (where the model continues to train but progressively forgets pretrained representations without the loss signal revealing this)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Stability Matters More Than in LoRA Fine-Tuning"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Supervised fine-tuning with LoRA operates in a fundamentally different stability regime. The base model's weights are frozen, which means pretrained feature representations cannot be destroyed. Even a suboptimal learning rate that causes the adapter weights to diverge usually doesn't corrupt the underlying model — it just produces a poor adapter. Restarting from the base checkpoint is trivial."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Full fine-tuning has no such safety net. Every parameter is in motion. A loss spike 60% through a multi-day training run can represent the destruction of weeks of compute. The pretrained representations at the point of corruption may not be recoverable — the only option may be to roll back to a checkpoint and restart with more conservative hyperparameters. At scale (70B models, weeks of training), stability failures are catastrophic in both time and cost."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Root Causes of Instability"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Learning rate too high: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "The most common cause. Full fine-tuning requires much lower LRs than pretraining — 1e-5 to 3e-5 for a 7B model, not 1e-4. Even 3× the correct LR can cause divergence within the first few hundred steps."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Poor numerical precision: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Training in fp16 without loss scaling frequently produces NaN gradients because fp16's narrow exponent range cannot represent very small gradient values. bf16 avoids this problem and should always be preferred on modern hardware."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Gradient explosion from long sequences: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Attention's quadratic scaling means gradients from very long sequences have larger magnitude. A batch containing a 16k-token document mixed with 512-token documents creates highly variable gradient scales."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Bad data batches: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A single document with extremely unusual character patterns (all-caps, no punctuation, repeated characters) can produce a gradient spike orders of magnitude larger than a typical batch. Shuffling the dataset and filtering outlier documents prevents this."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Optimizer hyperparameter mismatch: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "AdamW's epsilon (the denominator stabilizer) is sensitive. The default eps=1e-8 works for most cases, but some model architectures require eps=1e-6 or eps=1e-5 to prevent near-zero division instability."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Extreme weight decay: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Weight decay values above 0.1 for full fine-tuning can actively destabilize training by penalizing learned representations that are legitimately far from zero — which many pretrained weights are."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Stability Toolbox"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNDgwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjQ4MCIgZm9udC1mYW1pbHk9InVpLW1vbm9zcGFjZSwgJ0Nhc2NhZGlhIENvZGUnLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiPgogIDxyZWN0IHdpZHRoPSI4NjAiIGhlaWdodD0iNDgwIiByeD0iMTIiIGZpbGw9IiMwZjE3MmEiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjMwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE1IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2Y4ZmFmYyI+RnVsbCBGaW5lLVR1bmluZzogVHJhaW5pbmcgU3RhYmlsaXR5IFNpZ25hbHM8L3RleHQ+CgogIDwhLS0gPT09PT0gTEVGVCBQQU5FTDogTG9zcyBjdXJ2ZXMgPT09PT0gLS0+CiAgPHRleHQgeD0iMjEwIiB5PSI1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM5NGEzYjgiPlRyYWluaW5nIExvc3M8L3RleHQ+CgogIDwhLS0gQXhlcyAtLT4KICA8bGluZSB4MT0iNTAiIHkxPSI3MCIgeDI9IjUwIiB5Mj0iMjYwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjUwIiB5MT0iMjYwIiB4Mj0iMzkwIiB5Mj0iMjYwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDAiIHk9Ijc0IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPmhpZ2g8L3RleHQ+CiAgPHRleHQgeD0iNDAiIHk9IjI2MCIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5sb3c8L3RleHQ+CiAgPHRleHQgeD0iMjEwIiB5PSIyNzgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+VHJhaW5pbmcgc3RlcHMg4oaSPC90ZXh0PgoKICA8IS0tIFN0YWJsZSBsb3NzIGN1cnZlIChncmVlbiwgc21vb3RoIGRlc2NlbnQpIC0tPgogIDxwb2x5bGluZSBwb2ludHM9IjUwLDIyMCA4MCwxOTAgMTEwLDE3MCAxNDAsMTU1IDE3MCwxNDUgMjAwLDEzOCAyMzAsMTMzIDI2MCwxMjkgMjkwLDEyNiAzMjAsMTI0IDM1MCwxMjIgMzgwLDEyMSIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjIuNSIgZmlsbD0ibm9uZSIvPgogIDx0ZXh0IHg9IjM4NSIgeT0iMTE4IiBmb250LXNpemU9IjkiIGZpbGw9IiMzNGQzOTkiPlN0YWJsZTwvdGV4dD4KCiAgPCEtLSBVbnN0YWJsZSBsb3NzIGN1cnZlIChvcmFuZ2UsIHdpdGggc3Bpa2VzKSAtLT4KICA8cG9seWxpbmUgcG9pbnRzPSI1MCwyMjAgODAsMTk1IDExMCwxNzUgMTQwLDE2MiAxNjAsMjMwIDE3MCwyMDAgMTkwLDE4NSAyMjAsMTc1IDI0MCwyNDAgMjYwLDIxMCAyODAsMTg1IDMxMCwxNzAgMzQwLDE2NSAzNzAsMTYyIiBzdHJva2U9IiNmOTczMTYiIHN0cm9rZS13aWR0aD0iMiIgZmlsbD0ibm9uZSIgc3Ryb2tlLWRhc2hhcnJheT0ibm9uZSIvPgogIDwhLS0gU3Bpa2UgbWFya2VycyAtLT4KICA8Y2lyY2xlIGN4PSIxNjAiIGN5PSIyMzAiIHI9IjQiIGZpbGw9IiNmOTczMTYiLz4KICA8dGV4dCB4PSIxNTUiIHk9IjI0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4IiBmaWxsPSIjZjk3MzE2Ij5zcGlrZTwvdGV4dD4KICA8Y2lyY2xlIGN4PSIyNDAiIGN5PSIyNDAiIHI9IjQiIGZpbGw9IiNmOTczMTYiLz4KICA8dGV4dCB4PSIyMzUiIHk9IjI1NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4IiBmaWxsPSIjZjk3MzE2Ij5zcGlrZTwvdGV4dD4KICA8dGV4dCB4PSIzNzAiIHk9IjE1NSIgZm9udC1zaXplPSI5IiBmaWxsPSIjZjk3MzE2Ij5VbnN0YWJsZTwvdGV4dD4KCiAgPCEtLSBEaXZlcmdlZCBjdXJ2ZSAocmVkLCBnb2VzIHVwKSAtLT4KICA8cG9seWxpbmUgcG9pbnRzPSI1MCwyMjAgODAsMjAwIDExMCwxODUgMTQwLDE4MCAxNjAsMTkwIDE4MCwyMjAgMjAwLDI2MCIgc3Ryb2tlPSIjZWY0NDQ0IiBzdHJva2Utd2lkdGg9IjIiIGZpbGw9Im5vbmUiLz4KICA8dGV4dCB4PSIyMDUiIHk9IjI1NSIgZm9udC1zaXplPSI5IiBmaWxsPSIjZWY0NDQ0Ij5EaXZlcmdlZDwvdGV4dD4KCiAgPCEtLSA9PT09PSBSSUdIVCBQQU5FTDogR3JhZGllbnQgbm9ybSA9PT09PSAtLT4KICA8dGV4dCB4PSI2MzAiIHk9IjU4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzk0YTNiOCI+R3JhZGllbnQgTm9ybSAoZ3JhZF9ub3JtKTwvdGV4dD4KCiAgPGxpbmUgeDE9IjQ3MCIgeTE9IjcwIiB4Mj0iNDcwIiB5Mj0iMjYwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjQ3MCIgeTE9IjI2MCIgeDI9IjgxMCIgeTI9IjI2MCIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ2MCIgeT0iNzQiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+4oiePC90ZXh0PgogIDx0ZXh0IHg9IjQ2MCIgeT0iMjYwIiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPjA8L3RleHQ+CiAgPHRleHQgeD0iNjQwIiB5PSIyNzgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+VHJhaW5pbmcgc3RlcHMg4oaSPC90ZXh0PgoKICA8IS0tIENsaXAgdGhyZXNob2xkIGxpbmUgLS0+CiAgPGxpbmUgeDE9IjQ3MCIgeTE9IjE2MCIgeDI9IjgxMCIgeTI9IjE2MCIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiIHN0cm9rZS1kYXNoYXJyYXk9IjYsMyIvPgogIDx0ZXh0IHg9IjgxNSIgeT0iMTYzIiBmb250LXNpemU9IjkiIGZpbGw9IiNmNTllMGIiPmNsaXA9MS4wPC90ZXh0PgoKICA8IS0tIEhlYWx0aHkgZ3JhZCBub3JtIChzdGF5cyBiZWxvdyBjbGlwKSAtLT4KICA8cG9seWxpbmUgcG9pbnRzPSI0NzAsMjIwIDUwMCwxODUgNTMwLDE3NSA1NjAsMTcwIDU5MCwxNjUgNjIwLDE2MiA2NTAsMTYwIDY4MCwxNTggNzEwLDE1NyA3NDAsMTU2IDc3MCwxNTUgODAwLDE1NCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjIuNSIgZmlsbD0ibm9uZSIvPgogIDx0ZXh0IHg9IjgwNSIgeT0iMTUwIiBmb250LXNpemU9IjkiIGZpbGw9IiMzOGJkZjgiPkhlYWx0aHk8L3RleHQ+CgogIDwhLS0gU3Bpa2luZyBncmFkIG5vcm0gKGdvZXMgd2F5IGFib3ZlIGNsaXApIC0tPgogIDxwb2x5bGluZSBwb2ludHM9IjQ3MCwyMjAgNTAwLDE5MCA1MzAsMTgwIDU2MCwyMDAgNTcwLDgwIDU4MCwxNjAgNjAwLDE2NSA2MzAsMTcwIDY1MCwyMDAgNjYwLDgwIDY3MCwxNjIgNzAwLDE2MCA3MzAsMTU4IDc2MCwxNTciIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIyIiBmaWxsPSJub25lIi8+CiAgPGNpcmNsZSBjeD0iNTcwIiBjeT0iODAiIHI9IjQiIGZpbGw9IiNhNzhiZmEiLz4KICA8Y2lyY2xlIGN4PSI2NjAiIGN5PSI4MCIgcj0iNCIgZmlsbD0iI2E3OGJmYSIvPgogIDx0ZXh0IHg9IjgwNSIgeT0iMTc4IiBmb250LXNpemU9IjkiIGZpbGw9IiNhNzhiZmEiPlVuc3RhYmxlPC90ZXh0PgoKICA8IS0tID09PT09IEJPVFRPTSBQQU5FTDogU3RhYmlsaXR5IGludGVydmVudGlvbnMgPT09PT0gLS0+CiAgPHJlY3QgeD0iMzAiIHk9IjI5NSIgd2lkdGg9IjgwMCIgaGVpZ2h0PSIxNjUiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzMzQxNTUiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDMwIiB5PSIzMTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZjhmYWZjIj5TdGFiaWxpdHkgSW50ZXJ2ZW50aW9uIENoZWNrbGlzdDwvdGV4dD4KICA8bGluZSB4MT0iMzAiIHkxPSIzMjIiIHgyPSI4MzAiIHkyPSIzMjIiIHN0cm9rZT0iIzMzNDE1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CgogIDwhLS0gQ29sdW1uIDEgLS0+CiAgPHRleHQgeD0iNTUiIHk9IjM0MiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzOGJkZjgiPkxSICZhbXA7IFNjaGVkdWxlPC90ZXh0PgogIDx0ZXh0IHg9IjU1IiB5PSIzNTgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiBXYXJtdXAgMC414oCTMiUgb2Ygc3RlcHM8L3RleHQ+CiAgPHRleHQgeD0iNTUiIHk9IjM3MyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIENvc2luZSBkZWNheSB0byAwPC90ZXh0PgogIDx0ZXh0IHg9IjU1IiB5PSIzODgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiAxZS01IHRvIDNlLTUgZm9yIDdCIGJhc2U8L3RleHQ+CiAgPHRleHQgeD0iNTUiIHk9IjQwMyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIExvd2VyIExSIGZvciBsYXJnZSBtb2RlbHM8L3RleHQ+CiAgPHRleHQgeD0iNTUiIHk9IjQxOCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIFRyeSAxZS00IG9ubHkgd2l0aCBMb1JBPC90ZXh0PgogIDx0ZXh0IHg9IjU1IiB5PSI0MzgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNmNTllMGIiPuKAoiBPbiBzcGlrZTogcmVkdWNlIExSIDPDlzwvdGV4dD4KCiAgPCEtLSBDb2x1bW4gMiAtLT4KICA8dGV4dCB4PSIyMjUiIHk9IjM0MiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzNGQzOTkiPkdyYWRpZW50IENvbnRyb2w8L3RleHQ+CiAgPHRleHQgeD0iMjI1IiB5PSIzNTgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiBDbGlwIG5vcm0g4omkIDEuMCBhbHdheXM8L3RleHQ+CiAgPHRleHQgeD0iMjI1IiB5PSIzNzMiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiBMb2cgZ3JhZF9ub3JtIGVhY2ggc3RlcDwvdGV4dD4KICA8dGV4dCB4PSIyMjUiIHk9IjM4OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIEFsZXJ0IGlmIG5vcm0gJmd0OyAxMDwvdGV4dD4KICA8dGV4dCB4PSIyMjUiIHk9IjQwMyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIEluY3JlYXNlIGFjY3VtLiBzdGVwczwvdGV4dD4KICA8dGV4dCB4PSIyMjUiIHk9IjQxOCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIFJlZHVjZSBwZXItZGV2aWNlIGJhdGNoPC90ZXh0PgogIDx0ZXh0IHg9IjIyNSIgeT0iNDM4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjZjU5ZTBiIj7igKIgT24gc3Bpa2U6IHJlc3RhcnQgY2twdDwvdGV4dD4KCiAgPCEtLSBDb2x1bW4gMyAtLT4KICA8dGV4dCB4PSIzOTUiIHk9IjM0MiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNhNzhiZmEiPlByZWNpc2lvbjwvdGV4dD4KICA8dGV4dCB4PSIzOTUiIHk9IjM1OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIFVzZSBiZjE2LCBub3QgZnAxNjwvdGV4dD4KICA8dGV4dCB4PSIzOTUiIHk9IjM3MyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIGJmMTY6IHdpZGVyIGV4cG9uZW50IHJhbmdlPC90ZXh0PgogIDx0ZXh0IHg9IjM5NSIgeT0iMzg4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjY2JkNWUxIj7igKIgTm8gbG9zcyBzY2FsaW5nIG5lZWRlZDwvdGV4dD4KICA8dGV4dCB4PSIzOTUiIHk9IjQwMyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIEtlZXAgb3B0aW1pemVyIGluIGZwMzI8L3RleHQ+CiAgPHRleHQgeD0iMzk1IiB5PSI0MTgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiBBdHRuIGluIGJmMTYsIEZGTiB0b288L3RleHQ+CiAgPHRleHQgeD0iMzk1IiB5PSI0MzgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNmNTllMGIiPuKAoiBOYU46IGNoZWNrIGJmMTYgc3VwcG9ydDwvdGV4dD4KCiAgPCEtLSBDb2x1bW4gNCAtLT4KICA8dGV4dCB4PSI1NjUiIHk9IjM0MiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNmOTczMTYiPk9wdGltaXplcjwvdGV4dD4KICA8dGV4dCB4PSI1NjUiIHk9IjM1OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIEFkYW1XIM6y4oKBPTAuOSwgzrLigoI9MC45NTwvdGV4dD4KICA8dGV4dCB4PSI1NjUiIHk9IjM3MyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIGVwcz0xZS04IChub3QgMWUtNik8L3RleHQ+CiAgPHRleHQgeD0iNTY1IiB5PSIzODgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiB3ZD0wLjEgdG8gcHJldmVudCBibG93LXVwPC90ZXh0PgogIDx0ZXh0IHg9IjU2NSIgeT0iNDAzIiBmb250LXNpemU9IjEwIiBmaWxsPSIjY2JkNWUxIj7igKIgOC1iaXQgQWRhbSBmb3IgVlJBTTwvdGV4dD4KICA8dGV4dCB4PSI1NjUiIHk9IjQxOCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIEF2b2lkIHB1cmUgU0dEPC90ZXh0PgogIDx0ZXh0IHg9IjU2NSIgeT0iNDM4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjZjU5ZTBiIj7igKIgRGl2ZXJnZTogcmFpc2UgZXBzIDEww5c8L3RleHQ+CgogIDwhLS0gQ29sdW1uIDUgLS0+CiAgPHRleHQgeD0iNzEwIiB5PSIzNDIiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmI3MTg1Ij5EYXRhICZhbXA7IEJhdGNoaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjcxMCIgeT0iMzU4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjY2JkNWUxIj7igKIgU2h1ZmZsZSB0cmFpbiBzZXQ8L3RleHQ+CiAgPHRleHQgeD0iNzEwIiB5PSIzNzMiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYmQ1ZTEiPuKAoiBQYWNrIOKGkiBubyBwYWRkaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjcxMCIgeT0iMzg4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjY2JkNWUxIj7igKIgRWZmZWN0aXZlIGJhdGNoIOKJpSA1MTJrIHRvazwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjQwMyIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NiZDVlMSI+4oCiIERyb3AgbGFzdCBpbmNvbXBsZXRlIGJhdGNoPC90ZXh0PgogIDx0ZXh0IHg9IjcxMCIgeT0iNDE4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjY2JkNWUxIj7igKIgQXZvaWQgdmVyeSBsb25nIHNlcXVlbmNlczwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjQzOCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2Y1OWUwYiI+4oCiIFNwaWtlOiBjaGVjayBiYWQgYmF0Y2hlczwvdGV4dD4KPC9zdmc+Cg==",
+          "alt": "Training stability signals: stable vs. unstable loss curves, gradient norm over time with clipping threshold, and a five-column intervention checklist covering LR/schedule, gradient control, precision, optimizer, and data/batching strategies"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Learning Rate and Warmup"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The single most effective stability intervention is using a conservative learning rate with a proper warmup schedule. For full fine-tuning of a 7B model, the typical range is 1e-5 to 3e-5. Larger models (13B, 70B) generally need lower learning rates (5e-6 to 1e-5) because they have more parameters updating simultaneously and the gradient signal is distributed across more weights."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Warmup linearly increases the learning rate from 0 to its target over the first 1–2% of training steps. This prevents the model from taking large gradient steps before the optimizer's second-moment estimates have stabilized. Without warmup, the first few hundred steps often see unusually large gradient norms because the optimizer's running average of gradient magnitudes starts from zero."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{lr}(t) = \\begin{cases} \\text{lr}_{\\max} \\cdot \\frac{t}{T_{\\text{warmup}}} & t < T_{\\text{warmup}} \\\\ \\text{lr}_{\\max} \\cdot \\frac{1}{2}\\left(1 + \\cos\\left(\\pi \\cdot \\frac{t - T_{\\text{warmup}}}{T - T_{\\text{warmup}}}\\right)\\right) & t \\geq T_{\\text{warmup}} \\end{cases}"
+        }
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import get_cosine_schedule_with_warmup\nimport torch\n\n# 10B tokens, 4096 seq len, effective batch 1M tokens → ~10,000 steps\ntotal_steps = 10_000\nwarmup_steps = int(0.01 * total_steps)  # 1% warmup = 100 steps\n\noptimizer = torch.optim.AdamW(\n    model.parameters(),\n    lr=2e-5,        # for 7B full fine-tuning\n    betas=(0.9, 0.95),  # β₂=0.95 reduces noise vs default 0.999\n    eps=1e-8,\n    weight_decay=0.1\n)\n\nscheduler = get_cosine_schedule_with_warmup(\n    optimizer,\n    num_warmup_steps=warmup_steps,\n    num_training_steps=total_steps,\n)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Gradient Clipping"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Gradient clipping is the simplest and most reliable guard against loss spikes. It rescales the gradient vector to have a maximum L2 norm of the specified threshold — typically 1.0 for full fine-tuning. Any gradient vector whose norm exceeds the threshold is scaled down proportionally, preserving its direction while bounding its magnitude."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathbf{g} \\leftarrow \\mathbf{g} \\cdot \\min\\left(1,\\ \\frac{\\text{clip\\_value}}{\\|\\mathbf{g}\\|_2}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Gradient clipping does not prevent all instability — it specifically addresses gradient explosion. If the gradient norm consistently sits near or above the clip threshold, it indicates the learning rate is too high or the data contains outliers. A healthy training run has gradient norms well below the clip threshold for most steps, with only occasional clipping during warmup."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import TrainingArguments\n\nargs = TrainingArguments(\n    output_dir=\"./checkpoints\",\n    per_device_train_batch_size=2,\n    gradient_accumulation_steps=64,     # effective batch = 2 × 64 × n_gpus sequences\n    learning_rate=2e-5,\n    warmup_ratio=0.01,                  # 1% of steps\n    lr_scheduler_type=\"cosine\",\n    num_train_epochs=1,\n    bf16=True,                          # prefer bf16 over fp16\n    fp16=False,\n    max_grad_norm=1.0,                  # gradient clipping\n    weight_decay=0.1,\n    adam_beta1=0.9,\n    adam_beta2=0.95,\n    adam_epsilon=1e-8,\n    logging_steps=10,                   # log loss + grad_norm frequently\n    save_strategy=\"steps\",\n    save_steps=200,                     # checkpoint every 200 steps\n    save_total_limit=5,                 # keep last 5 checkpoints for rollback\n    dataloader_num_workers=4,\n    ddp_find_unused_parameters=False,   # required for sequence packing\n)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Precision: bf16 vs fp16"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The choice between bf16 and fp16 (bfloat16 and float16) is one of the most important decisions for numerical stability in full fine-tuning. Both formats use 16 bits but allocate them differently:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Property"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "fp16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "bf16"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Total bits"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sign bits"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Exponent bits"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "5"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Mantissa bits"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "10"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Max representable value"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "65,504"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.39 × 10^38"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Min positive value"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "6.1 × 10^-5"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.18 × 10^-38"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Requires loss scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (GradScaler)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recommended for full FFT"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key difference is the exponent width. fp16's 5-bit exponent limits its dynamic range — gradients smaller than roughly 6×10⁻⁵ underflow to zero, silently eliminating signal from many layers. bf16's 8-bit exponent matches fp32's exponent range exactly, so gradient values that would underflow in fp16 remain representable in bf16. For full fine-tuning, always use bf16 when the hardware supports it (NVIDIA A100, H100, RTX 3090/4090, TPU). On hardware without bf16 support, use fp16 with PyTorch's GradScaler."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\n\n# Check bf16 hardware support before training\nif torch.cuda.is_bf16_supported():\n    print(\"Using bf16 — no loss scaling needed\")\n    training_kwargs = {\"bf16\": True, \"fp16\": False}\nelse:\n    print(\"Falling back to fp16 — enabling GradScaler\")\n    training_kwargs = {\"bf16\": False, \"fp16\": True}\n    # TrainingArguments automatically enables GradScaler when fp16=True\n\n# Verify: run a forward+backward pass on a tiny batch before full training\nmodel.train()\nwith torch.autocast(device_type=\"cuda\", dtype=torch.bfloat16):\n    out = model(input_ids=torch.randint(0, 1000, (1, 64)).cuda())\nloss = out.logits.mean()\nloss.backward()\nhas_nan = any(p.grad is not None and p.grad.isnan().any() for p in model.parameters())\nif has_nan:\n    raise RuntimeError(\"NaN in gradients on test batch — check precision settings\")\nprint(\"Precision check passed\")\nmodel.zero_grad()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Monitoring Gradient Norms"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Logging the gradient norm at every step (or every 10 steps) is the most informative early-warning system for instability. A sudden jump in gradient norm — especially one that exceeds the clip threshold by 5–10× — often precedes a loss spike by 50–200 steps. Catching it early enables a recovery strategy before the model diverges completely."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch, wandb\nfrom transformers import TrainerCallback\n\nclass GradNormCallback(TrainerCallback):\n    \"\"\"Log gradient norm per step and alert on large values.\"\"\"\n    def on_step_end(self, args, state, control, model=None, **kwargs):\n        if state.global_step % args.logging_steps != 0:\n            return\n        total_norm = 0.0\n        for param in model.parameters():\n            if param.grad is not None:\n                total_norm += param.grad.data.norm(2).item() ** 2\n        total_norm = total_norm ** 0.5\n        if wandb.run:\n            wandb.log({\"train/grad_norm\": total_norm}, step=state.global_step)\n        if total_norm > 10.0:\n            print(f\"WARNING: large grad norm {total_norm:.2f} at step {state.global_step}\")\n\n# Attach to Trainer\nfrom transformers import Trainer\ntrainer = Trainer(\n    model=model,\n    args=args,\n    train_dataset=packed_ds,\n    callbacks=[GradNormCallback()],\n)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A healthy gradient norm pattern during full fine-tuning: high norms in the first 50–100 warmup steps (the optimizer's momentum estimates are adapting), then a rapid drop to a stable range (typically 0.2–2.0 for a 7B model with clip=1.0), followed by a slow gradual decline as the model converges. Any sharp spike above the stable range warrants immediate investigation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use Each Stability Technique"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Symptom"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Likely Cause"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Primary Fix"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Secondary Fix"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Loss spikes, then recovers"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LR too high or bad data batch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reduce LR 2–3×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Inspect batch at spike step"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Loss diverges (never recovers)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LR far too high"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Restart with LR ÷ 5"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase warmup steps"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NaN in loss immediately"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "fp16 underflow or bad data"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Switch to bf16"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Remove outlier documents"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NaN after many steps"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Gradient explosion"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Lower max_grad_norm to 0.5"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Lower LR"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Grad norm always at clip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LR too high"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reduce LR 2×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase clip threshold slightly"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Grad norm collapses to 0"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Vanishing gradients"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase LR; check warmup"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Audit layer normalization"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Loss plateaus early"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LR too low or data too easy"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase LR"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "More training steps"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slow, noisy loss curve"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Effective batch too small"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase gradient accumulation"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase per-device batch size"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement: A Stability-First Training Loop"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following example shows a complete HuggingFace Trainer setup for full fine-tuning of a 7B model with all stability interventions enabled. It includes WandB integration for real-time monitoring and automatic checkpoint saves for rollback."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom transformers import (\n    AutoModelForCausalLM, AutoTokenizer,\n    TrainingArguments, Trainer, DataCollatorForLanguageModeling\n)\nfrom datasets import load_from_disk\n\nMODEL_ID = \"meta-llama/Meta-Llama-3-8B\"\nDATA_PATH = \"data/04_packed\"\nOUTPUT_DIR = \"./llama3-domain-ft\"\n\n# Load model in bf16 directly\nmodel = AutoModelForCausalLM.from_pretrained(\n    MODEL_ID,\n    torch_dtype=torch.bfloat16,\n    device_map=\"auto\",\n    use_cache=False,               # required for gradient checkpointing\n    attn_implementation=\"flash_attention_2\",\n)\nmodel.gradient_checkpointing_enable()\n\ntokenizer = AutoTokenizer.from_pretrained(MODEL_ID)\ntrain_ds = load_from_disk(DATA_PATH)\n\nargs = TrainingArguments(\n    output_dir=OUTPUT_DIR,\n    num_train_epochs=1,\n    per_device_train_batch_size=2,\n    gradient_accumulation_steps=32,  # effective: 2×32×8 GPU = 512 seq × 4096 = 2M tokens\n    learning_rate=2e-5,\n    warmup_ratio=0.01,\n    lr_scheduler_type=\"cosine\",\n    bf16=True,\n    fp16=False,\n    max_grad_norm=1.0,\n    weight_decay=0.1,\n    adam_beta1=0.9,\n    adam_beta2=0.95,\n    adam_epsilon=1e-8,\n    logging_steps=10,\n    save_strategy=\"steps\",\n    save_steps=250,\n    save_total_limit=6,\n    report_to=\"wandb\",\n    ddp_find_unused_parameters=False,\n    group_by_length=False,  # sequences already packed\n)\n\ntrainer = Trainer(\n    model=model,\n    args=args,\n    train_dataset=train_ds,\n    data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),\n    callbacks=[GradNormCallback()],\n)\ntrainer.train()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Detecting and Recovering from Instability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even with all precautions in place, loss spikes occur in large-scale full fine-tuning. The standard recovery protocol is:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Detect: monitor loss and grad_norm in WandB. Set an alert if loss increases more than 50% relative to the rolling average."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Identify the step: note the exact global step where the spike occurred."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Find the last good checkpoint: Trainer saves every save_steps; identify the checkpoint immediately before the spike."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Diagnose: inspect the data batch at the spike step if possible (log batch index in a callback). Check for outlier documents."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reduce LR and resume: restart from the last good checkpoint with learning rate reduced by 3–5×."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Optional: if the same document causes repeated spikes, remove it from the dataset and rebuild the packed dataset."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json, pathlib\nfrom transformers import TrainingArguments, Trainer\n\n# Find the most recent checkpoint before the spike\nckpt_dir = pathlib.Path(\"./llama3-domain-ft\")\ncheckpoints = sorted(\n    ckpt_dir.glob(\"checkpoint-*\"),\n    key=lambda p: int(p.name.split(\"-\")[-1])\n)\nlast_good_ckpt = str(checkpoints[-2])  # second-to-last, before the spike\nprint(f\"Resuming from {last_good_ckpt}\")\n\n# Get current LR from trainer_state.json\nstate = json.loads((pathlib.Path(last_good_ckpt) / \"trainer_state.json\").read_text())\ncurrent_lr = state[\"log_history\"][-1].get(\"learning_rate\", 2e-5)\nreduced_lr = current_lr / 3\nprint(f\"LR: {current_lr:.2e} → {reduced_lr:.2e}\")\n\n# Resume with reduced LR\nargs_recovery = TrainingArguments(\n    output_dir=\"./llama3-domain-ft\",\n    learning_rate=reduced_lr,\n    # ... same remaining args ...\n)\ntrainer_recovery = Trainer(model=model, args=args_recovery, train_dataset=train_ds)\ntrainer_recovery.train(resume_from_checkpoint=last_good_ckpt)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Effective Batch Size and Gradient Accumulation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Full fine-tuning requires a large effective batch size to produce stable gradient estimates. Small batches produce high-variance gradient estimates, leading to a noisy loss curve that looks unstable even when the learning rate is appropriate. The standard recommendation for 7B model fine-tuning is an effective batch size of at least 256 sequences × 4096 tokens = approximately 1M tokens per step."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{effective\\_tokens} = \\text{per\\_device\\_batch} \\times N_{\\text{GPUs}} \\times \\text{accum\\_steps} \\times \\text{seq\\_len}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Gradient accumulation achieves a large effective batch size without requiring proportionally large GPU memory. With gradient_accumulation_steps=32 and per_device_train_batch_size=2 on 8 GPUs: effective_batch = 2 × 8 × 32 = 512 sequences per step, or 2.1M tokens at seq_len=4096. The trade-off is throughput — accumulation adds overhead compared to a true large batch, but usually less than 5% in practice."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Verify effective batch size before starting\nper_device_batch = 2\nn_gpus = 8\ngrad_accum = 32\nseq_len = 4096\n\neff_seqs = per_device_batch * n_gpus * grad_accum\neff_tokens = eff_seqs * seq_len\nprint(f\"Effective batch: {eff_seqs} sequences = {eff_tokens / 1e6:.1f}M tokens/step\")\n# → Effective batch: 512 sequences = 2.1M tokens/step"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example: Stabilizing a Medical LLM Training Run"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A team fine-tuning Llama-3 8B on 3B tokens of clinical notes initially used default HuggingFace Trainer settings: learning_rate=5e-5, fp16=True, max_grad_norm=None. The run diverged at step 400 with a NaN loss. Diagnosis revealed two issues: fp16 underflow from small gradients in early layers, and a clinical case report with 50,000 tokens that produced a gradient spike at step 400 when it appeared in a batch."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The fixes applied: switch to bf16, add max_grad_norm=1.0, reduce learning_rate to 2e-5, add a document length filter capping at 8,192 tokens, and increase warmup_ratio to 0.02. The second run trained successfully through all 10,000 steps with only two minor gradient norm spikes (automatically clipped), producing a final perplexity 18% lower than the base model on the held-out clinical test set."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Mistake"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Symptom"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fix"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Using fp16 without GradScaler"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NaN loss in first 100 steps"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Switch to bf16 or enable fp16 with automatic GradScaler"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LR copied from LoRA recipe (1e-4)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Divergence in first 200 steps"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Use 1e-5 to 3e-5; 10× lower than LoRA"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No gradient clipping"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Periodic loss spikes that do not recover"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Add max_grad_norm=1.0"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Checkpointing only at end"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cannot recover from mid-training spike"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Save every 200–500 steps; keep at least 5 checkpoints"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Effective batch < 100k tokens"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Noisy, oscillating loss curve"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase gradient_accumulation_steps"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "weight_decay=0 (default)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slow divergence over multiple epochs"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Set weight_decay=0.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "adam_beta2=0.999 (PyTorch default)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slow adaptation, early instability"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Use beta2=0.95 for LLM fine-tuning"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Training on unshuffled data"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Domain-shift gradient spikes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Shuffle dataset before packing"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pilot run first: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Run a 200-step pilot with 1% of the data before the full run. Verify that loss decreases, gradient norms are stable, and bf16 is supported on the target hardware."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log everything: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Enable logging_steps=10 and report to WandB. Loss curve and gradient norm are the two most important signals; never run blind."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Save aggressively early: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Checkpoint every 100–200 steps in the first 10% of training, where instability is most common. Increase to every 500 steps once stable."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start conservative on LR: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "When uncertain, start with a value 2× lower than what worked for a similar model. A slightly slow but stable run is preferable to a fast but unstable one."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test precision before launching: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Run a forward+backward pass on a tiny batch and check for NaN gradients before launching on a cluster."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Keep the base checkpoint tagged: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Record the exact model checkpoint used (commit hash or HuggingFace model revision). If fine-tuning fails completely, returning to the base must be trivial."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Gradient accumulation introduces synchronization overhead proportional to the number of accumulation steps. At 32 steps of accumulation on 8 GPUs with FSDP or DeepSpeed ZeRO-3, the overhead is typically 3–8% compared to a true large batch. This overhead is almost always worth paying to achieve a larger effective batch size, which directly improves stability."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Checkpoint saving is a significant throughput bottleneck for large models. Saving a 7B bf16 model to NVMe SSD takes 10–20 seconds, adding 30+ minutes of overhead for 100 checkpoints across a 10,000-step run. Asynchronous saving (available in TRL and Megatron-LM) writes checkpoints in a background thread to minimize blocking."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At 70B scale, even a 1e-5 learning rate can be too high for certain training stages, and gradient norm monitoring becomes critical. Multi-node training adds the risk of network-induced gradient synchronization delays, which can produce artifactual gradient spikes. Production runs at this scale typically use a health-monitor process that watches for NaN/Inf propagation and automatically pauses training before it spreads across the cluster."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tool / Library"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Stability Feature"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Notes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hugging Face Trainer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "max_grad_norm, bf16, warmup_ratio, checkpoint saves"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Full-featured; good defaults for 7B range"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "TRL SFTTrainer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Same as Trainer + async checkpointing"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Built on Trainer; recommended for alignment pipelines"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Axolotl"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "YAML-driven config; all stability settings exposed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Multi-GPU friendly; actively maintained"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "DeepSpeed ZeRO-3"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory reduction for 13B+ scale"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pairs with Trainer via deepspeed= argument"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "WandB / MLflow"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Loss + grad_norm dashboards, anomaly alerts"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Standard monitoring for LLM training runs"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Megatron-LM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Enterprise-grade stability at 70B+ scale"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NVIDIA's internal framework; steep setup curve"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison Across Training Regimes"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Aspect"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pretraining"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Full Fine-Tuning"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LoRA / QLoRA"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Typical LR"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3e-4 to 1e-3"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1e-5 to 3e-5"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1e-4 to 3e-4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Warmup needed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes, critical"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes, critical"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Helpful but not critical"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Gradient clipping"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Always"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Always"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Usually not required"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Precision sensitivity"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (bf16 strongly preferred)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (fp16 usually fine)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Recovery from spike"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Restart from recent ckpt"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Restart from recent ckpt"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Often auto-recovers"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Checkpoint frequency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Every few hundred steps"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Every 200–500 steps"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "At end of training"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Min effective batch tokens"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4M–10M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "256k–2M"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "64k–512k"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Training instability has a security dimension in adversarial settings: a dataset poisoning attack can deliberately introduce documents that cause gradient spikes at specific steps, potentially destabilizing the model or forcing a rollback to a state the attacker prefers. The mitigations — document length filtering, gradient norm monitoring with anomaly alerts, and aggressive deduplication — double as defenses against both accidental and deliberate instability."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "From a reliability perspective, the most important practice is maintaining a complete audit trail: which base checkpoint was used, what data version was trained on, what hyperparameters were set, and which checkpoints were saved. Store the full TrainingArguments JSON and the data version hash in the checkpoint directory alongside the model weights. Without this information, a training failure is not just a setback — it is an undiagnosable setback."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of full fine-tuning as updating a world-class expert's knowledge with a new technical dialect. The expert already knows everything about language, reasoning, and general knowledge. The training process nudges each of their billions of associations in the direction of the new domain, one small step at a time. If you push too hard with each nudge (high learning rate), they become confused and start contradicting themselves (loss spike) or forget their prior expertise entirely (divergence). The warmup period is like a slow initial introduction to the new material. Gradient clipping ensures no single session's lesson exceeds a safe maximum. Checkpoint saves are like recording the expert's knowledge at regular intervals so you can return to the last coherent state if a session goes badly."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Full fine-tuning has no frozen weights acting as a safety net — instability can permanently destroy pretrained representations, making checkpointing and monitoring non-negotiable."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use bf16 over fp16: bf16's wider exponent range eliminates the gradient underflow that causes fp16 to produce NaN values during full fine-tuning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Learning rates for full fine-tuning are 10–50× lower than for LoRA: 1e-5 to 3e-5 for 7B models, not 1e-4."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Gradient clipping with max_grad_norm=1.0 prevents individual loss spikes from cascading into full divergence; log grad_norm every 10 steps and alert on values above 10."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A warmup phase of 1–2% of total steps stabilizes optimizer momentum estimates before the full learning rate is applied."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Effective batch size should be at least 256k–1M tokens per step; achieve this via gradient accumulation rather than requiring proportionally large GPU memory."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Save checkpoints every 200–500 steps and keep at least 5 recent ones to enable rollback to the last stable state after a spike."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "When a spike occurs: identify the step, find the last good checkpoint, reduce LR by 3–5×, and resume — do not restart training from scratch."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
