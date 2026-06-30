@@ -1,0 +1,1546 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ (Activation-Aware Weight Quantization, Lin et al., 2023) is a post-training INT4 quantization method that achieves near-GPTQ accuracy with a fraction of the computational cost. Rather than computing full Hessian matrices per layer (GPTQ's approach), AWQ identifies approximately 1% of weight channels that are \"salient\" — those corresponding to input features with the largest activation magnitudes — and applies per-channel scaling before quantization to protect those weights from rounding error. The result: 4-bit quantization that preserves model quality, runs in minutes rather than hours, and produces models that can be efficiently deployed with custom CUDA kernels (AWQ GEMM) on consumer GPUs."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Outlier Problem in INT4 Quantization"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Large language models develop structured outliers in their activations during training. A small fraction of input channels (roughly 0.1–1%) have dramatically higher activation magnitudes than the average — sometimes 100× larger. When these outlier activations multiply the corresponding weight columns, those columns dominate the layer output. Any quantization error in those columns is therefore amplified by the activation magnitude."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Naive INT4 quantization (round-to-nearest) applies the same scale to all columns. A column with small weights must share a scale set by the outlier range, leaving most of its 16 quantization levels wasted. The outlier column itself is quantized with inadequate granularity. Both errors compound across all the attention and FFN layers."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ's diagnostic: compute the average absolute activation magnitude per input channel over the calibration set, then find the top-1% of channels by this metric. These are the channels that must be quantized accurately:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom datasets import load_dataset\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\n\ndef find_salient_channels(\n    model,\n    tokenizer,\n    n_samples: int = 128,\n    seq_len: int = 512,\n    top_frac: float = 0.01,\n) -> dict[str, torch.Tensor]:\n    \"\"\"For each linear layer, find the top top_frac input channels by\n    average absolute activation magnitude over the calibration set.\n    Returns a dict: layer_name → boolean mask of salient channel indices.\n    \"\"\"\n    # Collect calibration data\n    dataset = load_dataset(\"wikitext\", \"wikitext-2-raw-v1\", split=\"train\")\n    texts = [t for t in dataset[\"text\"] if len(t) > 100][:n_samples]\n    calib_inputs = [\n        tokenizer(t, return_tensors=\"pt\", truncation=True, max_length=seq_len).input_ids\n        for t in texts\n    ]\n\n    # Register hooks to collect activation statistics\n    activation_norms = {}  # layer_name → sum of |x| per channel\n    hooks = []\n\n    for name, module in model.named_modules():\n        if isinstance(module, torch.nn.Linear):\n            def make_hook(n):\n                def hook(module, inp, out):\n                    x = inp[0].float()  # shape: (batch, seq, d_in)\n                    channel_norms = x.abs().mean(dim=(0, 1))  # (d_in,)\n                    activation_norms[n] = activation_norms.get(n, 0) + channel_norms\n                return hook\n            hooks.append(module.register_forward_hook(make_hook(name)))\n\n    model.eval()\n    with torch.no_grad():\n        for ids in calib_inputs:\n            model(ids.to(next(model.parameters()).device))\n\n    for h in hooks:\n        h.remove()\n\n    # For each layer, mark top top_frac channels as salient\n    salient_masks = {}\n    for name, norms in activation_norms.items():\n        n_salient = max(1, int(norms.numel() * top_frac))\n        threshold = norms.topk(n_salient).values[-1]\n        salient_masks[name] = norms >= threshold\n\n    return salient_masks\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ Algorithm: Per-Channel Scaling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Once salient channels are identified, AWQ scales them before quantization to give them finer quantization granularity. The mathematical identity that makes this work: scaling the input X by a per-channel diagonal scale s⁻¹ is equivalent to scaling the corresponding weight columns W by s, without changing the layer output:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "y = Wx = W \\cdot \\mathrm{diag}(s) \\cdot \\mathrm{diag}(s)^{-1} \\cdot x = \\tilde{W} \\tilde{x}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where W̃ = W · diag(s) and x̃ = diag(s)⁻¹ · x. The model output is unchanged. But now, when we quantize W̃, the salient columns (those with large s values) have been pre-scaled up, so they use more of the INT4 quantization range relative to non-salient columns. Equivalently, the effective quantization step size for salient columns is smaller (better accuracy)."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNDQwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjQ0MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIj4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFyciIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iNiIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBvbHlnb24gcG9pbnRzPSIwIDAsOCAzLDAgNiIgZmlsbD0iIzY0NzQ4YiIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI4NjAiIGhlaWdodD0iNDQwIiBmaWxsPSIjZjhmYWZjIiByeD0iMTIiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjI2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE0IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFlMjkzYiI+QVdROiBBY3RpdmF0aW9uLUF3YXJlIFdlaWdodCBRdWFudGl6YXRpb248L3RleHQ+CgogIDwhLS0gSW5wdXQgYWN0aXZhdGlvbnMgKFgpIHBhbmVsIC0tPgogIDxyZWN0IHg9IjIwIiB5PSI0NSIgd2lkdGg9IjI0MCIgaGVpZ2h0PSIxNjAiIHJ4PSI4IiBmaWxsPSIjZWZmNmZmIiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjE0MCIgeT0iNjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWU0MGFmIj5JbnB1dCBBY3RpdmF0aW9ucyBYPC90ZXh0PgogIDx0ZXh0IHg9IjE0MCIgeT0iODYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzYjgyZjYiPmNhbGlicmF0aW9uIHNldCBzdGF0aXN0aWNzPC90ZXh0PgoKICA8IS0tIEFjdGl2YXRpb24gYmFyczogbW9zdCBjaGFubmVscyBzbWFsbCwgYSBmZXcgbGFyZ2UgLS0+CiAgPHJlY3QgeD0iMzUiIHk9IjEwMCIgd2lkdGg9IjE4IiBoZWlnaHQ9IjIwIiBmaWxsPSIjOTNjNWZkIiByeD0iMiIvPgogIDxyZWN0IHg9IjU4IiB5PSI5MCIgd2lkdGg9IjE4IiBoZWlnaHQ9IjMwIiBmaWxsPSIjOTNjNWZkIiByeD0iMiIvPgogIDxyZWN0IHg9IjgxIiB5PSI5NSIgd2lkdGg9IjE4IiBoZWlnaHQ9IjI1IiBmaWxsPSIjOTNjNWZkIiByeD0iMiIvPgogIDxyZWN0IHg9IjEwNCIgeT0iODUiIHdpZHRoPSIxOCIgaGVpZ2h0PSIzNSIgZmlsbD0iIzkzYzVmZCIgcng9IjIiLz4KICA8cmVjdCB4PSIxMjciIHk9IjYwIiB3aWR0aD0iMTgiIGhlaWdodD0iNjAiIGZpbGw9IiMxZDRlZDgiIHJ4PSIyIiBzdHJva2U9IiMxZDRlZDgiLz4KICA8dGV4dCB4PSIxMzYiIHk9IjU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWQ0ZWQ4Ij5zYWxpZW50PC90ZXh0PgogIDxyZWN0IHg9IjE1MCIgeT0iOTUiIHdpZHRoPSIxOCIgaGVpZ2h0PSIyNSIgZmlsbD0iIzkzYzVmZCIgcng9IjIiLz4KICA8cmVjdCB4PSIxNzMiIHk9Ijg4IiB3aWR0aD0iMTgiIGhlaWdodD0iMzIiIGZpbGw9IiM5M2M1ZmQiIHJ4PSIyIi8+CiAgPHJlY3QgeD0iMTk2IiB5PSI5MyIgd2lkdGg9IjE4IiBoZWlnaHQ9IjI3IiBmaWxsPSIjOTNjNWZkIiByeD0iMiIvPgogIDxyZWN0IHg9IjIxOSIgeT0iODUiIHdpZHRoPSIxOCIgaGVpZ2h0PSIzNSIgZmlsbD0iIzkzYzVmZCIgcng9IjIiLz4KICA8bGluZSB4MT0iMzUiIHkxPSIxMzAiIHgyPSIyNDgiIHkyPSIxMzAiIHN0cm9rZT0iIzk0YTNiOCIgc3Ryb2tlLXdpZHRoPSIwLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjIiLz4KICA8dGV4dCB4PSIxNDAiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzNiODJmNiI+fjElIG9mIGNoYW5uZWxzIGhhdmU8L3RleHQ+CiAgPHRleHQgeD0iMTQwIiB5PSIxNjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzYjgyZjYiPjEw4oCTMTAww5cgaGlnaGVyIG1hZ25pdHVkZTwvdGV4dD4KICA8dGV4dCB4PSIxNDAiIHk9IjE4MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzNiODJmNiI+KHNhbGllbnQgLyBvdXRsaWVyIGNoYW5uZWxzKTwvdGV4dD4KCiAgPCEtLSBBcnJvdyAtLT4KICA8bGluZSB4MT0iMjYwIiB5MT0iMTI1IiB4Mj0iMzAwIiB5Mj0iMTI1IiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSIyODAiIHk9IjExOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj5zY2FsZTwvdGV4dD4KCiAgPCEtLSBTY2FsZSB0cmFuc2Zvcm1hdGlvbiBib3ggLS0+CiAgPHJlY3QgeD0iMzAwIiB5PSI2NSIgd2lkdGg9IjIwMCIgaGVpZ2h0PSIxMjAiIHJ4PSI4IiBmaWxsPSIjZjBmZGY0IiBzdHJva2U9IiMyMmM1NWUiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjQwMCIgeT0iODgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMTY2NTM0Ij5QZXItQ2hhbm5lbCBTY2FsaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjQwMCIgeT0iMTA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMTU4MDNkIj5TY2FsZSBzYWxpZW50IGlucHV0IGNoYW5uZWxzOjwvdGV4dD4KICA8dGV4dCB4PSI0MDAiIHk9IjEyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzE2NjUzNCIgZm9udC1zdHlsZT0iaXRhbGljIj5YzIMgPSBYIMK3IGRpYWcocynigbvCuTwvdGV4dD4KICA8dGV4dCB4PSI0MDAiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzE1ODAzZCI+Q29tcGVuc2F0ZSBpbiB3ZWlnaHRzOjwvdGV4dD4KICA8dGV4dCB4PSI0MDAiIHk9IjE2OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzE2NjUzNCIgZm9udC1zdHlsZT0iaXRhbGljIj5XzIMgPSBXIMK3IGRpYWcocyk8L3RleHQ+CgogIDwhLS0gQXJyb3cgLS0+CiAgPGxpbmUgeDE9IjUwMCIgeTE9IjEyNSIgeDI9IjU0MCIgeTI9IjEyNSIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPHRleHQgeD0iNTIwIiB5PSIxMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiI+cXVhbnQ8L3RleHQ+CgogIDwhLS0gUXVhbnRpemVkIG91dHB1dCBib3ggLS0+CiAgPHJlY3QgeD0iNTQwIiB5PSI2NSIgd2lkdGg9IjE1MCIgaGVpZ2h0PSIxMjAiIHJ4PSI4IiBmaWxsPSIjZmRmNGZmIiBzdHJva2U9IiNhODU1ZjciIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjYxNSIgeT0iOTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjN2UyMmNlIj5JTlQ0IFdlaWdodHM8L3RleHQ+CiAgPHRleHQgeD0iNjE1IiB5PSIxMTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5MzMzZWEiPsW0ID0gcXVhbnQoVyDCtyBzKTwvdGV4dD4KICA8dGV4dCB4PSI2MTUiIHk9IjEzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzkzMzNlYSI+U2FsaWVudCBjb2xzIHNjYWxlZCB1cDwvdGV4dD4KICA8dGV4dCB4PSI2MTUiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzkzMzNlYSI+4oaSIGZpbmVyIGdyYW51bGFyaXR5PC90ZXh0PgogIDx0ZXh0IHg9IjYxNSIgeT0iMTY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTMzM2VhIj7ihpIgbGVzcyByb3VuZGluZyBlcnJvcjwvdGV4dD4KCiAgPCEtLSBBcnJvdyB0byBvdXRwdXQgLS0+CiAgPGxpbmUgeDE9IjY5MCIgeTE9IjEyNSIgeDI9IjczMCIgeTI9IjEyNSIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CgogIDwhLS0gRmluYWwgb3V0cHV0IC0tPgogIDxyZWN0IHg9IjczMCIgeT0iODAiIHdpZHRoPSIxMTAiIGhlaWdodD0iOTAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIi8+CiAgPHRleHQgeD0iNzg1IiB5PSIxMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZjhmYWZjIj5BV1EgTW9kZWw8L3RleHQ+CiAgPHRleHQgeD0iNzg1IiB5PSIxMjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5NGEzYjgiPklOVDQgd2VpZ2h0czwvdGV4dD4KICA8dGV4dCB4PSI3ODUiIHk9IjE0MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzk0YTNiOCI+RlAxNiBzY2FsZXM8L3RleHQ+CiAgPHRleHQgeD0iNzg1IiB5PSIxNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5NGEzYjgiPjTDlyBzbWFsbGVyPC90ZXh0PgoKICA8IS0tIEtleSBpbnNpZ2h0IGJveCAtLT4KICA8cmVjdCB4PSIyMCIgeT0iMjMwIiB3aWR0aD0iODIwIiBoZWlnaHQ9IjkwIiByeD0iOCIgZmlsbD0iI2ZlZjNjNyIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjUyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSI+S2V5IEluc2lnaHQ6IFByb3RlY3QgU2FsaWVudCBDaGFubmVscyBXaXRob3V0IEZ1bGwgSGVzc2lhbjwvdGV4dD4KICA8dGV4dCB4PSI0MzAiIHk9IjI3MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2I0NTMwOSI+R1BUUSBjb21wdXRlcyBhIGTDl2QgSGVzc2lhbiBwZXIgbGF5ZXIgKE8oZMKzKSBDaG9sZXNreSkuIEFXUSBza2lwcyB0aGlzIOKAlCBpbnN0ZWFkIGl0IGZpbmRzIHRoZSB+MSUgb2YgaW5wdXQ8L3RleHQ+CiAgPHRleHQgeD0iNDMwIiB5PSIyODkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNiNDUzMDkiPmNoYW5uZWxzIHdpdGggbGFyZ2VzdCBhdmVyYWdlIGFjdGl2YXRpb24gbWFnbml0dWRlIGFuZCBzY2FsZXMgdGhlbSB1cCBiZWZvcmUgcXVhbnRpemF0aW9uLiBUaGlzICJ3aWRlbnMiIHRoZTwvdGV4dD4KICA8dGV4dCB4PSI0MzAiIHk9IjMwNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2I0NTMwOSI+cXVhbnRpemF0aW9uIHJhbmdlIGZvciBoaWdoLWltcGFjdCB3ZWlnaHRzLCByZWR1Y2luZyB0aGVpciByb3VuZGluZyBlcnJvciB3aXRob3V0IGNvbXB1dGluZyBhbnkgbWF0cml4IGludmVyc2UuPC90ZXh0PgoKICA8IS0tIENvbXBhcmlzb24gYmFyIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIzNDAiIHdpZHRoPSI4MjAiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjZjFmNWY5IiBzdHJva2U9IiM5NGEzYjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMzYyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzMzNDE1NSI+QVdRIHZzIEdQVFEgYXQgSU5UNCAoTGxhbWEtMiA3Qik8L3RleHQ+CiAgPHRleHQgeD0iMjE1IiB5PSIzODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxZTQwYWYiPkdQVFEgZzEyODogUFBMIDUuNjUgfCA0MCBtaW4vN0I8L3RleHQ+CiAgPHRleHQgeD0iNjQ1IiB5PSIzODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMxNjY1MzQiPkFXUSA0Yml0OiBQUEwgNS42MCB8IDEwIG1pbi83QjwvdGV4dD4KICA8dGV4dCB4PSI0MzAiIHk9IjM4NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzY0NzQ4YiI+dnMuIEZQMTYgYmFzZWxpbmU6IDUuNDc8L3RleHQ+CiAgPHRleHQgeD0iNDMwIiB5PSI0MDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiI+QVdRIGlzIGZhc3RlciB0byBxdWFudGl6ZSBhbmQgc2xpZ2h0bHkgYmV0dGVyIG9uIG1vc3QgbW9kZWxzOyBHUFRRIGhhcyBhbiBlZGdlIG9uIGhlYXZpbHktb3V0bGllciBtb2RlbHM8L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "AWQ: salient input channels (top 1% by activation magnitude) are scaled up in the weight matrix before INT4 quantization, giving them finer quantization granularity. The scaling is absorbed into the weights so layer output is unchanged."
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Scale Search"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The optimal scale s for each channel is found by grid search over a small range, minimising the quantization error on the calibration set. The search space is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "s_i^* = \\arg\\min_{s \\in [s_{\\min}, s_{\\max}]} \\|W_{\\cdot,i} - \\mathrm{quant}(W_{\\cdot,i} \\cdot s) / s\\|_2^2 \\cdot \\|\\bar{x}_i\\|"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where x̄ᵢ is the average activation magnitude for channel i. The |x̄ᵢ| weight in the objective ensures that channels with larger activations (higher impact on output) receive more aggressive scaling. In practice, AWQ searches over ~20 candidate scale values (geometric progression from 1 to max_scale) per channel:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def search_best_scale(\n    weight: torch.Tensor,   # (d_out, d_in)\n    act_norms: torch.Tensor,  # (d_in,) average activation magnitudes\n    n_grid: int = 20,\n    max_scale: float = 2.0,\n) -> torch.Tensor:\n    \"\"\"Grid-search the per-channel scale that minimises quantisation error\n    weighted by activation magnitude.\n    \"\"\"\n    best_scales = torch.ones(weight.shape[1], device=weight.device)\n    best_loss = torch.full((weight.shape[1],), float(\"inf\"), device=weight.device)\n\n    for i in range(n_grid + 1):\n        # Candidate scale: geometric progression from 1 to max_scale\n        alpha = i / n_grid\n        # Scale = activation_norm^alpha (0=no scaling, 1=full activation scaling)\n        scales = act_norms.pow(alpha)     # (d_in,)\n        scales = scales / scales.max()    # normalise\n\n        # Apply scale, quantize, compute error\n        scaled_weight = weight * scales.unsqueeze(0)   # (d_out, d_in)\n        quant_weight = round_to_nearest_4bit(scaled_weight)  # hypothetical\n        deq_weight = quant_weight / scales.unsqueeze(0)\n\n        # Error weighted by activation magnitude\n        error = ((weight - deq_weight).pow(2) * act_norms.unsqueeze(0)).sum(0)  # (d_in,)\n\n        improved = error < best_loss\n        best_loss[improved] = error[improved]\n        best_scales[improved] = scales[improved]\n\n    return best_scales  # (d_in,)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Quantizing with AutoAWQ"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The AutoAWQ library (also maintained by Casper Hansen and the community) provides a production-ready implementation of the AWQ algorithm:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from awq import AutoAWQForCausalLM\nfrom transformers import AutoTokenizer\n\nmodel_path = \"meta-llama/Meta-Llama-3-8B\"\nquant_path = \"./llama-3-8b-awq-4bit\"\n\n# Load model in FP16\ntokenizer = AutoTokenizer.from_pretrained(model_path)\nmodel = AutoAWQForCausalLM.from_pretrained(\n    model_path,\n    torch_dtype=\"auto\",\n    device_map=\"cuda\",\n)\n\n# AWQ quantization config\nquant_config = {\n    \"zero_point\": True,      # asymmetric quantization (generally better)\n    \"q_group_size\": 128,     # group size for scale granularity\n    \"w_bit\": 4,              # 4-bit weights\n    \"version\": \"GEMM\",       # GEMM kernel (vs GEMV for small batch / single token)\n}\n\n# Calibrate and quantize — runs in ~5-10 min for 8B models on an A100\nmodel.quantize(\n    tokenizer,\n    quant_config=quant_config,\n    calib_data=\"pileval\",    # built-in calibration dataset (The Pile)\n    # Or pass custom text:\n    # calib_data=[\"text1\", \"text2\", ...]\n)\n\n# Save quantized model\nmodel.save_quantized(quant_path)\ntokenizer.save_pretrained(quant_path)\nprint(f\"Quantized model saved to {quant_path}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Loading and Running AWQ Models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ models are widely distributed on HuggingFace Hub (TheBloke and other contributors pre-quantize popular models). They can be loaded with AutoAWQ or natively via HuggingFace Transformers:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Option 1: AutoAWQ\nfrom awq import AutoAWQForCausalLM\nfrom transformers import AutoTokenizer\n\nmodel = AutoAWQForCausalLM.from_quantized(\n    \"TheBloke/Llama-2-7B-AWQ\",\n    device_map=\"cuda\",\n    fuse_layers=True,   # fuse QKV + FFN layers for faster inference\n)\ntokenizer = AutoTokenizer.from_pretrained(\"TheBloke/Llama-2-7B-AWQ\")\n\n# Option 2: HuggingFace Transformers native (for models using the AWQ config format)\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\n\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"casperhansen/llama-3-8b-instruct-awq\",\n    device_map=\"cuda\",\n    # transformers >= 4.35 auto-detects AWQ config from quantization_config.json\n)\ntokenizer = AutoTokenizer.from_pretrained(\"casperhansen/llama-3-8b-instruct-awq\")\n\n# Generation is identical to a standard model\ninputs = tokenizer(\"The capital of France is\", return_tensors=\"pt\").to(\"cuda\")\noutput = model.generate(**inputs, max_new_tokens=50, do_sample=False)\nprint(tokenizer.decode(output[0], skip_special_tokens=True))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "GEMM vs GEMV Inference Kernels"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ provides two custom CUDA kernels optimised for different batch size regimes:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Kernel"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Operation"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Throughput"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GEMM (version=\"GEMM\")"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Batch size ≥ 8 (prefill, batch inference)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Matrix × Matrix: uses Tensor Cores"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Highest throughput at large batch"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GEMV (version=\"GEMV\")"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Batch size = 1 (streaming decode)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Matrix × Vector: optimised for single token"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best latency at decode time"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FP16 fallback"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU or non-CUDA"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Standard PyTorch matmul"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slowest"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For online serving (one request at a time, autoregressive generation), GEMV gives lower per-token latency. For offline batch generation or prefill-heavy workloads, GEMM provides higher aggregate throughput. Many serving frameworks (vLLM, TGI) automatically select the appropriate kernel:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Set kernel at quantization time — stored in model config\nquant_config_gemv = {\n    \"zero_point\": True,\n    \"q_group_size\": 128,\n    \"w_bit\": 4,\n    \"version\": \"GEMV\",   # optimised for single-token decode\n}\n\n# With vLLM (handles kernel selection automatically)\nfrom vllm import LLM, SamplingParams\n\nllm = LLM(\n    model=\"casperhansen/llama-3-8b-instruct-awq\",\n    quantization=\"awq\",\n    dtype=\"float16\",\n    gpu_memory_utilization=0.85,\n)\nparams = SamplingParams(temperature=0.0, max_tokens=200)\noutputs = llm.generate([\"Explain quantization in one paragraph.\"], params)\nprint(outputs[0].outputs[0].text)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ vs GPTQ: Accuracy and Speed"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Both AWQ and GPTQ target INT4 quantization for LLM inference. Their accuracy is broadly similar; the choice between them depends on calibration cost, model characteristics, and serving requirements:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Dimension"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GPTQ"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quantization time (7B)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "5–10 min (A100)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "15–40 min (A100)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quantization time (70B)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "30–60 min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3–4 hours"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Algorithm"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Per-channel activation-aware scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Layer-wise Hessian weight update"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Calibration data needed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~128 samples"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~512 samples"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PPL delta vs FP16 (Llama-2 7B)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "+0.10–0.15 (5.57–5.62)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "+0.15–0.20 (5.62–5.67)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Inference kernel"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWQ GEMM / GEMV"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ExLlama / ExLlama2"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Multi-GPU support"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (device_map)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (device_map)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LoRA fine-tuning on INT4"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (PEFT)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (PEFT)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best at"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast calibration, edge / consumer GPU"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Maximum accuracy, outlier-heavy models"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "For most use cases, AWQ and GPTQ produce nearly identical model quality at INT4. Prefer AWQ when quantization speed matters or when deploying to consumer hardware with AWQ GEMV kernel support. Prefer GPTQ when maximising perplexity on models with heavy outlier distributions (some code models, older architectures)."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layer Fusion for Faster Inference"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AutoAWQ supports layer fusion (fuse_layers=True), which merges adjacent QKV projections and FFN layers into a single kernel call. This reduces kernel launch overhead and improves memory locality for the attention pattern:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from awq import AutoAWQForCausalLM\nfrom transformers import AutoTokenizer, TextStreamer\n\nmodel = AutoAWQForCausalLM.from_quantized(\n    \"casperhansen/llama-3-8b-instruct-awq\",\n    device_map=\"cuda\",\n    fuse_layers=True,     # merge Q/K/V projections + FFN for extra 10-15% speedup\n    batch_size=1,         # set to expected batch size for optimal kernel selection\n)\ntokenizer = AutoTokenizer.from_pretrained(\"casperhansen/llama-3-8b-instruct-awq\")\n\n# Streaming generation example\nstreamer = TextStreamer(tokenizer, skip_prompt=True)\ninputs = tokenizer(\n    \"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\\n\\n\"\n    \"Explain quantum entanglement.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\\n\\n\",\n    return_tensors=\"pt\"\n).to(\"cuda\")\n\nmodel.generate(**inputs, max_new_tokens=500, streamer=streamer, do_sample=False)\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Layer fusion is generally safe for inference but may cause numerical differences from the unfused model in rare edge cases. Disable it (fuse_layers=False) if you observe unexpected output quality degradation with a fused model."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory Footprint"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ with group_size=128 and 4-bit weights uses the same memory formula as GPTQ:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{bits per weight} = 4 + \\frac{16}{128} = 4.125 \\text{ bits} \\approx 0.515 \\text{ bytes/param}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AWQ additionally stores per-channel zero-points (for asymmetric quantization, zero_point=True) alongside scales. This is already included in the 16-bit scale overhead above when interpreted as a scale-zero pair per group. In practice, AWQ models report VRAM usage nearly identical to GPTQ models at the same group size:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FP16 VRAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWQ INT4 VRAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fits on"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-3 8B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "16 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4.5 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RTX 3060 (12 GB)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-3 70B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "140 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "40 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2× RTX 4090 or A100 80 GB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Mixtral 8×7B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "90 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "26 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A100 40 GB or 2× RTX 4090"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-3.1 405B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "810 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "230 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8× A100 (NVLink)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "AWQ ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "identifies the ~1% of weight columns corresponding to the largest-activation input channels (salient channels) and scales them before quantization to reduce their rounding error."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The key identity: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "y = W·x = (W·s)(s⁻¹·x). Scaling columns of W up by s gives them finer INT4 quantization granularity without changing the model output, provided the complementary scaling s⁻¹ is applied to the activations at inference time — but in practice the scales are absorbed into the quantization scheme."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scale search ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "uses a ~20-point grid over s ∈ [1, max_scale] per channel, minimising quantization error weighted by activation magnitude. This takes minutes rather than hours."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "AutoAWQ ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "provides the full AWQ pipeline: calibration, scale search, quantization, and GEMM/GEMV CUDA kernels. vLLM and HuggingFace Transformers also support AWQ models natively."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "AWQ vs GPTQ: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "AWQ is 3–6× faster to quantize and produces similar accuracy. GPTQ has a slight edge on accuracy for models with extreme outliers. Both achieve roughly 4× memory reduction over FP16."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
