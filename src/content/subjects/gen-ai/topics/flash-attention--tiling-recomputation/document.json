@@ -1,0 +1,1317 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention's performance relies on two intertwined techniques: tiling and recomputation. Tiling breaks the N×N attention computation into small blocks that fit in on-chip SRAM, eliminating HBM round-trips for intermediate results. Recomputation allows the backward pass to regenerate those intermediate results on the fly from compact softmax statistics — avoiding the need to store the N×N attention matrix as a training activation. Neither technique works without the other: tiling produces the running statistics ("
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "m"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ℓ"
+          },
+          {
+            "type": "text",
+            "text": ") that make recomputation exact, and recomputation is what makes storing those statistics (rather than the full N×N matrix) sufficient for training."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Block Size Selection"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The tile sizes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_r"
+          },
+          {
+            "type": "text",
+            "text": " (row block, over Q) and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_c"
+          },
+          {
+            "type": "text",
+            "text": " (column block, over K and V) are constrained by SRAM capacity. At any moment, the SRAM must hold:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "Q_i"
+                  },
+                  {
+                    "type": "text",
+                    "text": " block: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "B_r × d"
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "K_j"
+                  },
+                  {
+                    "type": "text",
+                    "text": " block: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "B_c × d"
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "V_j"
+                  },
+                  {
+                    "type": "text",
+                    "text": " block: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "B_c × d"
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "O_i"
+                  },
+                  {
+                    "type": "text",
+                    "text": " accumulator: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "B_r × d"
+                  },
+                  {
+                    "type": "text",
+                    "text": " elements (plus "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "S_ij = B_r × B_c"
+                  },
+                  {
+                    "type": "text",
+                    "text": " temporarily during the inner matmul)"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The binding SRAM constraint (excluding the transient "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "S_ij"
+          },
+          {
+            "type": "text",
+            "text": " buffer) is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "4 \\cdot B_r \\cdot d + B_c \\cdot d \\leq M \\quad \\text{(for symmetric } B_r = B_c: B \\leq \\lfloor M / (4d) \\rfloor)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "On an A100 with 96 KB shared memory per SM and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "d = 64"
+          },
+          {
+            "type": "text",
+            "text": ", the maximum block size is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_r = B_c = ⌊96×1024 / (4×64×2)⌋ = 192"
+          },
+          {
+            "type": "text",
+            "text": " tokens. In practice the FlashAttention CUDA kernel uses tuned block sizes (typically 64 or 128) that maximize throughput accounting for register pressure and warp occupancy. Larger tiles improve arithmetic intensity (more compute per HBM byte loaded) but require more registers per warp, reducing SM occupancy."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Forward Pass Tile Loop"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NDAiIGhlaWdodD0iNTAwIiB2aWV3Qm94PSIwIDAgODQwIDUwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIj4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFyciIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iNiIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBvbHlnb24gcG9pbnRzPSIwIDAsIDggMywgMCA2IiBmaWxsPSIjODg4Ii8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFyci1nIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI2IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cG9seWdvbiBwb2ludHM9IjAgMCwgOCAzLCAwIDYiIGZpbGw9IiM0NGNjODgiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyLWIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjYiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwb2x5Z29uIHBvaW50cz0iMCAwLCA4IDMsIDAgNiIgZmlsbD0iIzRhOWVmZiIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI4NDAiIGhlaWdodD0iNTAwIiBmaWxsPSIjMTExODI3IiByeD0iMTIiLz4KICA8dGV4dCB4PSI0MjAiIHk9IjMyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE3IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2UwZTBlMCI+Rmxhc2hBdHRlbnRpb246IFRpbGluZyB0aGUgTsOXTiBBdHRlbnRpb24gTWF0cml4PC90ZXh0PgoKICA8IS0tID09PT09IExFRlQ6IEZ1bGwgYXR0ZW50aW9uIG1hdHJpeCB3aXRoIHRpbGVzIG92ZXJsYWlkID09PT09IC0tPgogIDx0ZXh0IHg9IjIwIiB5PSI2MCIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNlMGUwZTAiPkZ1bGwgYXR0ZW50aW9uIG1hdHJpeCAoTsOXTiwgY2F1c2FsKTwvdGV4dD4KICA8dGV4dCB4PSIyMCIgeT0iNzYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPlBhcnRpdGlvbmVkIGludG8gQl9yIMOXIEJfYyB0aWxlcyDigJQgb25seSBsb3dlciB0cmlhbmdsZSBjb21wdXRlZCAoY2F1c2FsKTwvdGV4dD4KCiAgPCEtLSBNYXRyaXggYmFja2dyb3VuZCAtLT4KICA8cmVjdCB4PSIyMCIgeT0iODYiIHdpZHRoPSIyNjAiIGhlaWdodD0iMjYwIiByeD0iMyIgZmlsbD0iIzBkMTExNyIgc3Ryb2tlPSIjMzMzIiBzdHJva2Utd2lkdGg9IjEiLz4KCiAgPCEtLSBUaWxlIGdyaWQgbGluZXMgKDggdGlsZXMgeCA4IHRpbGVzID0gTi9CX3IgeCBOL0JfYykgLS0+CiAgPCEtLSB2ZXJ0aWNhbCBsaW5lcyBldmVyeSAzMi41cHggLS0+CiAgPGxpbmUgeDE9IjUyLjUiIHkxPSI4NiIgeDI9IjUyLjUiIHkyPSIzNDYiIHN0cm9rZT0iIzFlMjUzNSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8bGluZSB4MT0iODUiIHkxPSI4NiIgeDI9Ijg1IiB5Mj0iMzQ2IiBzdHJva2U9IiMxZTI1MzUiIHN0cm9rZS13aWR0aD0iMC41Ii8+CiAgPGxpbmUgeDE9IjExNy41IiB5MT0iODYiIHgyPSIxMTcuNSIgeTI9IjM0NiIgc3Ryb2tlPSIjMWUyNTM1IiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDxsaW5lIHgxPSIxNTAiIHkxPSI4NiIgeDI9IjE1MCIgeTI9IjM0NiIgc3Ryb2tlPSIjMWUyNTM1IiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDxsaW5lIHgxPSIxODIuNSIgeTE9Ijg2IiB4Mj0iMTgyLjUiIHkyPSIzNDYiIHN0cm9rZT0iIzFlMjUzNSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8bGluZSB4MT0iMjE1IiB5MT0iODYiIHgyPSIyMTUiIHkyPSIzNDYiIHN0cm9rZT0iIzFlMjUzNSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8bGluZSB4MT0iMjQ3LjUiIHkxPSI4NiIgeDI9IjI0Ny41IiB5Mj0iMzQ2IiBzdHJva2U9IiMxZTI1MzUiIHN0cm9rZS13aWR0aD0iMC41Ii8+CiAgPCEtLSBob3Jpem9udGFsIGxpbmVzIC0tPgogIDxsaW5lIHgxPSIyMCIgeTE9IjExOC41IiB4Mj0iMjgwIiB5Mj0iMTE4LjUiIHN0cm9rZT0iIzFlMjUzNSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8bGluZSB4MT0iMjAiIHkxPSIxNTEiIHgyPSIyODAiIHkyPSIxNTEiIHN0cm9rZT0iIzFlMjUzNSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8bGluZSB4MT0iMjAiIHkxPSIxODMuNSIgeDI9IjI4MCIgeTI9IjE4My41IiBzdHJva2U9IiMxZTI1MzUiIHN0cm9rZS13aWR0aD0iMC41Ii8+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMjE2IiB4Mj0iMjgwIiB5Mj0iMjE2IiBzdHJva2U9IiMxZTI1MzUiIHN0cm9rZS13aWR0aD0iMC41Ii8+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMjQ4LjUiIHgyPSIyODAiIHkyPSIyNDguNSIgc3Ryb2tlPSIjMWUyNTM1IiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDxsaW5lIHgxPSIyMCIgeTE9IjI4MSIgeDI9IjI4MCIgeTI9IjI4MSIgc3Ryb2tlPSIjMWUyNTM1IiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDxsaW5lIHgxPSIyMCIgeTE9IjMxMy41IiB4Mj0iMjgwIiB5Mj0iMzEzLjUiIHN0cm9rZT0iIzFlMjUzNSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KCiAgPCEtLSBDb2xvciB0aGUgdGlsZXM6IHBhc3QgKGNvbXB1dGVkLCBkYXJrIGdyZWVuKSwgZGlhZ29uYWwgKG1hc2tlZCwgYmx1ZSksIGZ1dHVyZSAoc2tpcHBlZCwgZ3JheSkgLS0+CiAgPCEtLSBSb3cgMCAodG9wKTogb25seSB0aWxlICgwLDApIC0gZGlhZ29uYWwgLS0+CiAgPHJlY3QgeD0iMjAiIHk9Ijg2IiB3aWR0aD0iMzIuNSIgaGVpZ2h0PSIzMi41IiBmaWxsPSIjMWEzYTI4IiBvcGFjaXR5PSIwLjgiLz4KICA8IS0tIFJvdyAxOiB0aWxlKDEsMCkgcGFzdCwgdGlsZSgxLDEpIGRpYWdvbmFsIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIxMTguNSIgd2lkdGg9IjMyLjUiIGhlaWdodD0iMzIuNSIgZmlsbD0iIzBlMjMxOCIgb3BhY2l0eT0iMC45Ii8+CiAgPHJlY3QgeD0iNTIuNSIgeT0iMTE4LjUiIHdpZHRoPSIzMi41IiBoZWlnaHQ9IjMyLjUiIGZpbGw9IiMxYTNhMjgiIG9wYWNpdHk9IjAuOCIvPgogIDwhLS0gUm93IDI6IHRpbGVzICgyLDApLCgyLDEpIHBhc3QsICgyLDIpIGRpYWdvbmFsIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIxNTEiIHdpZHRoPSI2NSIgaGVpZ2h0PSIzMi41IiBmaWxsPSIjMGUyMzE4IiBvcGFjaXR5PSIwLjkiLz4KICA8cmVjdCB4PSI4NSIgeT0iMTUxIiB3aWR0aD0iMzIuNSIgaGVpZ2h0PSIzMi41IiBmaWxsPSIjMWEzYTI4IiBvcGFjaXR5PSIwLjgiLz4KICA8IS0tIFJvdyAzIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIxODMuNSIgd2lkdGg9Ijk3LjUiIGhlaWdodD0iMzIuNSIgZmlsbD0iIzBlMjMxOCIgb3BhY2l0eT0iMC45Ii8+CiAgPHJlY3QgeD0iMTE3LjUiIHk9IjE4My41IiB3aWR0aD0iMzIuNSIgaGVpZ2h0PSIzMi41IiBmaWxsPSIjMWEzYTI4IiBvcGFjaXR5PSIwLjgiLz4KICA8IS0tIFJvdyA0IC0tPgogIDxyZWN0IHg9IjIwIiB5PSIyMTYiIHdpZHRoPSIxMzAiIGhlaWdodD0iMzIuNSIgZmlsbD0iIzBlMjMxOCIgb3BhY2l0eT0iMC45Ii8+CiAgPHJlY3QgeD0iMTUwIiB5PSIyMTYiIHdpZHRoPSIzMi41IiBoZWlnaHQ9IjMyLjUiIGZpbGw9IiMxYTNhMjgiIG9wYWNpdHk9IjAuOCIvPgogIDwhLS0gUm93IDUgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjI0OC41IiB3aWR0aD0iMTYyLjUiIGhlaWdodD0iMzIuNSIgZmlsbD0iIzBlMjMxOCIgb3BhY2l0eT0iMC45Ii8+CiAgPHJlY3QgeD0iMTgyLjUiIHk9IjI0OC41IiB3aWR0aD0iMzIuNSIgaGVpZ2h0PSIzMi41IiBmaWxsPSIjMWEzYTI4IiBvcGFjaXR5PSIwLjgiLz4KICA8IS0tIFJvdyA2IC0tPgogIDxyZWN0IHg9IjIwIiB5PSIyODEiIHdpZHRoPSIxOTUiIGhlaWdodD0iMzIuNSIgZmlsbD0iIzBlMjMxOCIgb3BhY2l0eT0iMC45Ii8+CiAgPHJlY3QgeD0iMjE1IiB5PSIyODEiIHdpZHRoPSIzMi41IiBoZWlnaHQ9IjMyLjUiIGZpbGw9IiMxYTNhMjgiIG9wYWNpdHk9IjAuOCIvPgogIDwhLS0gUm93IDcgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjMxMy41IiB3aWR0aD0iMjI3LjUiIGhlaWdodD0iMzIuNSIgZmlsbD0iIzBlMjMxOCIgb3BhY2l0eT0iMC45Ii8+CiAgPHJlY3QgeD0iMjQ3LjUiIHk9IjMxMy41IiB3aWR0aD0iMzIuNSIgaGVpZ2h0PSIzMi41IiBmaWxsPSIjMWEzYTI4IiBvcGFjaXR5PSIwLjgiLz4KICA8IS0tIFVwcGVyIHRyaWFuZ2xlIChmdXR1cmUpIC0gZ3JheSBtYXNrIG92ZXJsYXkgLS0+CiAgPHBvbHlnb24gcG9pbnRzPSI1Mi41LDg2IDI4MCw4NiAyODAsMzQ2IDUyLjUsMTE4LjUiIGZpbGw9IiMwZDExMTciIG9wYWNpdHk9IjAuNyIvPgogIDxwb2x5Z29uIHBvaW50cz0iNTIuNSw4NiAyODAsODYgMjgwLDg2IiBmaWxsPSJub25lIi8+CgogIDwhLS0gRGlhZ29uYWwgbGluZSAoY2F1c2FsIGJvdW5kYXJ5KSAtLT4KICA8bGluZSB4MT0iMjAiIHkxPSI4NiIgeDI9IjI4MCIgeTI9IjM0NiIgc3Ryb2tlPSIjNjY2IiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNCAzIi8+CgogIDwhLS0gSGlnaGxpZ2h0IG9uZSBjdXJyZW50IHRpbGUgYmVpbmcgcHJvY2Vzc2VkIChyb3cgNSwgY29sIDMpIC0tPgogIDxyZWN0IHg9IjExNy41IiB5PSIyNDguNSIgd2lkdGg9IjMyLjUiIGhlaWdodD0iMzIuNSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjIuNSIvPgogIDx0ZXh0IHg9IjEzNCIgeT0iMjY5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjgiIGZpbGw9IiM0YTllZmYiIGZvbnQtd2VpZ2h0PSJib2xkIj5ub3c8L3RleHQ+CgogIDwhLS0gQXhpcyBsYWJlbHMgLS0+CiAgPHRleHQgeD0iMTUwIiB5PSIzNzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4ODgiPktleSB0b2tlbnMgKGog4oaSIGNvbHVtbnMpPC90ZXh0PgogIDx0ZXh0IHg9IjEwIiB5PSIyMTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4ODgiIHRyYW5zZm9ybT0icm90YXRlKC05MCwgMTAsIDIxNikiPlF1ZXJ5IHRva2VucyAoaSDihpIgcm93cyk8L3RleHQ+CgogIDwhLS0gTGVnZW5kIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIzODIiIHdpZHRoPSIxNCIgaGVpZ2h0PSIxNCIgZmlsbD0iIzBlMjMxOCIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0MCIgeT0iMzkzIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNjZhYTg4Ij5Db21wdXRlZCAocGFzdCk8L3RleHQ+CiAgPHJlY3QgeD0iMTMwIiB5PSIzODIiIHdpZHRoPSIxNCIgaGVpZ2h0PSIxNCIgZmlsbD0iIzFhM2EyOCIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxNTAiIHk9IjM5MyIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzY2YWE4OCI+RGlhZ29uYWwgKG1hc2tlZCk8L3RleHQ+CiAgPHJlY3QgeD0iMjMwIiB5PSIzODIiIHdpZHRoPSIxNCIgaGVpZ2h0PSIxNCIgZmlsbD0iIzBkMTExNyIgc3Ryb2tlPSIjMzMzIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIyNTAiIHk9IjM5MyIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzU1NSI+U2tpcHBlZCAoZnV0dXJlKTwvdGV4dD4KCiAgPCEtLSA9PT09PSBSSUdIVDogU1JBTSB0aWxlIGxvb3AgZGV0YWlsID09PT09IC0tPgogIDx0ZXh0IHg9IjMxMCIgeT0iNjAiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTBlMGUwIj5TUkFNIHRpbGUgbG9vcCDigJQgZm9yd2FyZCBwYXNzPC90ZXh0PgoKICA8IS0tIE91dGVyIGxvb3A6IHJvdyBibG9ja3MgKFEpIC0tPgogIDxyZWN0IHg9IjMxMCIgeT0iNzIiIHdpZHRoPSI1MTAiIGhlaWdodD0iNDAwIiByeD0iNiIgZmlsbD0iIzBkMTExNyIgc3Ryb2tlPSIjMmEyYTJhIiBzdHJva2Utd2lkdGg9IjEiLz4KCiAgPCEtLSBPdXRlciBsb29wIGxhYmVsIC0tPgogIDx0ZXh0IHg9IjMyMCIgeT0iOTIiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiIGZvbnQtc3R5bGU9Iml0YWxpYyI+Zm9yIGkgaW4gcmFuZ2UoVF9yKTogICMgcm93IGJsb2NrczwvdGV4dD4KCiAgPCEtLSBRX2kgYmxvY2sgZnJvbSBIQk0gLS0+CiAgPHJlY3QgeD0iMzMwIiB5PSIxMDAiIHdpZHRoPSI5MCIgaGVpZ2h0PSIzNiIgcng9IjQiIGZpbGw9IiMxZTNkNmUiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIzNzUiIHk9IjExNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NjZTBmZiIgZm9udC13ZWlnaHQ9ImJvbGQiPlFfaSBbQl9yIMOXIGRdPC90ZXh0PgogIDx0ZXh0IHg9IjM3NSIgeT0iMTI4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4ODgiPmxvYWQgZnJvbSBIQk08L3RleHQ+CgogIDwhLS0gU1JBTSBhY2N1bXVsYXRvciAtLT4KICA8cmVjdCB4PSI0NTAiIHk9IjEwMCIgd2lkdGg9IjkwIiBoZWlnaHQ9IjM2IiByeD0iNCIgZmlsbD0iIzBlMjMxOCIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ5NSIgeT0iMTE0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjODhkZGFhIiBmb250LXdlaWdodD0iYm9sZCI+T19pID0gMDwvdGV4dD4KICA8dGV4dCB4PSI0OTUiIHk9IjEyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNDRjYzg4Ij7ihJNfaT0wLCBtX2k9LeKInjwvdGV4dD4KCiAgPCEtLSBBcnJvdyBRIGludG8gU1JBTSAtLT4KICA8bGluZSB4MT0iNDIwIiB5MT0iMTE4IiB4Mj0iNDQ4IiB5Mj0iMTE4IiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1iKSIvPgoKICA8IS0tIElubmVyIGxvb3AgYm94IC0tPgogIDxyZWN0IHg9IjMyMCIgeT0iMTUwIiB3aWR0aD0iNDkwIiBoZWlnaHQ9IjI0MCIgcng9IjQiIGZpbGw9IiMxMTE4MjciIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMzMwIiB5PSIxNjgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiIGZvbnQtc3R5bGU9Iml0YWxpYyI+ICBmb3IgaiBpbiByYW5nZShUX2MpOiAgIyBjb2wgYmxvY2tzPC90ZXh0PgoKICA8IS0tIExvYWQgS19qLCBWX2ogZnJvbSBIQk0gLS0+CiAgPHJlY3QgeD0iMzQwIiB5PSIxNzYiIHdpZHRoPSI4MCIgaGVpZ2h0PSIyNCIgcng9IjMiIGZpbGw9IiMxZTNkNmUiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMzgwIiB5PSIxOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjZTBmZiI+S19qIFtCX2Mgw5cgZF08L3RleHQ+CiAgPHJlY3QgeD0iNDMwIiB5PSIxNzYiIHdpZHRoPSI4MCIgaGVpZ2h0PSIyNCIgcng9IjMiIGZpbGw9IiMxZTNkNmUiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDcwIiB5PSIxOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjZTBmZiI+Vl9qIFtCX2Mgw5cgZF08L3RleHQ+CiAgPHRleHQgeD0iMzQwIiB5PSIyMTQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+ICAobG9hZCBmcm9tIEhCTSk8L3RleHQ+CgogIDwhLS0gU3RlcCAxOiBTX2lqID0gUV9pIEtfal5UIC0tPgogIDxyZWN0IHg9IjM0MCIgeT0iMjIyIiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjIyIiByeD0iMyIgZmlsbD0iIzFhMjAzNSIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjIzNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2NjIj5TX2lqID0gUV9pIEAgS19qLlQgLyBzcXJ0KGQpICBbQl9yIMOXIEJfY108L3RleHQ+CgogIDwhLS0gU3RlcCAyOiBjYXVzYWwgbWFzayAtLT4KICA8cmVjdCB4PSIzNDAiIHk9IjI1MCIgd2lkdGg9IjE4MCIgaGVpZ2h0PSIyMiIgcng9IjMiIGZpbGw9IiMxYTIwMzUiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIyNjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjYyI+bWFzayBTX2lqIHVwcGVyLXRyaWFuZ2xlIGlmIGo9PWk8L3RleHQ+CgogIDwhLS0gU3RlcCAzOiBvbmxpbmUgc29mdG1heCB1cGRhdGUgLS0+CiAgPHJlY3QgeD0iMzQwIiB5PSIyNzgiIHdpZHRoPSIxODAiIGhlaWdodD0iNDQiIHJ4PSIzIiBmaWxsPSIjMGUyMzE4IiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMS4yIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIyOTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4ZGRhYSI+bV9uZXcgPSBtYXgobV9pLCByb3dtYXgoU19paikpPC90ZXh0PgogIDx0ZXh0IHg9IjQzMCIgeT0iMzA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4OGRkYWEiPuKEk19pID0gZXhwKG1faeKIkm1fbmV3KcK34oSTX2kgKyDOo2V4cChTX2lq4oiSbV9uZXcpPC90ZXh0PgogIDx0ZXh0IHg9IjQzMCIgeT0iMzIxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4ODgiPm1faSA9IG1fbmV3PC90ZXh0PgoKICA8IS0tIFN0ZXAgNDogYWNjdW11bGF0ZSBvdXRwdXQgLS0+CiAgPHJlY3QgeD0iMzQwIiB5PSIzMjgiIHdpZHRoPSIxODAiIGhlaWdodD0iMzQiIHJ4PSIzIiBmaWxsPSIjMGUyMzE4IiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMS4yIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIzNDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4ZGRhYSI+T19pID0gZXhwKG1fb2xk4oiSbV9uZXcpwrdPX2k8L3RleHQ+CiAgPHRleHQgeD0iNDMwIiB5PSIzNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4ZGRhYSI+ICAgICAgKyBleHAoU19paiDiiJIgbV9uZXcpIEAgVl9qPC90ZXh0PgoKICA8IS0tIHZlcnRpY2FsIGFycm93cyAtLT4KICA8bGluZSB4MT0iNDMwIiB5MT0iMjQ2IiB4Mj0iNDMwIiB5Mj0iMjQ5IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPGxpbmUgeDE9IjQzMCIgeTE9IjI3NCIgeDI9IjQzMCIgeTI9IjI3NyIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxsaW5lIHgxPSI0MzAiIHkxPSIzMjQiIHgyPSI0MzAiIHkyPSIzMjciIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KCiAgPCEtLSBSaWdodCBzaWRlOiBBbGwgc3RheXMgaW4gU1JBTSAtLT4KICA8cmVjdCB4PSI1NDUiIHk9IjE3NiIgd2lkdGg9IjEzMCIgaGVpZ2h0PSIyMDAiIHJ4PSI0IiBmaWxsPSIjMGExYTEyIiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI1IDMiLz4KICA8dGV4dCB4PSI2MTAiIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM0NGNjODgiPkFsbCBpbiBTUkFNPC90ZXh0PgogIDx0ZXh0IHg9IjYxMCIgeT0iMjE0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NmFhODgiPlNfaWogaXMgdHJhbnNpZW50PC90ZXh0PgogIDx0ZXh0IHg9IjYxMCIgeT0iMjMwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NmFhODgiPk5ldmVyIHdyaXR0ZW4gdG8gSEJNPC90ZXh0PgogIDx0ZXh0IHg9IjYxMCIgeT0iMjUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPk9faSwg4oSTX2ksIG1faTwvdGV4dD4KICA8dGV4dCB4PSI2MTAiIHk9IjI2NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij5hY2N1bXVsYXRlIGhlcmU8L3RleHQ+CiAgPHRleHQgeD0iNjEwIiB5PSIyODQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+YWNyb3NzIGFsbCBqPC90ZXh0PgogIDx0ZXh0IHg9IjYxMCIgeT0iMzEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM1NTUiPnVudGlsIGogPSBUX2M8L3RleHQ+CgogIDwhLS0gRmluYWxpemUgc3RlcCAtLT4KICA8cmVjdCB4PSIzNDAiIHk9IjQwMCIgd2lkdGg9IjE4MCIgaGVpZ2h0PSIyNCIgcng9IjMiIGZpbGw9IiMxZTI1NDAiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjQxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2NlMGZmIj5PX2kgLz0g4oSTX2kgIOKGkiB3cml0ZSB0byBIQk0sIHNhdmUgbV9pLCDihJNfaTwvdGV4dD4KICA8bGluZSB4MT0iNDMwIiB5MT0iMzYzIiB4Mj0iNDMwIiB5Mj0iMzk5IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPHRleHQgeD0iMzMwIiB5PSI0MDAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzU1NSI+ZW5kIGo8L3RleHQ+CgogIDwhLS0gQmFja3dhcmQgdGFnIC0tPgogIDxyZWN0IHg9IjY4MCIgeT0iMjUwIiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjgwIiByeD0iNCIgZmlsbD0iIzJhMWExMCIgc3Ryb2tlPSIjZmZhYTQ0IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9Ijc0MCIgeT0iMjY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2ZmY2M2NiI+QmFja3dhcmQgUGFzczwvdGV4dD4KICA8dGV4dCB4PSI3NDAiIHk9IjI4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2M5OTQ0Ij5Vc2VzIHNhdmVkIG1faSwg4oSTX2k8L3RleHQ+CiAgPHRleHQgeD0iNzQwIiB5PSIzMDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjOTk0NCI+dG8gcmVjb21wdXRlIFBfaWo8L3RleHQ+CiAgPHRleHQgeD0iNzQwIiB5PSIzMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjOTk0NCI+dGlsZS1ieS10aWxlIGZyb208L3RleHQ+CiAgPHRleHQgeD0iNzQwIiB5PSIzMzEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjOTk0NCI+USwgSyBpbiBIQk08L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "Diagram showing the FlashAttention tile loop: left panel shows the N×N matrix partitioned into tiles with causal masking, right panel shows the inner loop steps in SRAM",
+          "title": "FlashAttention Forward Pass: Tiling the N×N Attention Matrix"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The outer loop iterates over row blocks of Q (index "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "i"
+          },
+          {
+            "type": "text",
+            "text": "), loading each "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Q_i"
+          },
+          {
+            "type": "text",
+            "text": " block once and holding it in SRAM. The inner loop iterates over column blocks of K, V (index "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "j"
+          },
+          {
+            "type": "text",
+            "text": "), loading "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "K_j"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "V_j"
+          },
+          {
+            "type": "text",
+            "text": " in turn and discarding them after use. For each "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "(i, j)"
+          },
+          {
+            "type": "text",
+            "text": " pair, the kernel:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Computes "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "S_ij = Q_i K_j^T / √d"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (a "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "B_r × B_c"
+                  },
+                  {
+                    "type": "text",
+                    "text": " matmul entirely in SRAM registers)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Applies the causal mask: if "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "j == i"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (diagonal tile), sets the upper-triangular elements of "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "S_ij"
+                  },
+                  {
+                    "type": "text",
+                    "text": " to −∞. If "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "j > i"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (entirely future), skips the tile entirely."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Updates the running maximum: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "m_i_new = max(m_i, rowmax(S_ij))"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rescales the previous accumulator and adds the new contribution: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "O_i = exp(m_i − m_i_new) · O_i + exp(S_ij − m_i_new) @ V_j"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Updates the running denominator: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ℓ_i = exp(m_i − m_i_new) · ℓ_i + rowsum(exp(S_ij − m_i_new))"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After all column blocks are processed, the finalization step normalizes the accumulator: "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "O_i /= ℓ_i"
+          },
+          {
+            "type": "text",
+            "text": ". The result "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "O_i"
+          },
+          {
+            "type": "text",
+            "text": " equals the exact softmax-weighted output for rows "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "i·B_r"
+          },
+          {
+            "type": "text",
+            "text": " through "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "(i+1)·B_r - 1"
+          },
+          {
+            "type": "text",
+            "text": ". "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "O_i"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "m_i"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ℓ_i"
+          },
+          {
+            "type": "text",
+            "text": " are then written to HBM."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Causal Tiling Efficiency"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In causal (autoregressive) attention, the kernel skips all tiles where "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "j > i"
+          },
+          {
+            "type": "text",
+            "text": " — no computation is wasted on masked-out positions. Of the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "T_r × T_c"
+          },
+          {
+            "type": "text",
+            "text": " total tiles, only the lower-triangular half (approximately "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "T_r × T_r / 2"
+          },
+          {
+            "type": "text",
+            "text": " tiles) are computed, plus the diagonal tiles with partial masking. This means causal FlashAttention has roughly half the FLOPs of bidirectional FlashAttention — and for prefill of decoder models, this halves the compute cost:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{FLOPs}_{\\text{causal}} \\approx \\frac{N^2 d}{2} \\quad \\text{vs} \\quad \\text{FLOPs}_{\\text{bidirectional}} = N^2 d"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Backward Pass Recomputation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard backpropagation through attention requires the softmax output "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "P = softmax(S)"
+          },
+          {
+            "type": "text",
+            "text": " to compute gradients. The backward pass needs P to compute "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "∂L/∂V = Pᵀ (∂L/∂O)"
+          },
+          {
+            "type": "text",
+            "text": " and the gradient through the softmax Jacobian. Standard attention stores P as an N×N activation, requiring O(N²) memory."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention's backward pass instead recomputes each "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_r × B_c"
+          },
+          {
+            "type": "text",
+            "text": " tile of P on demand using the forward pass inputs (Q, K — already in HBM for gradient computation) and the stored statistics ("
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "m_i"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ℓ_i"
+          },
+          {
+            "type": "text",
+            "text": " — two scalars per row):"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "P_{ij} = \\text{diag}(\\ell_i)^{-1} \\cdot \\exp\\!\\left(Q_i K_j^T / \\sqrt{d} - m_i\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This recomputation is correct because "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "m_i"
+          },
+          {
+            "type": "text",
+            "text": " is the running maximum that was used to normalize the final softmax, and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ℓ_i"
+          },
+          {
+            "type": "text",
+            "text": " is the exact denominator. The recomputed "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "P_ij"
+          },
+          {
+            "type": "text",
+            "text": " tile is bit-identical to what the forward pass would have materialized for that tile — without ever writing it to HBM during the forward pass."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Reference Implementation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following single-head Python reference implements both the forward tiling and the backward recomputation, making the relationship between stored statistics and recomputed tiles explicit."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch, math\n\ndef flash_attn_forward(\n    q: torch.Tensor,   # (N, d)\n    k: torch.Tensor,   # (N, d)\n    v: torch.Tensor,   # (N, d)\n    block_size: int = 64,\n    causal: bool = True,\n) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:\n    \"\"\"Returns output O, running max m, running sum ℓ.\"\"\"\n    N, d = q.shape\n    scale = d ** -0.5\n    Tr = math.ceil(N / block_size)\n    Tc = math.ceil(N / block_size)\n\n    O = torch.zeros_like(q)\n    m = torch.full((N,), float(\"-inf\"), dtype=q.dtype, device=q.device)\n    l = torch.zeros(N, dtype=q.dtype, device=q.device)\n\n    for i in range(Tr):\n        r0, r1 = i * block_size, min((i + 1) * block_size, N)\n        qi = q[r0:r1]                    # load Q_i into \"SRAM\"\n        oi = torch.zeros_like(qi)        # O accumulator\n        mi = torch.full((r1 - r0,), float(\"-inf\"), dtype=q.dtype, device=q.device)\n        li = torch.zeros(r1 - r0, dtype=q.dtype, device=q.device)\n\n        for j in range(Tc):\n            c0, c1 = j * block_size, min((j + 1) * block_size, N)\n            if causal and c0 >= r1:\n                break  # all future tiles — skip\n\n            kj = k[c0:c1]                # load K_j\n            vj = v[c0:c1]                # load V_j\n            sij = (qi @ kj.T) * scale   # (B_r, B_c) — transient, never stored\n\n            if causal:\n                row_idx = torch.arange(r0, r1, device=q.device).unsqueeze(1)\n                col_idx = torch.arange(c0, c1, device=q.device).unsqueeze(0)\n                sij = sij.masked_fill(col_idx > row_idx, float(\"-inf\"))\n\n            # Online softmax update (all in SRAM)\n            mij_local = sij.max(dim=-1).values\n            mi_new = torch.maximum(mi, mij_local)\n\n            exp_sij = torch.exp(sij - mi_new.unsqueeze(1))  # (B_r, B_c)\n            rescale = torch.exp(mi - mi_new)                  # (B_r,)\n\n            li = rescale * li + exp_sij.sum(dim=-1)\n            oi = rescale.unsqueeze(1) * oi + exp_sij @ vj\n            mi = mi_new\n\n        # Finalize and write O_i, m_i, l_i to \"HBM\"\n        O[r0:r1] = oi / li.unsqueeze(1)\n        m[r0:r1] = mi\n        l[r0:r1] = li\n\n    return O, m, l\n\n\ndef flash_attn_backward_recompute(\n    q: torch.Tensor,   # (N, d)\n    k: torch.Tensor,   # (N, d)\n    v: torch.Tensor,   # (N, d)\n    O: torch.Tensor,   # (N, d) — forward output\n    dO: torch.Tensor,  # (N, d) — upstream gradient\n    m: torch.Tensor,   # (N,) — stored max statistics\n    l: torch.Tensor,   # (N,) — stored sum statistics\n    block_size: int = 64,\n    causal: bool = True,\n) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:\n    \"\"\"Recompute P tile-by-tile without storing it, compute dQ, dK, dV.\"\"\"\n    N, d = q.shape\n    scale = d ** -0.5\n    Tr = math.ceil(N / block_size)\n    Tc = math.ceil(N / block_size)\n\n    dQ = torch.zeros_like(q)\n    dK = torch.zeros_like(k)\n    dV = torch.zeros_like(v)\n\n    # Precompute D_i = rowsum(dO_i * O_i) (scalar per row, for softmax grad)\n    D = (dO * O).sum(dim=-1)  # (N,)\n\n    for i in range(Tr):\n        r0, r1 = i * block_size, min((i + 1) * block_size, N)\n        qi = q[r0:r1]\n        doi = dO[r0:r1]\n        mi = m[r0:r1]\n        li = l[r0:r1]\n        di = D[r0:r1]\n        dqi = torch.zeros_like(qi)\n\n        for j in range(Tc):\n            c0, c1 = j * block_size, min((j + 1) * block_size, N)\n            if causal and c0 >= r1:\n                break\n\n            kj = k[c0:c1]\n            vj = v[c0:c1]\n\n            # RECOMPUTE P_ij from stored statistics (no N×N storage needed)\n            sij = (qi @ kj.T) * scale\n            if causal:\n                row_idx = torch.arange(r0, r1, device=q.device).unsqueeze(1)\n                col_idx = torch.arange(c0, c1, device=q.device).unsqueeze(0)\n                sij = sij.masked_fill(col_idx > row_idx, float(\"-inf\"))\n            Pij = torch.exp(sij - mi.unsqueeze(1)) / li.unsqueeze(1)  # exact tile of P\n\n            # Gradient through P @ V = O:  dV += P.T @ dO\n            dV[c0:c1] += Pij.T @ doi\n\n            # Gradient through softmax: dS_ij = P_ij * (dP_ij - D_i)\n            dPij = doi @ vj.T  # (B_r, B_c)\n            dSij = Pij * (dPij - di.unsqueeze(1))  # (B_r, B_c)\n\n            dqi += dSij @ kj * scale\n            dK[c0:c1] += dSij.T @ qi * scale\n\n        dQ[r0:r1] = dqi\n\n    return dQ, dK, dV\n\n\n# Correctness check\nN, d, B = 128, 64, 32\nq = torch.randn(N, d, requires_grad=True)\nk = torch.randn(N, d)\nv = torch.randn(N, d)\n\n# FlashAttention path\nO_fa, m_fa, l_fa = flash_attn_forward(q.detach(), k, v, block_size=B)\ndO = torch.randn_like(O_fa)\ndQ_fa, dK_fa, dV_fa = flash_attn_backward_recompute(\n    q.detach(), k, v, O_fa, dO, m_fa, l_fa, block_size=B\n)\n\n# Reference eager path\nS = (q.detach() @ k.T) / math.sqrt(d)\nS.masked_fill_(torch.triu(torch.ones(N,N,dtype=torch.bool), diagonal=1), float(\"-inf\"))\nP = S.softmax(dim=-1)\nO_ref = P @ v\n\n# Check forward\nprint(f\"Forward max error: {(O_fa - O_ref).abs().max():.2e}\")\n# Check backward (use autograd for reference)\nq2 = q.detach().clone().requires_grad_(True)\nS2 = (q2 @ k.T) / math.sqrt(d)\nS2.masked_fill_(torch.triu(torch.ones(N,N,dtype=torch.bool),diagonal=1),float(\"-inf\"))\n(S2.softmax(dim=-1) @ v * dO).sum().backward()\nprint(f\"dQ max error:      {(dQ_fa - q2.grad).abs().max():.2e}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recomputation Cost Analysis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Recomputation adds extra FLOPs to the backward pass. The forward pass computes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "S_ij"
+          },
+          {
+            "type": "text",
+            "text": " once; the backward pass recomputes it once more. The overhead in terms of HBM IOs is:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pass"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Standard attention"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FlashAttention"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Forward HBM IO"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N² + Nd)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N²d/M)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Saved activations"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2 × N² elements (S and P)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2 × N elements (m and ℓ)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Backward extra FLOPs"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None (reads stored P)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~N²d recompute of S_ij tiles"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Backward HBM IO"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N² + Nd)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(N²d/M) for recompute + dQ, dK, dV"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Overall wall-clock"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Baseline"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2–7× faster (memory-bound regime)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The recomputation overhead in wall-clock terms is small because GPU attention is IO-bound, not compute-bound. Re-reading Q and K from HBM costs O(Nd) per tile pass — much less than the N² HBM cost of storing and re-reading S and P. At N = 8192, the recomputation adds roughly 5–10% to backward pass time while saving over 128 MB of activation memory per layer."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Debugging Tile Correctness"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch, math\n\ndef check_tile_correctness(\n    N: int = 256,\n    d: int = 64,\n    block_size: int = 32,\n    atol: float = 1e-4,\n) -> None:\n    \"\"\"\n    Verify that the tiled forward and recomputed backward match\n    exact PyTorch eager attention across multiple random seeds.\n    \"\"\"\n    for seed in range(5):\n        torch.manual_seed(seed)\n        q = torch.randn(N, d, dtype=torch.float32)\n        k = torch.randn(N, d, dtype=torch.float32)\n        v = torch.randn(N, d, dtype=torch.float32)\n        dO = torch.randn(N, d, dtype=torch.float32)\n\n        # Reference\n        S = (q @ k.T) / math.sqrt(d)\n        mask = torch.triu(torch.ones(N, N, dtype=torch.bool), diagonal=1)\n        S.masked_fill_(mask, float(\"-inf\"))\n        P = S.softmax(dim=-1)\n        O_ref = P @ v\n        D = (dO * O_ref).sum(dim=-1)\n        dP = dO @ v.T\n        dS = P * (dP - D.unsqueeze(1))\n        dQ_ref = dS @ k / math.sqrt(d)\n        dK_ref = dS.T @ q / math.sqrt(d)\n        dV_ref = P.T @ dO\n\n        # Tiled implementation\n        O_fa, m_fa, l_fa = flash_attn_forward(q, k, v, block_size)\n        dQ_fa, dK_fa, dV_fa = flash_attn_backward_recompute(\n            q, k, v, O_fa, dO, m_fa, l_fa, block_size\n        )\n\n        assert (O_fa - O_ref).abs().max() < atol, f\"Forward mismatch at seed {seed}\"\n        assert (dQ_fa - dQ_ref).abs().max() < atol, f\"dQ mismatch at seed {seed}\"\n        assert (dK_fa - dK_ref).abs().max() < atol, f\"dK mismatch at seed {seed}\"\n        assert (dV_fa - dV_ref).abs().max() < atol, f\"dV mismatch at seed {seed}\"\n\n    print(f\"All correctness checks passed (N={N}, d={d}, B={block_size})\")\n\ncheck_tile_correctness()\ncheck_tile_correctness(N=512, block_size=64)\n"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Tiling and recomputation are FlashAttention's two algorithmic pillars. Tiling turns HBM-bound three-kernel attention into a single pass where intermediate N×N tiles are computed and discarded entirely within SRAM. Recomputation leverages the two N-length statistics (running max and running sum) produced by the forward pass to reconstruct any tile of the attention matrix in the backward pass. The combination achieves the best possible outcome: exact arithmetic, O(N) activation memory, and 2–7× wall-clock speedup — entirely through algorithmic restructuring, with no approximation. Understanding this design makes it straightforward to reason about when FlashAttention can be applied (any scenario where an N×N attention matrix would otherwise be materialized) and when it cannot (attention with per-element custom masks that require the full N×N to be resident in memory)."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

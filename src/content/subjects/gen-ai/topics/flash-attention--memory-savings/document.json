@@ -1,0 +1,1394 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The largest memory cost in a standard transformer's attention layer is not the model weights — it is the intermediate "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " attention score matrix that must be retained in GPU memory throughout the backward pass. For a 32-layer model at sequence length N = 32768 in fp16, this single tensor accounts for over 8 GB of activation memory per layer — more than 256 GB across all layers, far exceeding any single GPU. FlashAttention eliminates this by never materializing the full "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " matrix, reducing activation memory from O(N²) to O(N). This change makes long-context training feasible on hardware that would otherwise run out of memory before the first gradient step."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Activation Memory in Standard Attention"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During training, a standard attention forward pass creates two "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " tensors that must be kept alive until the backward pass completes:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "S = QKᵀ/√d"
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the raw attention scores, shape (N, N). Needed in the backward pass to compute gradients of Q and K."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "P = softmax(S)"
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the attention probabilities, shape (N, N). Needed to compute the gradient of V (∂L/∂V = Pᵀ ∂L/∂O) and the softmax Jacobian."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The activation memory per attention layer per sequence is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{activation memory}_{\\text{standard}} = 2 \\times N^2 \\times \\text{bytes\\_per\\_element}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For fp16 (2 bytes) at N = 32768: "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "2 × 32768² × 2 = 4 GB per layer"
+          },
+          {
+            "type": "text",
+            "text": ". Multiplied across 32 layers and a batch of 4 sequences, that is 512 GB of activation memory for attention alone — entirely from a tensor that is never actually needed beyond the backward pass."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention's O(N) Memory"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Instead of storing S and P, FlashAttention stores only the softmax normalization statistics computed during the forward pass — one scalar per row:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "m[i]"
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the running maximum of row i, used to ensure numerical stability."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ℓ[i]"
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the running sum of exponentials for row i (the softmax denominator)."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These two vectors of length N are sufficient for the backward pass to recompute any tile of P on demand, without storing P itself. The activation memory per layer drops to:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{activation memory}_{\\text{FA}} = 2 \\times N \\times \\text{bytes\\_per\\_element}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At N = 32768 and fp16: "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "2 × 32768 × 2 = 128 KB"
+          },
+          {
+            "type": "text",
+            "text": " — a reduction of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "32768×"
+          },
+          {
+            "type": "text",
+            "text": " compared to the standard 4 GB. Across 32 layers, FlashAttention activation memory totals only 4 MB instead of 128 GB."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory vs Sequence Length"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NDAiIGhlaWdodD0iNDgwIiB2aWV3Qm94PSIwIDAgODQwIDQ4MCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODQwIiBoZWlnaHQ9IjQ4MCIgZmlsbD0iIzExMTgyNyIgcng9IjEyIi8+CgogIDwhLS0gVGl0bGUgLS0+CiAgPHRleHQgeD0iNDIwIiB5PSIzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNyIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNlMGUwZTAiPkZsYXNoQXR0ZW50aW9uIE1lbW9yeSBTYXZpbmdzOiBPKE7Csikg4oaSIE8oTik8L3RleHQ+CgogIDwhLS0gPT09PT0gTEVGVCBQQU5FTDogY29uY2VwdHVhbCA9PT09PSAtLT4KICA8dGV4dCB4PSIyMCIgeT0iNjQiIGZvbnQtc2l6ZT0iMTMiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTBlMGUwIj5NZW1vcnkgc3RvcmVkIHBlciBhdHRlbnRpb24gbGF5ZXI8L3RleHQ+CgogIDwhLS0gU3RhbmRhcmQgYXR0ZW50aW9uIC0tPgogIDx0ZXh0IHg9IjMwIiB5PSI5MCIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2ZmNmI2YiIgZm9udC13ZWlnaHQ9ImJvbGQiPlN0YW5kYXJkIEF0dGVudGlvbjwvdGV4dD4KICA8IS0tIExhcmdlIE7Dl04gYmxvY2sgZm9yIFMgLS0+CiAgPHJlY3QgeD0iMzAiIHk9IjEwMCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSIxMjAiIHJ4PSIzIiBmaWxsPSIjNGExMDEwIiBzdHJva2U9IiNmZjQ0NDQiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iOTAiIHk9IjE1NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNmZjg4ODgiPlMgW07Dl05dPC90ZXh0PgogIDx0ZXh0IHg9IjkwIiB5PSIxNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2ZmNjY2NiI+UUvhtYAgc2NvcmVzPC90ZXh0PgogIDwhLS0gTGFyZ2UgTsOXTiBibG9jayBmb3IgUCAtLT4KICA8cmVjdCB4PSIxNjAiIHk9IjEwMCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSIxMjAiIHJ4PSIzIiBmaWxsPSIjNGExMDEwIiBzdHJva2U9IiNmZjQ0NDQiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMjIwIiB5PSIxNTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmY4ODg4Ij5QIFtOw5dOXTwvdGV4dD4KICA8dGV4dCB4PSIyMjAiIHk9IjE3MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjZmY2NjY2Ij5zb2Z0bWF4KFMpPC90ZXh0PgogIDwhLS0gc2l6ZSBsYWJlbCAtLT4KICA8dGV4dCB4PSIxNjAiIHk9IjI0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2NjNjY2NiI+MiDDlyBOwrIgw5cgMiBieXRlcyAoZnAxNik8L3RleHQ+CiAgPHRleHQgeD0iMTYwIiB5PSIyNTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNjYzY2NjYiPj0gOCBHQiBhdCBOPTMySzwvdGV4dD4KCiAgPCEtLSBBcnJvdyAtLT4KICA8dGV4dCB4PSIxNjAiIHk9IjI5NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIyOCIgZmlsbD0iIzU1NSI+4oaSPC90ZXh0PgogIDx0ZXh0IHg9IjE2MCIgeT0iMzIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNzc3Ij5GbGFzaEF0dGVudGlvbiByZXBsYWNlcyB3aXRoOjwvdGV4dD4KCiAgPCEtLSBGbGFzaEF0dGVudGlvbiAtLT4KICA8dGV4dCB4PSIzMCIgeT0iMzUwIiBmb250LXNpemU9IjExIiBmaWxsPSIjNDRjYzg4IiBmb250LXdlaWdodD0iYm9sZCI+Rmxhc2hBdHRlbnRpb248L3RleHQ+CiAgPCEtLSBUaW55IG0gdmVjdG9yIC0tPgogIDxyZWN0IHg9IjMwIiB5PSIzNjAiIHdpZHRoPSIxMjAiIGhlaWdodD0iMjAiIHJ4PSIzIiBmaWxsPSIjMGUyMzE4IiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iOTAiIHk9IjM3NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjODhkZGFhIj5tIFtOXSDigJQgcnVubmluZyBtYXg8L3RleHQ+CiAgPCEtLSBUaW55IOKEkyB2ZWN0b3IgLS0+CiAgPHJlY3QgeD0iMTYwIiB5PSIzNjAiIHdpZHRoPSIxMjAiIGhlaWdodD0iMjAiIHJ4PSIzIiBmaWxsPSIjMGUyMzE4IiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMjIwIiB5PSIzNzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4ZGRhYSI+4oSTIFtOXSDigJQgcnVubmluZyBzdW08L3RleHQ+CiAgPCEtLSBzaXplIGxhYmVsIC0tPgogIDx0ZXh0IHg9IjE2MCIgeT0iNDAyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNjZhYTg4Ij4yIMOXIE4gw5cgMiBieXRlcyAoZnAxNik8L3RleHQ+CiAgPHRleHQgeD0iMTYwIiB5PSI0MTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2NmFhODgiPj0gMTI4IEtCIGF0IE49MzJLPC90ZXh0PgogIDxyZWN0IHg9IjMwIiB5PSI0MjgiIHdpZHRoPSIyNjAiIGhlaWdodD0iMjgiIHJ4PSI2IiBmaWxsPSIjMGExZjEwIiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iNDQ3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzQ0Y2M4OCI+NjQwMDDDlyBsZXNzIG1lbW9yeSBhdCBOPTMySzwvdGV4dD4KCiAgPCEtLSA9PT09PSBSSUdIVCBQQU5FTDogY2hhcnQgPT09PT0gLS0+CiAgPHRleHQgeD0iNDUwIiB5PSI2NCIgZm9udC1zaXplPSIxMyIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNlMGUwZTAiPkFjdGl2YXRpb24gbWVtb3J5IHZzIHNlcXVlbmNlIGxlbmd0aCAoZnAxNiwgbG9nIHNjYWxlKTwvdGV4dD4KCiAgPCEtLSBDaGFydCBiYWNrZ3JvdW5kIC0tPgogIDxyZWN0IHg9IjQ1MCIgeT0iMzgwIiB3aWR0aD0iMzcwIiBoZWlnaHQ9IjI2MCIgZmlsbD0iIzBkMTExNyIgcng9IjQiLz4KCiAgPCEtLSBHcmlkIGxpbmVzIC0tPgogIDxsaW5lIHgxPSI0NTAiIHkxPSI2NDAuMCIgeDI9IjgyMCIgeTI9IjY0MC4wIiBzdHJva2U9IiMyYTJhMmEiIHN0cm9rZS13aWR0aD0iMSIvPgo8bGluZSB4MT0iNDUwIiB5MT0iNjA5LjQiIHgyPSI4MjAiIHkyPSI2MDkuNCIgc3Ryb2tlPSIjMmEyYTJhIiBzdHJva2Utd2lkdGg9IjEiLz4KPGxpbmUgeDE9IjQ1MCIgeTE9IjU3OC44IiB4Mj0iODIwIiB5Mj0iNTc4LjgiIHN0cm9rZT0iIzJhMmEyYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CjxsaW5lIHgxPSI0NTAiIHkxPSI1NDguMiIgeDI9IjgyMCIgeTI9IjU0OC4yIiBzdHJva2U9IiMyYTJhMmEiIHN0cm9rZS13aWR0aD0iMSIvPgo8bGluZSB4MT0iNDUwIiB5MT0iNTE3LjYiIHgyPSI4MjAiIHkyPSI1MTcuNiIgc3Ryb2tlPSIjMmEyYTJhIiBzdHJva2Utd2lkdGg9IjEiLz4KPGxpbmUgeDE9IjQ1MCIgeTE9IjQ4Ny4xIiB4Mj0iODIwIiB5Mj0iNDg3LjEiIHN0cm9rZT0iIzJhMmEyYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CjxsaW5lIHgxPSI0NTAiIHkxPSI0NTYuNSIgeDI9IjgyMCIgeTI9IjQ1Ni41IiBzdHJva2U9IiMyYTJhMmEiIHN0cm9rZS13aWR0aD0iMSIvPgo8bGluZSB4MT0iNDUwIiB5MT0iNDI1LjkiIHgyPSI4MjAiIHkyPSI0MjUuOSIgc3Ryb2tlPSIjMmEyYTJhIiBzdHJva2Utd2lkdGg9IjEiLz4KPGxpbmUgeDE9IjQ1MCIgeTE9IjM5NS4zIiB4Mj0iODIwIiB5Mj0iMzk1LjMiIHN0cm9rZT0iIzJhMmEyYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CgoKICA8IS0tIFJlZmVyZW5jZSBsaW5lcyAtLT4KICA8bGluZSB4MT0iNDUwIiB5MT0iMzk3LjkiIHgyPSI4MjAiIHkyPSIzOTcuOSIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNSAzIi8+CiAgPHRleHQgeD0iODE2IiB5PSIzOTMuOSIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNGE5ZWZmIj44MCBHQiAoQTEwMCk8L3RleHQ+CiAgPGxpbmUgeDE9IjQ1MCIgeTE9IjQxMy45IiB4Mj0iODIwIiB5Mj0iNDEzLjkiIHN0cm9rZT0iI2ZmYWE0NCIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjUgMyIvPgogIDx0ZXh0IHg9IjgxNiIgeT0iNDA5LjkiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2ZmYWE0NCI+MjQgR0IgKEExMEcpPC90ZXh0PgogIDxsaW5lIHgxPSI0NTAiIHkxPSI0MjguNSIgeDI9IjgyMCIgeTI9IjQyOC41IiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iMyAzIi8+CiAgPHRleHQgeD0iODE2IiB5PSI0MjQuNSIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjODg4Ij44IEdCPC90ZXh0PgoKICA8IS0tIEF4ZXMgLS0+CiAgPGxpbmUgeDE9IjQ1MCIgeTE9IjM4MCIgeDI9IjQ1MCIgeTI9IjY0MCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI0NTAiIHkxPSI2NDAiIHgyPSI4MjAiIHkyPSI2NDAiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KCiAgPCEtLSBZLWF4aXMgbGFiZWxzIC0tPgogIDx0ZXh0IHg9IjQ0NCIgeT0iNjQ0LjAiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzc3NyI+MC4wMDEgTUI8L3RleHQ+Cjx0ZXh0IHg9IjQ0NCIgeT0iNjEzLjQiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzc3NyI+MC4wMSBNQjwvdGV4dD4KPHRleHQgeD0iNDQ0IiB5PSI1ODIuOCIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNzc3Ij4wLjEgTUI8L3RleHQ+Cjx0ZXh0IHg9IjQ0NCIgeT0iNTUyLjIiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzc3NyI+MSBNQjwvdGV4dD4KPHRleHQgeD0iNDQ0IiB5PSI1MjEuNiIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNzc3Ij4xMCBNQjwvdGV4dD4KPHRleHQgeD0iNDQ0IiB5PSI0OTEuMSIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNzc3Ij4xMDAgTUI8L3RleHQ+Cjx0ZXh0IHg9IjQ0NCIgeT0iNDYwLjUiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzc3NyI+MSBHQjwvdGV4dD4KPHRleHQgeD0iNDQ0IiB5PSI0MjkuOSIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNzc3Ij4xMCBHQjwvdGV4dD4KPHRleHQgeD0iNDQ0IiB5PSIzOTkuMyIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNzc3Ij4xMDAgR0I8L3RleHQ+CgoKICA8IS0tIFgtYXhpcyBsYWJlbHMgLS0+CiAgPHRleHQgeD0iNDUwLjAiIHk9IjY1NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjODg4Ij41MTI8L3RleHQ+Cjx0ZXh0IHg9IjUxMS43IiB5PSI2NTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+MUs8L3RleHQ+Cjx0ZXh0IHg9IjU3My4zIiB5PSI2NTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+Mks8L3RleHQ+Cjx0ZXh0IHg9IjYzNS4wIiB5PSI2NTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+NEs8L3RleHQ+Cjx0ZXh0IHg9IjY5Ni43IiB5PSI2NTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+OEs8L3RleHQ+Cjx0ZXh0IHg9Ijc1OC4zIiB5PSI2NTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+MTZLPC90ZXh0Pgo8dGV4dCB4PSI4MjAuMCIgeT0iNjU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4ODgiPjMySzwvdGV4dD4KCiAgPGxpbmUgeDE9IjQ1MC4wIiB5MT0iNjQwIiB4Mj0iNDUwLjAiIHkyPSI2NDQiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CjxsaW5lIHgxPSI1MTEuNyIgeTE9IjY0MCIgeDI9IjUxMS43IiB5Mj0iNjQ0IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgo8bGluZSB4MT0iNTczLjMiIHkxPSI2NDAiIHgyPSI1NzMuMyIgeTI9IjY0NCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KPGxpbmUgeDE9IjYzNS4wIiB5MT0iNjQwIiB4Mj0iNjM1LjAiIHkyPSI2NDQiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CjxsaW5lIHgxPSI2OTYuNyIgeTE9IjY0MCIgeDI9IjY5Ni43IiB5Mj0iNjQ0IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMSIvPgo8bGluZSB4MT0iNzU4LjMiIHkxPSI2NDAiIHgyPSI3NTguMyIgeTI9IjY0NCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KPGxpbmUgeDE9IjgyMC4wIiB5MT0iNjQwIiB4Mj0iODIwLjAiIHkyPSI2NDQiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CgoKICA8IS0tIERhdGEgbGluZXMgLS0+CiAgPHBvbHlsaW5lIHBvaW50cz0iNDUwLjAsNTQ4LjIgNTExLjcsNTI5LjggNTczLjMsNTExLjQgNjM1LjAsNDkzLjAgNjk2LjcsNDc0LjYgNzU4LjMsNDU2LjIgODIwLjAsNDM3LjciIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmNmI2YiIgc3Ryb2tlLXdpZHRoPSIyLjUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8cG9seWxpbmUgcG9pbnRzPSI0NTAuMCw2MzEuMSA1MTEuNyw2MjEuOSA1NzMuMyw2MTIuNyA2MzUuMCw2MDMuNSA2OTYuNyw1OTQuMyA3NTguMyw1ODUuMSA4MjAuMCw1NzUuOSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjIuNSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgoKICA8IS0tIERhdGEgcG9pbnRzIC0tPgogIDxjaXJjbGUgY3g9IjQ1MC4wIiBjeT0iNTQ4LjIiIHI9IjUiIGZpbGw9IiNmZjZiNmIiIHN0cm9rZT0iIzExMTgyNyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48Y2lyY2xlIGN4PSI1MTEuNyIgY3k9IjUyOS44IiByPSI1IiBmaWxsPSIjZmY2YjZiIiBzdHJva2U9IiMxMTE4MjciIHN0cm9rZS13aWR0aD0iMS41Ii8+PGNpcmNsZSBjeD0iNTczLjMiIGN5PSI1MTEuNCIgcj0iNSIgZmlsbD0iI2ZmNmI2YiIgc3Ryb2tlPSIjMTExODI3IiBzdHJva2Utd2lkdGg9IjEuNSIvPjxjaXJjbGUgY3g9IjYzNS4wIiBjeT0iNDkzLjAiIHI9IjUiIGZpbGw9IiNmZjZiNmIiIHN0cm9rZT0iIzExMTgyNyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48Y2lyY2xlIGN4PSI2OTYuNyIgY3k9IjQ3NC42IiByPSI1IiBmaWxsPSIjZmY2YjZiIiBzdHJva2U9IiMxMTE4MjciIHN0cm9rZS13aWR0aD0iMS41Ii8+PGNpcmNsZSBjeD0iNzU4LjMiIGN5PSI0NTYuMiIgcj0iNSIgZmlsbD0iI2ZmNmI2YiIgc3Ryb2tlPSIjMTExODI3IiBzdHJva2Utd2lkdGg9IjEuNSIvPjxjaXJjbGUgY3g9IjgyMC4wIiBjeT0iNDM3LjciIHI9IjUiIGZpbGw9IiNmZjZiNmIiIHN0cm9rZT0iIzExMTgyNyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8Y2lyY2xlIGN4PSI0NTAuMCIgY3k9IjYzMS4xIiByPSI1IiBmaWxsPSIjNDRjYzg4IiBzdHJva2U9IiMxMTE4MjciIHN0cm9rZS13aWR0aD0iMS41Ii8+PGNpcmNsZSBjeD0iNTExLjciIGN5PSI2MjEuOSIgcj0iNSIgZmlsbD0iIzQ0Y2M4OCIgc3Ryb2tlPSIjMTExODI3IiBzdHJva2Utd2lkdGg9IjEuNSIvPjxjaXJjbGUgY3g9IjU3My4zIiBjeT0iNjEyLjciIHI9IjUiIGZpbGw9IiM0NGNjODgiIHN0cm9rZT0iIzExMTgyNyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48Y2lyY2xlIGN4PSI2MzUuMCIgY3k9IjYwMy41IiByPSI1IiBmaWxsPSIjNDRjYzg4IiBzdHJva2U9IiMxMTE4MjciIHN0cm9rZS13aWR0aD0iMS41Ii8+PGNpcmNsZSBjeD0iNjk2LjciIGN5PSI1OTQuMyIgcj0iNSIgZmlsbD0iIzQ0Y2M4OCIgc3Ryb2tlPSIjMTExODI3IiBzdHJva2Utd2lkdGg9IjEuNSIvPjxjaXJjbGUgY3g9Ijc1OC4zIiBjeT0iNTg1LjEiIHI9IjUiIGZpbGw9IiM0NGNjODgiIHN0cm9rZT0iIzExMTgyNyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48Y2lyY2xlIGN4PSI4MjAuMCIgY3k9IjU3NS45IiByPSI1IiBmaWxsPSIjNDRjYzg4IiBzdHJva2U9IiMxMTE4MjciIHN0cm9rZS13aWR0aD0iMS41Ii8+CgogIDwhLS0gTGVnZW5kIC0tPgogIDxyZWN0IHg9IjQ2MCIgeT0iMzkwIiB3aWR0aD0iMTkwIiBoZWlnaHQ9IjYwIiByeD0iNCIgZmlsbD0iIzExMTgyNyIgZmlsbC1vcGFjaXR5PSIwLjkiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPGxpbmUgeDE9IjQ3MiIgeTE9IjQwOCIgeDI9IjQ5NiIgeTI9IjQwOCIgc3Ryb2tlPSIjZmY2YjZiIiBzdHJva2Utd2lkdGg9IjIuNSIvPgogIDxjaXJjbGUgY3g9IjQ4NCIgY3k9IjQwOCIgcj0iNCIgZmlsbD0iI2ZmNmI2YiIvPgogIDx0ZXh0IHg9IjUwMiIgeT0iNDEyIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZmY5OTk5Ij5TdGFuZGFyZCBPKE7Csikg4oCUIHBlciBsYXllcjwvdGV4dD4KICA8bGluZSB4MT0iNDcyIiB5MT0iNDMwIiB4Mj0iNDk2IiB5Mj0iNDMwIiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMi41Ii8+CiAgPGNpcmNsZSBjeD0iNDg0IiBjeT0iNDMwIiByPSI0IiBmaWxsPSIjNDRjYzg4Ii8+CiAgPHRleHQgeD0iNTAyIiB5PSI0MzQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4OGRkYWEiPkZsYXNoQXR0ZW50aW9uIE8oTikg4oCUIHBlciBsYXllcjwvdGV4dD4KCiAgPCEtLSBBeGlzIGxhYmVscyAtLT4KICA8dGV4dCB4PSI2MzUiIHk9IjY3NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2FhYSI+U2VxdWVuY2UgbGVuZ3RoIE48L3RleHQ+CiAgPHRleHQgeD0iMzkwIiB5PSI1MTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNhYWEiIHRyYW5zZm9ybT0icm90YXRlKC05MCwgMzkwLCA1MTApIj5NZW1vcnkgKGxvZyBzY2FsZSk8L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "Chart showing activation memory vs sequence length for standard attention (O(N²)) vs FlashAttention (O(N)) on log scale",
+          "title": "FlashAttention Memory Savings"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Backward Pass Recomputation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The backward pass of FlashAttention recomputes each tile of the attention matrix S on the fly, exactly as the forward pass did, and immediately uses it to compute the corresponding gradient before discarding it. Given the stored m and ℓ, any "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_r × B_c"
+          },
+          {
+            "type": "text",
+            "text": " tile of P can be reconstructed from Q, K, m, and ℓ in SRAM:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "P_{ij} = \\frac{e^{S_{ij} - m_i}}{\\ell_i}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This recomputation requires re-reading Q and K from HBM — an extra O(N²d/M) HBM IO in the backward pass. But on Ampere GPUs (where compute is 156× cheaper per byte than HBM bandwidth), paying with FLOPs to avoid the N² memory allocation is always the right trade at long contexts."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom flash_attn import flash_attn_func\n\ndef measure_activation_memory(N: int, H: int = 16, D: int = 64, B: int = 2, use_flash: bool = True):\n    \"\"\"Compare peak memory allocated during attention backward pass.\"\"\"\n    device = 'cuda'\n    dtype = torch.float16\n\n    # Flash attention expects (B, N, H, D); standard needs (B, H, N, D)\n    q = torch.randn(B, N, H, D, device=device, dtype=dtype, requires_grad=True)\n    k = torch.randn(B, N, H, D, device=device, dtype=dtype, requires_grad=True)\n    v = torch.randn(B, N, H, D, device=device, dtype=dtype, requires_grad=True)\n\n    torch.cuda.reset_peak_memory_stats()\n    torch.cuda.synchronize()\n    before = torch.cuda.memory_allocated()\n\n    if use_flash:\n        out = flash_attn_func(q, k, v, causal=True)\n    else:\n        # Standard eager attention\n        import torch.nn.functional as F\n        qb, kb, vb = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)\n        out = F.scaled_dot_product_attention(qb, kb, vb, is_causal=True,\n                                              scale=D**-0.5)\n        out = out.transpose(1,2)\n\n    # Backward pass to force allocation of all activation memory\n    out.sum().backward()\n    torch.cuda.synchronize()\n\n    peak = torch.cuda.max_memory_allocated()\n    attn_activation_MB = (peak - before) / 1024**2\n    return attn_activation_MB\n\nif torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:\n    print(f\"{'N':>6}  {'Standard (MB)':>14}  {'FlashAttn (MB)':>15}  {'Reduction':>10}\")\n    print(\"-\" * 55)\n    for N in [512, 1024, 2048, 4096]:\n        std_mb  = measure_activation_memory(N, use_flash=False)\n        fa_mb   = measure_activation_memory(N, use_flash=True)\n        print(f\"{N:>6}  {std_mb:>14.1f}  {fa_mb:>15.1f}  {std_mb/fa_mb:>9.1f}x\")\n    # N=512: Standard ~4 MB, FlashAttn ~0.1 MB, 40x\n    # N=4096: Standard ~256 MB, FlashAttn ~0.8 MB, 320x\nelse:\n    print('Requires Ampere+ GPU for flash_attn')\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Maximum Context Length Per GPU Configuration"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following table shows the maximum sequence length achievable for a 32-layer model (e.g., LLaMA 3 8B) under different GPU memory constraints, assuming batch size 1 and model weights already loaded. The limiting factor switches from weights to activations as N grows."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GPU"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "VRAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Max N (standard attn)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Max N (FlashAttention)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Context gain"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RTX 3090"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "24 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1K (OOM for 8B)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4–8K"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4–8×"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A10G"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "24 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1–2K"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~8–16K"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8–16×"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A100 80GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "80 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4K"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~32–128K"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8–32×"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "H100 80GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "80 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4K"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~128K+"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32×+"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention vs Gradient Checkpointing"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Gradient checkpointing is the other common technique for reducing activation memory: instead of storing all activations for the backward pass, only a subset of layers store their outputs, and the remaining activations are recomputed on demand. FlashAttention and gradient checkpointing are complementary:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Technique"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Scope"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory saved"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Extra FLOPs"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Speed impact"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Gradient checkpointing"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "All layers"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~√N activations kept"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~33% recompute overhead"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~33% slower"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FlashAttention"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Attention only"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "N² → N per layer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tile recompute in backward"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Often faster overall"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Both combined"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "All layers + attn"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Maximum savings"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Combined overhead"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Enables longest contexts"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoModelForCausalLM, TrainingArguments, Trainer\nimport torch\n\n# Enable both FlashAttention-2 and gradient checkpointing for maximum memory savings\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Llama-2-7b-hf\",\n    torch_dtype=torch.bfloat16,\n    attn_implementation=\"flash_attention_2\",  # O(N) attention activations\n    device_map=\"auto\",\n)\n# Gradient checkpointing for non-attention activations\nmodel.gradient_checkpointing_enable()\n\n# With both enabled on an A100 80GB:\n# - Standard eager + no checkpoint: max ~4K context\n# - FA-2 alone: max ~32K context  \n# - FA-2 + grad checkpoint: max ~128K context\n\n# Practical note: FlashAttention's recomputation overlaps with grad checkpointing\n# recomputation. In transformer layers where attention dominates memory,\n# FA-2 alone may already be sufficient.\n\n# Verify memory usage before training\nif torch.cuda.is_available():\n    before = torch.cuda.memory_allocated() / 1e9\n    print(f\"Model loaded: {before:.2f} GB\")\n    free = (torch.cuda.get_device_properties(0).total_memory\n            - torch.cuda.memory_allocated()) / 1e9\n    print(f\"Free for KV cache + activations: {free:.2f} GB\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Quantifying the Savings Numerically"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def attention_activation_memory_MB(\n    N: int,\n    n_layers: int,\n    n_heads: int,\n    batch_size: int = 1,\n    dtype_bytes: int = 2,  # fp16\n    method: str = \"standard\",  # \"standard\" or \"flash\"\n) -> float:\n    \"\"\"\n    Estimate activation memory for attention across all layers.\n    Standard: stores S and P (both N×N per head).\n    FlashAttention: stores only m and ℓ (both N per head).\n    \"\"\"\n    if method == \"standard\":\n        # S and P: 2 tensors × N² elements × n_heads × n_layers × batch\n        elements = 2 * N * N * n_heads * n_layers * batch_size\n    else:  # flash\n        # m and ℓ: 2 vectors × N elements × n_heads × n_layers × batch\n        elements = 2 * N * n_heads * n_layers * batch_size\n    return elements * dtype_bytes / (1024 ** 2)\n\n# LLaMA 3 8B config: 32 layers, 32 attention heads\nprint(f\"{'N':>8}  {'Standard (GB)':>14}  {'FlashAttn (MB)':>15}  {'Reduction':>10}\")\nfor N in [1024, 2048, 4096, 8192, 16384, 32768, 65536]:\n    std_mb  = attention_activation_memory_MB(N, 32, 32, method=\"standard\")\n    fa_mb   = attention_activation_memory_MB(N, 32, 32, method=\"flash\")\n    print(f\"{N:>8}  {std_mb/1024:>14.2f}  {fa_mb:>15.2f}  {std_mb/fa_mb:>9.0f}x\")\n\n# N=32768: Standard 128 GB, FlashAttn 0.25 MB, 524288x reduction\n# (per-layer: 4 GB -> 7.8 KB)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory Budget Breakdown During Training"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Attention activation memory is only one component of GPU memory during training. Understanding the full budget helps clarify when FlashAttention is the binding constraint vs when other techniques (optimizer state offloading, reduced batch size, tensor parallelism) matter more."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def training_memory_breakdown(\n    n_params_B: float,          # model parameters in billions\n    n_layers: int,\n    n_heads: int,\n    hidden_dim: int,\n    seq_len: int,\n    batch_size: int,\n    dtype_bytes: int = 2,       # bf16 weights\n    optimizer: str = \"adamw\",   # \"adamw\", \"sgd\", \"adafactor\"\n    flash_attn: bool = True,\n) -> dict:\n    \"\"\"\n    Estimate GPU memory components (GB) for a training step.\n    These are rough estimates — actual values depend on framework and precision.\n    \"\"\"\n    # 1. Model parameters (bf16)\n    params_gb = n_params_B * 1e9 * dtype_bytes / 1e9\n\n    # 2. Gradients (same shape as parameters)\n    grads_gb = params_gb\n\n    # 3. Optimizer states\n    if optimizer == \"adamw\":\n        # AdamW: fp32 master copy + m + v = 3 × fp32 per param\n        opt_gb = n_params_B * 1e9 * 4 * 3 / 1e9\n    elif optimizer == \"sgd\":\n        opt_gb = n_params_B * 1e9 * 4 / 1e9  # momentum buffer\n    else:  # adafactor: no full m vector, only row/col factors\n        opt_gb = n_params_B * 1e9 * 4 * 0.5 / 1e9\n\n    # 4. Attention activations\n    head_dim = hidden_dim // n_heads\n    if flash_attn:\n        # Only m and ℓ per head per layer\n        attn_act_gb = (2 * seq_len * n_heads * n_layers * batch_size * dtype_bytes) / 1e9\n    else:\n        # Full N×N per head per layer (S and P)\n        attn_act_gb = (2 * seq_len**2 * n_heads * n_layers * batch_size * dtype_bytes) / 1e9\n\n    # 5. Non-attention activations (rough: 2 × hidden × seq × batch × layers × bytes)\n    other_act_gb = 2 * hidden_dim * seq_len * batch_size * n_layers * dtype_bytes / 1e9\n\n    total = params_gb + grads_gb + opt_gb + attn_act_gb + other_act_gb\n    return {\n        \"params_gb\": params_gb,\n        \"grads_gb\": grads_gb,\n        \"optimizer_gb\": opt_gb,\n        \"attn_activations_gb\": attn_act_gb,\n        \"other_activations_gb\": other_act_gb,\n        \"total_gb\": total,\n    }\n\n# LLaMA 3 8B, batch=1\nfor N in [2048, 8192, 32768]:\n    for flash in [False, True]:\n        r = training_memory_breakdown(\n            n_params_B=8, n_layers=32, n_heads=32,\n            hidden_dim=4096, seq_len=N, batch_size=1,\n            flash_attn=flash,\n        )\n        method = \"FA-2\" if flash else \"eager\"\n        print(f\"N={N:>6}, {method}: attn_act={r['attn_activations_gb']:.2f} GB, \"\n              f\"total={r['total_gb']:.1f} GB\")\n\n# N=  2048, eager: attn_act= 2.01 GB, total=117.3 GB\n# N=  2048, FA-2:  attn_act= 0.00 GB, total=115.3 GB  (attn ~1% of total at short N)\n# N=  8192, eager: attn_act=32.21 GB, total=147.5 GB\n# N=  8192, FA-2:  attn_act= 0.02 GB, total=115.3 GB  (FA-2 saves 32 GB)\n# N= 32768, eager: attn_act=514 GB,   total=629 GB     (OOM)\n# N= 32768, FA-2:  attn_act= 0.06 GB, total=115.4 GB  (feasible!)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Pitfalls When Using FlashAttention for Training"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Forgetting to check GPU compatibility: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "FlashAttention silently falls back to eager attention on non-Ampere GPUs. Add an assertion after model loading to confirm the expected kernel is being used:"
+                  }
+                ]
+              },
+              {
+                "type": "codeBlock",
+                "attrs": {
+                  "language": "python"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "import torch\n# Check that flash kernel will be dispatched\nassert torch.cuda.get_device_capability()[0] >= 8, (\n    f\"FlashAttention requires Ampere+ (compute cap >= 8.0), \"\n    f\"got {torch.cuda.get_device_capability()}\"\n)\n# Also check dtype\nfor p in model.parameters():\n    assert p.dtype in (torch.float16, torch.bfloat16), \\\n        f\"FlashAttention requires fp16/bf16, got {p.dtype}\"\n    break\n"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Mixing flash attention with custom attention masks: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "FlashAttention natively supports causal masks and fully unmasked attention. If your model uses document-boundary masks (common in multi-document fine-tuning) or ALiBi positional biases, ensure your attention implementation handles these via the "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "varlen"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "alibi_slopes"
+                  },
+                  {
+                    "type": "text",
+                    "text": " parameters, not by passing a dense N×N mask tensor (which defeats the memory savings)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Gradient checkpointing interaction: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "When both gradient checkpointing and FlashAttention-2 are enabled, the framework may recompute attention twice (once per checkpointing policy, once per FA-2's own backward recomputation). Check your framework's behavior to avoid redundant recomputation — in HuggingFace, set "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "gradient_checkpointing_kwargs={\"use_reentrant\": False}"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for compatibility with FA-2."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Sequence packing for variable-length training: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "For efficiency with variable-length sequences, pack multiple short sequences into a single long tensor and use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "flash_attn_varlen_func"
+                  },
+                  {
+                    "type": "text",
+                    "text": " with "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "cu_seqlens"
+                  },
+                  {
+                    "type": "text",
+                    "text": " to tell FlashAttention the boundary between sequences. This avoids wasting compute on padding tokens and enables causal masking that correctly stops at sequence boundaries."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Sequence Parallelism for Ultra-Long Contexts"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even with FlashAttention's O(N) activation memory, the O(N²d/M) HBM reads in the forward and backward passes still grow with N². At N = 1M+ tokens (long document, genomics, or code-repository tasks), the compute cost alone requires distributing the sequence across multiple GPUs. Ring-FlashAttention (also called sequence parallelism) shards Q, K, and V along the sequence dimension across P GPUs and uses a ring-allreduce communication pattern to compute correct attention without gathering the full sequence on any device."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With ring attention on P GPUs, the per-GPU memory is O(N/P) and per-GPU compute is O((N/P)² × d) per forward pass — both scale linearly in P, enabling near-linear scaling of context length with GPU count. Libraries like DeepSpeed-Ulysses and ring-flash-attention implement this for production use."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "FlashAttention's O(N) activation memory is the reason long-context models exist. Without it, training a model at 32K context requires storing terabytes of N×N intermediate tensors — a hardware budget available only to companies with massive GPU clusters. With it, the same training run fits comfortably on a single 80 GB GPU. The memory savings come entirely from an algorithmic choice: recompute the N×N tiles during the backward pass from two N-length vectors rather than cache them. This is one of the most impactful examples of algorithm-hardware co-design in recent deep learning practice — the math is unchanged, but the memory footprint drops by four to five orders of magnitude."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

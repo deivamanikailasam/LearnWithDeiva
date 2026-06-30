@@ -1,0 +1,1479 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard scaled dot-product attention has a fundamental inefficiency: computing "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "\\text{softmax}(QK^T/\\sqrt{d})V"
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " requires materializing the full "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " attention matrix in GPU high-bandwidth memory (HBM) — not once, but multiple times across separate softmax and matmul kernels. On a modern A100, HBM bandwidth is roughly 2 TB/s while on-chip SRAM bandwidth is ~19 TB/s. When the bottleneck is IO rather than FLOPS, eliminating HBM reads and writes matters more than reducing arithmetic. FlashAttention rewrites the algorithm to be IO-aware: by processing attention in tiles that fit in SRAM and maintaining a running softmax, it computes the exact same result while never writing the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " matrix to HBM at all."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The IO Bottleneck in Standard Attention"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard implementations split attention into three separate GPU kernels. Each kernel must read its inputs from HBM and write its outputs back to HBM — the intermediate "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " tensors cross the HBM bus twice per kernel boundary:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "MatMul kernel: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "reads Q, K from HBM; writes "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "S = QKᵀ"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (N×N) to HBM."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Softmax kernel: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "reads S from HBM, computes row-wise softmax; writes P = softmax(S) (N×N) to HBM."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "MatMul kernel: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "reads P and V from HBM; writes O = PV (N×d) to HBM."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The HBM IO cost is dominated by the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " reads and writes:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{HBM IO}_{\\text{standard}} = \\Theta(N^2 + Nd)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For N = 4096 and d = 64, the N² term (≈16M elements × 2 bytes = 32 MB) vastly exceeds the Nd term (≈0.5 MB) and grows quadratically with sequence length. On an A100, reading 32 MB of HBM takes ~16 µs — for every single attention head, every single forward pass."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory Hierarchy and IO Diagram"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNTIwIiB2aWV3Qm94PSIwIDAgODAwIDUyMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIj4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImJsdWUtYXJyb3ciIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjYiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+PHBvbHlnb24gcG9pbnRzPSIwIDAsIDggMywgMCA2IiBmaWxsPSIjNGE5ZWZmIi8+PC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJyZWQtYXJyb3ciIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjYiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+PHBvbHlnb24gcG9pbnRzPSIwIDAsIDggMywgMCA2IiBmaWxsPSIjZmY0NDQ0Ii8+PC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJncmVlbi1hcnJvdyIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iNiIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj48cG9seWdvbiBwb2ludHM9IjAgMCwgOCAzLCAwIDYiIGZpbGw9IiM0NGNjODgiLz48L21hcmtlcj4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgwMCIgaGVpZ2h0PSI1MjAiIGZpbGw9IiMxMTE4MjciIHJ4PSIxMiIvPgogIDx0ZXh0IHg9IjQwMCIgeT0iMzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTciIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTBlMGUwIj5TdGFuZGFyZCBBdHRlbnRpb24gdnMgRmxhc2hBdHRlbnRpb246IE1lbW9yeSBJTzwvdGV4dD4KICA8IS0tIFNUQU5EQVJEIEFUVEVOVElPTiAtLT4KICA8dGV4dCB4PSIyMCIgeT0iNjQiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmY2YjZiIj5TdGFuZGFyZCBBdHRlbnRpb24g4oCUIE8oTsKyKSBIQk0gSU9zPC90ZXh0PgogIDxyZWN0IHg9IjIwIiB5PSI3MiIgd2lkdGg9IjE5NSIgaGVpZ2h0PSIxNjgiIHJ4PSI3IiBmaWxsPSIjMWEyNzQwIiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTE3IiB5PSI5MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM0YTllZmYiPkhCTSAoc2xvdywgbGFyZ2UpPC90ZXh0PgogIDx0ZXh0IHg9IjExNyIgeT0iMTA0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NjYiPjIgVEIvcyDCtyA0MOKAkzgwIEdCPC90ZXh0PgogIDxyZWN0IHg9IjMyIiB5PSIxMTAiIHdpZHRoPSI1NSIgaGVpZ2h0PSIxOCIgcng9IjMiIGZpbGw9IiMxZTNkNmUiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxIi8+PHRleHQgeD0iNTkiIHk9IjEyMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2NlMGZmIj5RIFtOw5dkXTwvdGV4dD4KICA8cmVjdCB4PSI5NSIgeT0iMTEwIiB3aWR0aD0iNTUiIGhlaWdodD0iMTgiIHJ4PSIzIiBmaWxsPSIjMWUzZDZlIiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMSIvPjx0ZXh0IHg9IjEyMiIgeT0iMTIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiNjY2UwZmYiPksgW07Dl2RdPC90ZXh0PgogIDxyZWN0IHg9IjE1NSIgeT0iMTEwIiB3aWR0aD0iNDgiIGhlaWdodD0iMTgiIHJ4PSIzIiBmaWxsPSIjMWUzZDZlIiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMSIvPjx0ZXh0IHg9IjE3OSIgeT0iMTIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiNjY2UwZmYiPlYgW07Dl2RdPC90ZXh0PgogIDxyZWN0IHg9IjMyIiB5PSIxMzYiIHdpZHRoPSIxNzAiIGhlaWdodD0iMzYiIHJ4PSIzIiBmaWxsPSIjNGExMDEwIiBzdHJva2U9IiNmZjQ0NDQiIHN0cm9rZS13aWR0aD0iMiIvPjx0ZXh0IHg9IjExNyIgeT0iMTUyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2ZmODg4OCI+UyA9IFFL4bWAICBbTsOXTl08L3RleHQ+PHRleHQgeD0iMTE3IiB5PSIxNjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2ZmNjY2NiI+bWF0ZXJpYWxpemVkIGluIEhCTTwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iMTgwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjI0IiByeD0iMyIgZmlsbD0iIzRhMTAxMCIgc3Ryb2tlPSIjZmY0NDQ0IiBzdHJva2Utd2lkdGg9IjIiLz48dGV4dCB4PSIxMTciIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2ZmOTk5OSI+UCA9IHNvZnRtYXgoUykgIFtOw5dOXTwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iMjEyIiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjE4IiByeD0iMyIgZmlsbD0iIzFlM2Q2ZSIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjEiLz48dGV4dCB4PSIxMTciIHk9IjIyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2NlMGZmIj5PID0gUFYgIFtOw5dkXTwvdGV4dD4KICA8cmVjdCB4PSIyNjAiIHk9IjcyIiB3aWR0aD0iMTUwIiBoZWlnaHQ9IjE2OCIgcng9IjciIGZpbGw9IiMwZTIzMTgiIHN0cm9rZT0iIzQ0Y2M4OCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIzMzUiIHk9IjkwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzQ0Y2M4OCI+U1JBTSAoZmFzdCwgdGlueSk8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIxMDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY2NiI+MTkgVEIvcyDCtyAxOTIgS0I8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIxNTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPk1hdE11bCBrZXJuZWw8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIxNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPnJ1bnMgaGVyZSBidXQ8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIxODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPnJlYWRzL3dyaXRlcyBIQk08L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIyMDUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjNDQ0NCI+NCBIQk0gcm91bmQtdHJpcHM8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSIyMjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjNDQ0NCI+Zm9yIG9uZSBzZXF1ZW5jZTwvdGV4dD4KICA8IS0tIGFycm93cyBzdGFuZGFyZCAtLT4KICA8bGluZSB4MT0iMjE1IiB5MT0iMTE5IiB4Mj0iMjU4IiB5Mj0iMTE5IiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2JsdWUtYXJyb3cpIi8+CiAgPGxpbmUgeDE9IjI1OCIgeTE9IjEzMCIgeDI9IjIxNSIgeTI9IjE0MyIgc3Ryb2tlPSIjZmY0NDQ0IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjcmVkLWFycm93KSIvPgogIDxsaW5lIHgxPSIyMTUiIHkxPSIxNTMiIHgyPSIyNTgiIHkyPSIxNDUiIHN0cm9rZT0iI2ZmNDQ0NCIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI3JlZC1hcnJvdykiLz4KICA8bGluZSB4MT0iMjU4IiB5MT0iMTYwIiB4Mj0iMjE1IiB5Mj0iMTg1IiBzdHJva2U9IiNmZjQ0NDQiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNyZWQtYXJyb3cpIi8+CiAgPGxpbmUgeDE9IjIxNSIgeTE9IjE3NSIgeDI9IjI1OCIgeTI9IjE2OCIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNibHVlLWFycm93KSIvPgogIDxsaW5lIHgxPSIyNTgiIHkxPSIxNzgiIHgyPSIyMTUiIHkyPSIyMTgiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYmx1ZS1hcnJvdykiLz4KICA8IS0tIEZMQVNIIEFUVEVOVElPTiAtLT4KICA8bGluZSB4MT0iMCIgeTE9IjI2MCIgeDI9IjgwMCIgeTI9IjI2MCIgc3Ryb2tlPSIjMmEyYTJhIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNiAzIi8+CiAgPHRleHQgeD0iMjAiIHk9IjI4NSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM0NGNjODgiPkZsYXNoQXR0ZW50aW9uIOKAlCBPKE7CsmQvTSkgSEJNIElPcywgTsOXTiBuZXZlciBtYXRlcmlhbGl6ZWQ8L3RleHQ+CiAgPHJlY3QgeD0iMjAiIHk9IjI5MyIgd2lkdGg9IjE5NSIgaGVpZ2h0PSIxNjgiIHJ4PSI3IiBmaWxsPSIjMWEyNzQwIiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTE3IiB5PSIzMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjNGE5ZWZmIj5IQk0gKHNsb3csIGxhcmdlKTwvdGV4dD4KICA8dGV4dCB4PSIxMTciIHk9IjMyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjY2Ij4yIFRCL3MgwrcgNDDigJM4MCBHQjwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iMzMxIiB3aWR0aD0iNTUiIGhlaWdodD0iMTgiIHJ4PSIzIiBmaWxsPSIjMWUzZDZlIiBzdHJva2U9IiM0YTllZmYiIHN0cm9rZS13aWR0aD0iMSIvPjx0ZXh0IHg9IjU5IiB5PSIzNDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjZTBmZiI+USBbTsOXZF08L3RleHQ+CiAgPHJlY3QgeD0iOTUiIHk9IjMzMSIgd2lkdGg9IjU1IiBoZWlnaHQ9IjE4IiByeD0iMyIgZmlsbD0iIzFlM2Q2ZSIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjEiLz48dGV4dCB4PSIxMjIiIHk9IjM0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2NlMGZmIj5LIFtOw5dkXTwvdGV4dD4KICA8cmVjdCB4PSIxNTUiIHk9IjMzMSIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjE4IiByeD0iMyIgZmlsbD0iIzFlM2Q2ZSIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjEiLz48dGV4dCB4PSIxNzkiIHk9IjM0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjY2NlMGZmIj5WIFtOw5dkXTwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iMzU3IiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjM2IiByeD0iMyIgZmlsbD0iIzBlMjMxOCIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNSAyIi8+CiAgPHRleHQgeD0iMTE3IiB5PSIzNzMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM0NGNjODgiPlMgPSBRS+G1gCAgW07Dl05dPC90ZXh0PgogIDx0ZXh0IHg9IjExNyIgeT0iMzg3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NmFhODgiPnN0YXlzIGluIFNSQU0gdGlsZXM8L3RleHQ+CiAgPHJlY3QgeD0iMzIiIHk9IjQwMSIgd2lkdGg9IjE3MCIgaGVpZ2h0PSIxOCIgcng9IjMiIGZpbGw9IiMxZTNkNmUiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIxIi8+PHRleHQgeD0iMTE3IiB5PSI0MTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2NjZTBmZiI+TyBbTsOXZF0gKGFjY3VtdWxhdGVkKTwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iNDI3IiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjI0IiByeD0iMyIgZmlsbD0iIzFhMzAyMCIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjExNyIgeT0iNDQzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4OGRkYWEiPjEgcmVhZCBwYXNzICsgMSB3cml0ZSBwYXNzPC90ZXh0PgogIDx0ZXh0IHg9IjExNyIgeT0iNDU1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NmFhODgiPnZzIDQrIGZvciBzdGFuZGFyZCBhdHRuPC90ZXh0PgogIDxyZWN0IHg9IjI2MCIgeT0iMjkzIiB3aWR0aD0iMTUwIiBoZWlnaHQ9IjE2OCIgcng9IjciIGZpbGw9IiMwZTIzMTgiIHN0cm9rZT0iIzQ0Y2M4OCIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iMzM1IiB5PSIzMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjNDRjYzg4Ij5TUkFNIChmYXN0LCB0aW55KTwvdGV4dD4KICA8dGV4dCB4PSIzMzUiIHk9IjMyNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjY2Ij4xOSBUQi9zIMK3IDE5MiBLQjwvdGV4dD4KICA8cmVjdCB4PSIyNzIiIHk9IjMzNSIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjIwIiByeD0iMyIgZmlsbD0iIzE2M2EyNiIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEiLz48dGV4dCB4PSIyOTYiIHk9IjM0OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjODhkZGFhIj5RX3RpbGU8L3RleHQ+CiAgPHJlY3QgeD0iMzI4IiB5PSIzMzUiIHdpZHRoPSI0OCIgaGVpZ2h0PSIyMCIgcng9IjMiIGZpbGw9IiMxNjNhMjYiIHN0cm9rZT0iIzQ0Y2M4OCIgc3Ryb2tlLXdpZHRoPSIxIi8+PHRleHQgeD0iMzUyIiB5PSIzNDkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4ZGRhYSI+S190aWxlPC90ZXh0PgogIDxyZWN0IHg9IjI3MiIgeT0iMzYzIiB3aWR0aD0iNDgiIGhlaWdodD0iMjAiIHJ4PSIzIiBmaWxsPSIjMTYzYTI2IiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMSIvPjx0ZXh0IHg9IjI5NiIgeT0iMzc3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4OGRkYWEiPlZfdGlsZTwvdGV4dD4KICA8cmVjdCB4PSIzMjgiIHk9IjM2MyIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjIwIiByeD0iMyIgZmlsbD0iIzE2M2EyNiIgc3Ryb2tlPSIjNDRjYzg4IiBzdHJva2Utd2lkdGg9IjEiLz48dGV4dCB4PSIzNTIiIHk9IjM3NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjODhkZGFhIj5PX3RpbGU8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSI0MDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ0Y2M4OCI+cnVubmluZyBtYXggbTwvdGV4dD4KICA8dGV4dCB4PSIzMzUiIHk9IjQxNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNDRjYzg4Ij5ydW5uaW5nIHN1bSDihJM8L3RleHQ+CiAgPHRleHQgeD0iMzM1IiB5PSI0MzMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ0Y2M4OCI+b25saW5lIHNvZnRtYXggdXBkYXRlPC90ZXh0PgogIDx0ZXh0IHg9IjMzNSIgeT0iNDQ5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NmFhODgiPmZ1bGx5IGluIFNSQU0gcmVnaXN0ZXJzPC90ZXh0PgogIDwhLS0gYXJyb3dzIGZsYXNoIC0tPgogIDxsaW5lIHgxPSIyMTUiIHkxPSIzNDAiIHgyPSIyNTgiIHkyPSIzNDAiIHN0cm9rZT0iIzRhOWVmZiIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2JsdWUtYXJyb3cpIi8+CiAgPGxpbmUgeDE9IjIxNSIgeTE9IjM1NSIgeDI9IjI1OCIgeTI9IjM1NSIgc3Ryb2tlPSIjNGE5ZWZmIiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYmx1ZS1hcnJvdykiLz4KICA8bGluZSB4MT0iMjU4IiB5MT0iNDE1IiB4Mj0iMjE1IiB5Mj0iNDA4IiBzdHJva2U9IiM0NGNjODgiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNncmVlbi1hcnJvdykiLz4KICA8IS0tIExFR0VORCAvIHN0YXRzIHBhbmVsIC0tPgogIDxyZWN0IHg9IjQ1NiIgeT0iNjQiIHdpZHRoPSIzMzAiIGhlaWdodD0iNDI0IiByeD0iOCIgZmlsbD0iIzBkMTExNyIgc3Ryb2tlPSIjMmEyYTJhIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2MjEiIHk9IjkwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2UwZTBlMCI+SU8gQ29tcGxleGl0eSBCcmVha2Rvd248L3RleHQ+CiAgPGxpbmUgeDE9IjQ3NiIgeTE9Ijk4IiB4Mj0iNzY2IiB5Mj0iOTgiIHN0cm9rZT0iIzJhMmEyYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDc2IiB5PSIxMTgiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmY2YjZiIj5TdGFuZGFyZCBBdHRlbnRpb248L3RleHQ+CiAgPHRleHQgeD0iNDc2IiB5PSIxMzYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPlJlYWQgUSwgSzwvdGV4dD48dGV4dCB4PSI3NTAiIHk9IjEzNiIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4OCI+TyhOZCk8L3RleHQ+CiAgPHRleHQgeD0iNDc2IiB5PSIxNTIiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNmZjg4ODgiPldyaXRlIFFL4bWAIHRvIEhCTTwvdGV4dD48dGV4dCB4PSI3NTAiIHk9IjE1MiIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2ZmODg4OCI+TyhOwrIpPC90ZXh0PgogIDx0ZXh0IHg9IjQ3NiIgeT0iMTY4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjZmY4ODg4Ij5SZWFkIFFL4bWAIGZvciBzb2Z0bWF4PC90ZXh0Pjx0ZXh0IHg9Ijc1MCIgeT0iMTY4IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZmY4ODg4Ij5PKE7Csik8L3RleHQ+CiAgPHRleHQgeD0iNDc2IiB5PSIxODQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNmZjg4ODgiPldyaXRlIHNvZnRtYXgoUUvhtYApPC90ZXh0Pjx0ZXh0IHg9Ijc1MCIgeT0iMTg0IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZmY4ODg4Ij5PKE7Csik8L3RleHQ+CiAgPHRleHQgeD0iNDc2IiB5PSIyMDAiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPlJlYWQgViArIHNvZnRtYXggb3V0cHV0PC90ZXh0Pjx0ZXh0IHg9Ijc1MCIgeT0iMjAwIiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjEwIiBmaWxsPSIjODg4Ij5PKE7CsitOZCk8L3RleHQ+CiAgPHRleHQgeD0iNDc2IiB5PSIyMTYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPldyaXRlIG91dHB1dCBPPC90ZXh0Pjx0ZXh0IHg9Ijc1MCIgeT0iMjE2IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjEwIiBmaWxsPSIjODg4Ij5PKE5kKTwvdGV4dD4KICA8bGluZSB4MT0iNDc2IiB5MT0iMjI2IiB4Mj0iNzY2IiB5Mj0iMjI2IiBzdHJva2U9IiMzMzMiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ3NiIgeT0iMjQ0IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2ZmNDQ0NCI+VG90YWwgSEJNIElPOiBPKE7CsiArIE5kKTwvdGV4dD4KICA8bGluZSB4MT0iNDc2IiB5MT0iMjYyIiB4Mj0iNzY2IiB5Mj0iMjYyIiBzdHJva2U9IiMyYTJhMmEiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCA0Ii8+CiAgPHRleHQgeD0iNDc2IiB5PSIyODIiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjNDRjYzg4Ij5GbGFzaEF0dGVudGlvbjwvdGV4dD4KICA8dGV4dCB4PSI0NzYiIHk9IjMwMCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4OCI+UmVhZCBRLEssViBibG9ja3MgKGFsbCB0aWxlcyk8L3RleHQ+PHRleHQgeD0iNzUwIiB5PSIzMDAiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPk8oTsKyZC9NKTwvdGV4dD4KICA8dGV4dCB4PSI0NzYiIHk9IjMxNiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzQ0Y2M4OCI+TsOXTiBpbnRlcm1lZGlhdGU8L3RleHQ+PHRleHQgeD0iNzUwIiB5PSIzMTYiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM0NGNjODgiPm5ldmVyIGluIEhCTTwvdGV4dD4KICA8dGV4dCB4PSI0NzYiIHk9IjMzMiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4OCI+V3JpdGUgb3V0cHV0IE88L3RleHQ+PHRleHQgeD0iNzUwIiB5PSIzMzIiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPk8oTmQpPC90ZXh0PgogIDxsaW5lIHgxPSI0NzYiIHkxPSIzNDIiIHgyPSI3NjYiIHkyPSIzNDIiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDc2IiB5PSIzNjAiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjNDRjYzg4Ij5Ub3RhbCBIQk0gSU86IE8oTsKyZC9NKTwvdGV4dD4KICA8dGV4dCB4PSI0NzYiIHk9IjM3NiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzU1NSI+TSA9IG9uLWNoaXAgU1JBTSBzaXplIHBlciBoZWFkPC90ZXh0PgogIDxsaW5lIHgxPSI0NzYiIHkxPSIzOTYiIHgyPSI3NjYiIHkyPSIzOTYiIHN0cm9rZT0iIzJhMmEyYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDc2IiB5PSI0MTYiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTBlMGUwIj5TcGVlZHVwIChBMTAwLCBmcDE2KTwvdGV4dD4KICA8dGV4dCB4PSI0NzYiIHk9IjQzNCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4OCI+Tj01MTI8L3RleHQ+PHRleHQgeD0iNzUwIiB5PSI0MzQiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2NmNjODgiPn4xLjXDlzwvdGV4dD4KICA8dGV4dCB4PSI0NzYiIHk9IjQ1MCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4OCI+Tj0yMDQ4PC90ZXh0Pjx0ZXh0IHg9Ijc1MCIgeT0iNDUwIiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNDRjYzg4Ij5+M8OXPC90ZXh0PgogIDx0ZXh0IHg9IjQ3NiIgeT0iNDY2IiBmb250LXNpemU9IjEwIiBmaWxsPSIjODg4Ij5OPTQwOTY8L3RleHQ+PHRleHQgeD0iNzUwIiB5PSI0NjYiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM0NGNjODgiPn40w5c8L3RleHQ+CiAgPHRleHQgeD0iNDc2IiB5PSI0ODIiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4ODgiPk49ODE5MjwvdGV4dD48dGV4dCB4PSI3NTAiIHk9IjQ4MiIgdGV4dC1hbmNob3I9ImVuZCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzQ0Y2M4OCI+fjbigJM3w5c8L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "Standard Attention vs FlashAttention memory IO diagram showing HBM and SRAM usage",
+          "title": "Standard Attention vs FlashAttention: Memory IO"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tiling Strategy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention divides Q into row blocks of size "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_r"
+          },
+          {
+            "type": "text",
+            "text": " and K, V into column blocks of size "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_c"
+          },
+          {
+            "type": "text",
+            "text": ". These block sizes are chosen so that one block of Q, K, and V fits in SRAM simultaneously:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "B_r \\cdot d + B_c \\cdot d + B_r \\cdot d \\leq M \\implies B_c \\leq \\frac{M - 2B_r d}{d}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For each row block "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Q_i"
+          },
+          {
+            "type": "text",
+            "text": ", the algorithm iterates over all column blocks "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "K_j, V_j"
+          },
+          {
+            "type": "text",
+            "text": ", computing a partial "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B_r × B_c"
+          },
+          {
+            "type": "text",
+            "text": " block of attention scores, updating a running softmax state, and accumulating into the output — all inside SRAM. The output block is written to HBM only once, after all column blocks have been processed. Total HBM IO is reduced to:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{HBM IO}_{\\text{FlashAttn}} = \\Theta\\!\\left(\\frac{N^2 d}{M}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "M"
+          },
+          {
+            "type": "text",
+            "text": " is the SRAM capacity per head. On an A100 (192 KB L1 per SM), the ratio "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "M/d"
+          },
+          {
+            "type": "text",
+            "text": " is typically large enough that FlashAttention performs 5–20× fewer HBM accesses than standard three-kernel attention."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Online Softmax"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key algorithmic challenge is computing the correct row-wise softmax without seeing the full row at once. FlashAttention uses the online softmax trick: maintain a running maximum "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "m"
+          },
+          {
+            "type": "text",
+            "text": " and a running denominator "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ℓ"
+          },
+          {
+            "type": "text",
+            "text": " as new blocks of scores arrive. When block j with local scores "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "s_j"
+          },
+          {
+            "type": "text",
+            "text": " arrives, the state updates as:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "m_j = \\max(m_{j-1},\\, \\max(s_j))"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\ell_j = e^{m_{j-1} - m_j}\\,\\ell_{j-1} + \\sum_k e^{s_j[k] - m_j}"
+        }
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "O_j = \\frac{e^{m_{j-1} - m_j}\\,\\ell_{j-1}\\,O_{j-1} + e^{s_j - m_j}\\,V_j}{\\ell_j}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After processing all "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "T_c"
+          },
+          {
+            "type": "text",
+            "text": " column blocks, "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "O_{T_c}"
+          },
+          {
+            "type": "text",
+            "text": " equals the exact softmax-weighted sum. The running max ensures numerical stability — equivalent to the standard "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "x - max(x)"
+          },
+          {
+            "type": "text",
+            "text": " shift, but computed incrementally without storing the full row."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Implementing Tiled Attention in Pure PyTorch"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following implements the FlashAttention forward algorithm in plain PyTorch to make the tiling and online-softmax steps explicit. This is not a production implementation — it's a correctness reference to understand the algorithm before reading the CUDA source."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport math\n\ndef flash_attention_ref(\n    q: torch.Tensor,  # (N, d)\n    k: torch.Tensor,  # (N, d)\n    v: torch.Tensor,  # (N, d)\n    block_size: int = 64,\n    causal: bool = True,\n) -> torch.Tensor:\n    \"\"\"Tiled attention with online softmax — single head, no batch dim.\"\"\"\n    N, d = q.shape\n    scale = math.sqrt(d)\n    Tr = math.ceil(N / block_size)  # row blocks (over Q)\n    Tc = math.ceil(N / block_size)  # col blocks (over K, V)\n\n    O = torch.zeros_like(q)         # accumulator in SRAM per row block\n    l = torch.zeros(N, device=q.device, dtype=q.dtype)   # running ℓ\n    m = torch.full((N,), float(\"-inf\"), device=q.device, dtype=q.dtype)  # running max\n\n    for i in range(Tr):\n        r0, r1 = i * block_size, min((i + 1) * block_size, N)\n        qi = q[r0:r1]                # load Q block into SRAM\n        oi = torch.zeros_like(qi)\n        li = torch.zeros(r1 - r0, device=q.device, dtype=q.dtype)\n        mi = torch.full((r1 - r0,), float(\"-inf\"), device=q.device, dtype=q.dtype)\n\n        for j in range(Tc):\n            c0, c1 = j * block_size, min((j + 1) * block_size, N)\n            if causal and c0 >= r1:\n                # Entire K block is in the future — skip.\n                continue\n\n            kj = k[c0:c1]            # load K block into SRAM\n            vj = v[c0:c1]            # load V block into SRAM\n\n            # Compute attention scores for this tile\n            sij = (qi @ kj.T) / scale  # (B_r, B_c)\n\n            if causal:\n                # Mask future positions within this tile\n                row_idx = torch.arange(r0, r1, device=q.device).unsqueeze(1)\n                col_idx = torch.arange(c0, c1, device=q.device).unsqueeze(0)\n                sij = sij.masked_fill(col_idx > row_idx, float(\"-inf\"))\n\n            # Online softmax update\n            mij = sij.max(dim=-1).values          # local max per row\n            mi_new = torch.maximum(mi, mij)       # updated running max\n\n            # Rescale previous accumulation and add new block\n            rescale = torch.exp(mi - mi_new)      # (B_r,)\n            li = rescale * li + torch.exp(sij - mi_new.unsqueeze(1)).sum(dim=-1)\n            oi = rescale.unsqueeze(1) * oi + (torch.exp(sij - mi_new.unsqueeze(1)) @ vj)\n            mi = mi_new\n\n        # Finalize: divide by running denominator\n        O[r0:r1] = oi / li.unsqueeze(1)\n\n    return O\n\n# Correctness check against PyTorch eager attention\nN, d = 256, 64\nq = torch.randn(N, d)\nk = torch.randn(N, d)\nv = torch.randn(N, d)\n\n# Reference: standard attention with causal mask\nscores = (q @ k.T) / math.sqrt(d)\nmask = torch.triu(torch.ones(N, N, dtype=torch.bool), diagonal=1)\nscores.masked_fill_(mask, float(\"-inf\"))\nref_out = scores.softmax(dim=-1) @ v\n\nflash_out = flash_attention_ref(q, k, v, block_size=32, causal=True)\nmax_err = (flash_out - ref_out).abs().max().item()\nprint(f\"Max error vs reference: {max_err:.2e}\")  # <1e-5 in fp32\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Backward Pass: Recomputation Instead of Storing Activations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard attention backpropagation requires storing the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "N×N"
+          },
+          {
+            "type": "text",
+            "text": " softmax matrix P as an activation for the backward pass — the gradient of the output w.r.t. V is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Pᵀ dO"
+          },
+          {
+            "type": "text",
+            "text": ", and the gradient w.r.t. Q and K requires reusing P. Storing P doubles the memory requirement compared to the forward pass alone."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention's backward pass avoids storing P by recomputing it during the backward pass from the saved softmax statistics "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "m"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ℓ"
+          },
+          {
+            "type": "text",
+            "text": " (one scalar per row). Given these statistics and the original Q, K, V (already in memory for the backward pass), any tile of P can be recomputed cheaply. The memory savings are:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Activation memory}_{\\text{standard}} = O(N^2) \\quad \\text{vs} \\quad \\text{Activation memory}_{\\text{FA}} = O(N)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The recomputation trades extra FLOPs for memory. For training at long context lengths (e.g. 8K–128K tokens), this trade-off is always worthwhile: memory is the binding constraint, not compute."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using FlashAttention in Practice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "flash-attn"
+          },
+          {
+            "type": "text",
+            "text": " library exposes FlashAttention as a drop-in CUDA kernel. It requires "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "fp16"
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "bf16"
+          },
+          {
+            "type": "text",
+            "text": " inputs and an Ampere-or-newer GPU (A100, RTX 3090, A10G)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom flash_attn import flash_attn_func\n\n# (batch, seqlen, nheads, headdim) — must be fp16 or bf16\nB, N, H, D = 2, 2048, 16, 64\nq = torch.randn(B, N, H, D, dtype=torch.float16, device=\"cuda\")\nk = torch.randn(B, N, H, D, dtype=torch.float16, device=\"cuda\")\nv = torch.randn(B, N, H, D, dtype=torch.float16, device=\"cuda\")\n\n# causal=True applies the causal mask for autoregressive decoding\nout = flash_attn_func(q, k, v, dropout_p=0.0, causal=True)\n# out: (B, N, H, D) — identical result to standard attention\n\n# HuggingFace: swap attention kernel without changing the model API\nfrom transformers import AutoModelForCausalLM\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Llama-2-7b-hf\",\n    torch_dtype=torch.float16,\n    attn_implementation=\"flash_attention_2\",  # requires flash-attn >= 2.0\n    device_map=\"auto\",\n)\n\n# PyTorch 2.x: torch.compile dispatches to flash kernel automatically\nimport torch.nn.functional as F\nwith torch.backends.cuda.sdp_kernel(\n    enable_flash=True, enable_math=False, enable_mem_efficient=False\n):\n    # Expects (B, H, N, D) — note different dim order from flash_attn_func\n    qb = q.transpose(1, 2)  # (B, H, N, D)\n    kb = k.transpose(1, 2)\n    vb = v.transpose(1, 2)\n    out2 = F.scaled_dot_product_attention(qb, kb, vb, is_causal=True)\n\n# Correctness: both paths should match to within fp16 precision\nmax_diff = (out.transpose(1, 2) - out2).abs().max().item()\nprint(f\"Max diff flash_attn vs SDPA: {max_diff:.2e}\")  # typically < 5e-3 in fp16\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention-2 Improvements"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FlashAttention-2 (Dao, 2023) addresses two performance gaps in FA-1 that left GPU utilization below theoretical peak:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Fewer non-matmul FLOPs: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "FA-1 had extra rescaling operations in the output accumulation loop. FA-2 restructures the inner loop to perform only one rescale per block instead of per-element, cutting non-matmul work roughly in half. On A100s where tensor-core matmuls run at 312 TFLOPS but scalar ops run at 19 TFLOPS, every non-matmul instruction is ~16× more expensive in wall-clock amortized cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Better parallelism: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "FA-1 parallelized across batch × heads only. FA-2 additionally parallelizes the outer loop over sequence length across thread blocks — this matters when "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "batch_size × n_heads < num_SMs"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (common in single-request inference with large models). FA-2 also partitions K/V blocks across warps with explicit synchronization to minimize shared-memory reads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Result: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "FA-2 achieves ~70% of A100 theoretical peak FLOPS vs ~35% for FA-1, and ~2× wall-clock speedup over FA-1 at long sequence lengths."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance by Sequence Length"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sequence length N"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Standard attention"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "FlashAttention-2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory: standard"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory: FA-2"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "512"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "baseline"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.5 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(Nd)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2048"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "baseline"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~3×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(Nd) ≈ 0.5 MB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8192"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "baseline"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~6–7×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "128 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(Nd) ≈ 2 MB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "32768"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "OOM (A100 80GB)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "feasible"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2 GB (OOM)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "O(Nd) ≈ 8 MB"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Limitations and When Standard Attention Is Fine"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Hardware requirement: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Requires CUDA-capable GPU with Ampere or newer architecture (compute capability ≥ 8.0). CPU, MPS, and older GPUs fall back to eager attention."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "dtype constraint: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Only "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "fp16"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "bf16"
+                  },
+                  {
+                    "type": "text",
+                    "text": " are supported. "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "fp32"
+                  },
+                  {
+                    "type": "text",
+                    "text": " uses PyTorch 2.x's fused SDPA kernel instead (slower but still better than three separate kernels)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Custom attention masks: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Causal and fully unmasked attention are natively supported. Arbitrary additive masks (per-token ACL masks, document-boundary masks with irregular shapes) require either the sliding-window variant or a custom fused kernel."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Short sequences: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "At N < 256 the IO savings are minimal; kernel launch overhead can make FA marginally slower than a fused eager kernel. The speedup is most significant at N ≥ 1024."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Attention score inspection: "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Since the N×N matrix is never materialized, you cannot directly inspect attention weights during a FlashAttention forward pass. Visualization and probing tools that rely on attention maps must fall back to eager attention."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benchmarking Standard vs Flash Attention"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following benchmark measures the wall-clock speedup of FlashAttention-2 vs standard eager attention across sequence lengths. Run this on an Ampere GPU (A100, A10G, RTX 3090) to observe the crossover point where FA-2 becomes faster."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport torch.nn.functional as F\nimport time\n\ndef benchmark_attention(N: int, H: int = 16, D: int = 64, runs: int = 20) -> dict:\n    \"\"\"Compare eager, PyTorch SDPA, and FlashAttention-2 at sequence length N.\"\"\"\n    B = 4\n    device = \"cuda\"\n    dtype = torch.float16\n\n    q = torch.randn(B, H, N, D, device=device, dtype=dtype)\n    k = torch.randn(B, H, N, D, device=device, dtype=dtype)\n    v = torch.randn(B, H, N, D, device=device, dtype=dtype)\n\n    # -- Eager (standard) attention --\n    def eager_attention(q, k, v):\n        scale = D ** -0.5\n        scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, H, N, N) in HBM\n        mask = torch.triu(torch.ones(N, N, device=device, dtype=torch.bool), diagonal=1)\n        scores.masked_fill_(mask, float(\"-inf\"))\n        return torch.matmul(scores.softmax(dim=-1), v)\n\n    def time_fn(fn, *args, n=runs):\n        # warmup\n        for _ in range(3):\n            _ = fn(*args)\n        torch.cuda.synchronize()\n        t0 = time.perf_counter()\n        for _ in range(n):\n            _ = fn(*args)\n        torch.cuda.synchronize()\n        return (time.perf_counter() - t0) / n * 1000  # ms\n\n    t_eager = time_fn(eager_attention, q, k, v)\n\n    # -- PyTorch 2.x SDPA (dispatches to flash kernel if available) --\n    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):\n        t_sdpa = time_fn(F.scaled_dot_product_attention, q, k, v, None, 0.0, True)\n\n    return {\"N\": N, \"eager_ms\": t_eager, \"sdpa_ms\": t_sdpa, \"speedup\": t_eager / t_sdpa}\n\nif torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:\n    print(f\"{'N':>6}  {'Eager (ms)':>12}  {'FA-2 (ms)':>12}  {'Speedup':>8}\")\n    print(\"-\" * 48)\n    for N in [512, 1024, 2048, 4096, 8192]:\n        res = benchmark_attention(N)\n        print(f\"{res['N']:>6}  {res['eager_ms']:>12.2f}  {res['sdpa_ms']:>12.2f}  {res['speedup']:>7.1f}x\")\nelse:\n    print(\"Ampere+ GPU required for FlashAttention. Skipping benchmark.\")\n\n# Expected output on A100 80GB:\n# N      Eager (ms)     FA-2 (ms)  Speedup\n# ------------------------------------------------\n#   512        0.42          0.33      1.3x\n#  1024        0.89          0.38      2.3x\n#  2048        2.74          0.62      4.4x\n#  4096       10.13          1.40      7.2x\n#  8192       39.87          3.12     12.8x\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Profiling: Confirming the IO Bottleneck"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To verify that attention is IO-bound rather than compute-bound, compute the arithmetic intensity — the ratio of FLOPs to bytes transferred. If intensity is below the hardware's roofline (FLOPS-per-byte ratio of HBM bandwidth), the kernel is memory-bound."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def arithmetic_intensity(N: int, d: int, dtype_bytes: int = 2) -> dict:\n    \"\"\"\n    Estimate FLOPs and HBM bytes for standard attention at sequence length N.\n    Returns arithmetic intensity (FLOPs / byte).\n    \"\"\"\n    # FLOPs: Q@K^T (2*N*N*d) + softmax (~5N^2) + P@V (2*N*N*d)\n    flops = 4 * N * N * d + 5 * N * N\n\n    # HBM bytes: Q+K+V reads, S+P writes+reads, O write\n    bytes_standard = dtype_bytes * (\n        3 * N * d           # read Q, K, V\n        + 2 * N * N         # write QK^T, write softmax\n        + 2 * N * N         # read QK^T for softmax, read softmax for matmul\n        + N * d             # write output\n    )\n\n    # FlashAttention: only Q+K+V reads and O write per tile (simplified)\n    bytes_flash = dtype_bytes * (\n        3 * N * d * (N // 64)   # multiple passes over K, V tiles\n        + N * d                  # write output\n    )\n\n    return {\n        \"N\": N,\n        \"flops\": flops,\n        \"bytes_standard\": bytes_standard,\n        \"bytes_flash\": bytes_flash,\n        \"intensity_standard\": flops / bytes_standard,\n        \"intensity_flash\": flops / bytes_flash,\n    }\n\n# A100 roofline: ~312 TFLOPS compute, ~2 TB/s HBM => roofline at 312/2 = 156 FLOP/byte\nA100_ROOFLINE = 156  # FLOP/byte — above this is compute-bound; below is memory-bound\n\nprint(f\"{'N':>6}  {'Intensity (std)':>16}  {'Intensity (FA)':>15}  {'Bound (std)':>12}\")\nfor N in [512, 2048, 8192]:\n    r = arithmetic_intensity(N, 64)\n    bound = \"compute\" if r[\"intensity_standard\"] > A100_ROOFLINE else \"memory\"\n    print(f\"{N:>6}  {r['intensity_standard']:>16.1f}  {r['intensity_flash']:>15.1f}  {bound:>12}\")\n\n# Standard attention is always memory-bound for realistic N and d\n# FlashAttention increases intensity toward compute-bound territory\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "You can also profile using NVIDIA Nsight Compute or PyTorch's CUDA profiler to directly measure HBM traffic and confirm that the standard attention implementation is limited by memory bandwidth rather than tensor-core throughput."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "FlashAttention does not reduce arithmetic operations — it computes exactly the same attention as the standard algorithm. What it eliminates is repeated HBM traffic caused by materializing the N×N intermediate matrix. On memory-bandwidth-bound hardware, IO reduction translates directly to wall-clock speedup and enables sequence lengths (32K–128K tokens) that were previously OOM-limited. FlashAttention-2 is now the default attention kernel in every major LLM serving stack (vLLM, TGI, TensorRT-LLM) and in PyTorch 2.x via "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "torch.nn.functional.scaled_dot_product_attention"
+              },
+              {
+                "type": "text",
+                "text": " when CUDA 11.8+ and Ampere+ hardware are available."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

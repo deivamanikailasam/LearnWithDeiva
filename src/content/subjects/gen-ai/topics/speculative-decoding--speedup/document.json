@@ -1,0 +1,1923 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The practical appeal of speculative decoding is its "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "wall-clock speedup"
+          },
+          {
+            "type": "text",
+            "text": ": generating the same output tokens in less elapsed time with no change in output quality. On a single A100 GPU serving Llama-3.1 70B at batch size 1, speculative decoding with a 8B draft model routinely achieves "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "2–3×"
+          },
+          {
+            "type": "text",
+            "text": " decode throughput on natural-language tasks. Understanding what drives that number — and what limits it — is essential for deciding whether and how to deploy speculative decoding in production."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Speedup Exists: The Memory-Bandwidth Bottleneck"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Autoregressive decode at batch size 1 is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "memory-bandwidth-bound"
+          },
+          {
+            "type": "text",
+            "text": ", not compute-bound. Each decode step generates one token but must stream the entire model's weights from GPU high-bandwidth memory (HBM) through the arithmetic units — a transfer of tens of gigabytes per step. The matrix multiplications that consume that data finish so quickly that the GPU's tensor cores sit idle most of the time waiting for the next weight tile to arrive."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key insight: a target model forward pass that processes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " tokens (the entire draft sequence) takes roughly the same wall-clock time as one that processes 1 token, because in both cases the bottleneck is loading the weight matrices from HBM — and those loads happen once per layer regardless of sequence length (up to a moderate "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": "). Speculative decoding exploits this: it pays the weight-load cost once but produces multiple verified tokens."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Speedup Formula"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Let "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "T_d"
+          },
+          {
+            "type": "text",
+            "text": " be the wall-clock time for one draft model decode step (generating one token at batch 1), "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "T_t"
+          },
+          {
+            "type": "text",
+            "text": " be the time for one target model decode step, and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α"
+          },
+          {
+            "type": "text",
+            "text": " be the per-token acceptance rate. One speculative step generates "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " draft tokens and runs one verification pass:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "T_\\text{spec-step} = k \\cdot T_d + T_t"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The expected number of output tokens produced per step is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathbb{E}[\\text{tokens}] = \\frac{1 - \\alpha^{k+1}}{1 - \\alpha}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The speedup relative to standard decoding (one target step per token) is therefore:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Speedup} = \\frac{\\mathbb{E}[\\text{tokens}] \\cdot T_t}{k \\cdot T_d + T_t} = \\frac{T_t}{T_t + k T_d} \\cdot \\frac{1 - \\alpha^{k+1}}{1 - \\alpha}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Define "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "r = T_d / T_t"
+          },
+          {
+            "type": "text",
+            "text": " as the latency ratio (draft step time / target step time). For a 7B draft vs 70B target on the same GPU, "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "r ≈ 0.08–0.12"
+          },
+          {
+            "type": "text",
+            "text": ". The formula simplifies to:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Speedup} = \\frac{1}{1 + kr} \\cdot \\frac{1 - \\alpha^{k+1}}{1 - \\alpha}"
+        }
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Speedup vs Acceptance Rate: Visualised"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDAwIiB2aWV3Qm94PSIwIDAgODYwIDQwMCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEzIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQwMCIgZmlsbD0iI2Y4ZjlmYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPlNwZWN1bGF0aXZlIERlY29kaW5nIFNwZWVkdXAgdnMgQWNjZXB0YW5jZSBSYXRlPC90ZXh0PgoKICA8IS0tIEF4ZXMgLS0+CiAgPGxpbmUgeDE9IjgwIiB5MT0iMzQwIiB4Mj0iODAwIiB5Mj0iMzQwIiBzdHJva2U9IiMzMzMiIHN0cm9rZS13aWR0aD0iMiIvPgogIDxsaW5lIHgxPSI4MCIgeTE9IjYwIiB4Mj0iODAiIHkyPSIzNDAiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIyIi8+CgogIDwhLS0gWC1heGlzIGxhYmVsIC0tPgogIDx0ZXh0IHg9IjQ0MCIgeT0iMzgwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEyIj5BY2NlcHRhbmNlIFJhdGUgKGFscGhhKTwvdGV4dD4KICA8IS0tIFktYXhpcyBsYWJlbCAtLT4KICA8dGV4dCB4PSIyMiIgeT0iMjAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEyIiB0cmFuc2Zvcm09InJvdGF0ZSgtOTAgMjIgMjAwKSI+U3BlZWR1cCAoeCk8L3RleHQ+CgogIDwhLS0gWC1heGlzIHRpY2tzIC0tPgogIDxsaW5lIHgxPSI4MCIgeTE9IjM0MCIgeDI9IjgwIiB5Mj0iMzQ4IiBzdHJva2U9IiMzMzMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iODAiIHk9IjM2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+MC4wPC90ZXh0PgogIDxsaW5lIHgxPSIyMjQiIHkxPSIzNDAiIHgyPSIyMjQiIHkyPSIzNDgiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyMjQiIHk9IjM2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+MC4yPC90ZXh0PgogIDxsaW5lIHgxPSIzNjgiIHkxPSIzNDAiIHgyPSIzNjgiIHkyPSIzNDgiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIzNjgiIHk9IjM2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+MC40PC90ZXh0PgogIDxsaW5lIHgxPSI1MTIiIHkxPSIzNDAiIHgyPSI1MTIiIHkyPSIzNDgiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI1MTIiIHk9IjM2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+MC42PC90ZXh0PgogIDxsaW5lIHgxPSI2NTYiIHkxPSIzNDAiIHgyPSI2NTYiIHkyPSIzNDgiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI2NTYiIHk9IjM2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+MC44PC90ZXh0PgogIDxsaW5lIHgxPSI4MDAiIHkxPSIzNDAiIHgyPSI4MDAiIHkyPSIzNDgiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI4MDAiIHk9IjM2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+MS4wPC90ZXh0PgoKICA8IS0tIFktYXhpcyB0aWNrczogMXggdG8gNHggLS0+CiAgPGxpbmUgeDE9IjcyIiB5MT0iMzQwIiB4Mj0iODAiIHkyPSIzNDAiIHN0cm9rZT0iIzMzMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI2OCIgeT0iMzQ0IiB0ZXh0LWFuY2hvcj0iZW5kIiBmaWxsPSIjNTU1IiBmb250LXNpemU9IjExIj4xeDwvdGV4dD4KICA8bGluZSB4MT0iNzIiIHkxPSIyNDciIHgyPSI4MCIgeTI9IjI0NyIgc3Ryb2tlPSIjMzMzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjY4IiB5PSIyNTEiIHRleHQtYW5jaG9yPSJlbmQiIGZpbGw9IiM1NTUiIGZvbnQtc2l6ZT0iMTEiPjJ4PC90ZXh0PgogIDxsaW5lIHgxPSI3MiIgeTE9IjE1MyIgeDI9IjgwIiB5Mj0iMTUzIiBzdHJva2U9IiMzMzMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjgiIHk9IjE1NyIgdGV4dC1hbmNob3I9ImVuZCIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+M3g8L3RleHQ+CiAgPGxpbmUgeDE9IjcyIiB5MT0iNjAiIHgyPSI4MCIgeTI9IjYwIiBzdHJva2U9IiMzMzMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjgiIHk9IjY0IiB0ZXh0LWFuY2hvcj0iZW5kIiBmaWxsPSIjNTU1IiBmb250LXNpemU9IjExIj40eDwvdGV4dD4KCiAgPCEtLSBHcmlkbGluZXMgLS0+CiAgPGxpbmUgeDE9IjgwIiB5MT0iMjQ3IiB4Mj0iODAwIiB5Mj0iMjQ3IiBzdHJva2U9IiNkZGQiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIi8+CiAgPGxpbmUgeDE9IjgwIiB5MT0iMTUzIiB4Mj0iODAwIiB5Mj0iMTUzIiBzdHJva2U9IiNkZGQiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIi8+CgogIDwhLS0gaz0yIGN1cnZlOiBzcGVlZHVwID0gRVthY2NdLyhrKnIgKyAxKSB3aGVyZSByPVRfZHJhZnQvVF90YXJnZXQgfjAuMSwgRVthY2NdPSgxLWFeMykvKDEtYSkgLS0+CiAgPCEtLSBQb2ludHMgY29tcHV0ZWQ6IGFscGhhPTA6MS4wLCAwLjI6MS4xNSwgMC40OjEuMzUsIDAuNjoxLjYsIDAuODoxLjk3LCAxLjA6Mi41IC0tPgogIDwhLS0gTWFwIHNwZWVkdXAgdG8geTogeSA9IDM0MCAtIChzcGVlZHVwLTEpKjkzIC0tPgogIDxwb2x5bGluZSBwb2ludHM9IjgwLDM0MCAyMjQsMzI2IDM2OCwzMDggNTEyLDI4MCA2NTYsMjQ4IDgwMCwyMDAiIHN0cm9rZT0iIzRhOWVjNCIgc3Ryb2tlLXdpZHRoPSIyLjUiIGZpbGw9Im5vbmUiLz4KICA8dGV4dCB4PSI4MTAiIHk9IjIwMCIgZmlsbD0iIzRhOWVjNCIgZm9udC1zaXplPSIxMSI+az0yPC90ZXh0PgoKICA8IS0tIGs9NCBjdXJ2ZTogYWxwaGE9MDoxLjAsIDAuMjoxLjIyLCAwLjQ6MS41OCwgMC42OjIuMSwgMC44OjIuODMsIDEuMDo0LjAgYXBwcm94IC0tPgogIDxwb2x5bGluZSBwb2ludHM9IjgwLDM0MCAyMjQsMzE5IDM2OCwyOTMgNTEyLDI0NSA2NTYsMTc3IDgwMCw2MCIgc3Ryb2tlPSIjMjdhZTYwIiBzdHJva2Utd2lkdGg9IjIuNSIgZmlsbD0ibm9uZSIvPgogIDx0ZXh0IHg9IjgxMCIgeT0iNjAiIGZpbGw9IiMyN2FlNjAiIGZvbnQtc2l6ZT0iMTEiPms9NDwvdGV4dD4KCiAgPCEtLSBrPTYgY3VydmU6IGhpZ2hlciBhdCBnb29kIGFjY2VwdGFuY2UgYnV0IG92ZXJoZWFkIGF0IGxvdyBhY2NlcHRhbmNlIC0tPgogIDwhLS0gYWxwaGE9MDoxLjAsIDAuMjoxLjI1LCAwLjQ6MS42OCwgMC42OjIuMzUsIDAuODozLjI1IChjYXBwZWQgaGVyZSksIDEuMCB3b3VsZCBiZSB+NS44IGJ1dCBjYXBwZWQgYXQgNHggZGlzcGxheSAtLT4KICA8cG9seWxpbmUgcG9pbnRzPSI4MCwzNDAgMjI0LDMxNyAzNjgsMjc4IDUxMiwyMjUgNjU2LDEzNSA4MDAsNjAiIHN0cm9rZT0iI2U2N2UyMiIgc3Ryb2tlLXdpZHRoPSIyLjUiIGZpbGw9Im5vbmUiLz4KICA8dGV4dCB4PSI4MTAiIHk9IjExMCIgZmlsbD0iI2U2N2UyMiIgZm9udC1zaXplPSIxMSI+az02PC90ZXh0PgoKICA8IS0tIE5vLXNwZWMgYmFzZWxpbmUgLS0+CiAgPGxpbmUgeDE9IjgwIiB5MT0iMzQwIiB4Mj0iODAwIiB5Mj0iMzQwIiBzdHJva2U9IiNjMDM5MmIiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI2LDMiLz4KICA8dGV4dCB4PSI4MTAiIHk9IjM0NCIgZmlsbD0iI2MwMzkyYiIgZm9udC1zaXplPSIxMSI+MXggKG5vIHNwZWMpPC90ZXh0PgoKICA8IS0tIEhpZ2hsaWdodCB0eXBpY2FsIHJhbmdlIC0tPgogIDxyZWN0IHg9IjU4NCIgeT0iNjAiIHdpZHRoPSIxNDQiIGhlaWdodD0iMjIwIiBmaWxsPSIjMjdhZTYwIiBmaWxsLW9wYWNpdHk9IjAuMDciIHJ4PSI0Ii8+CiAgPHRleHQgeD0iNjU2IiB5PSIyOTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxYTdhM2EiIGZvbnQtc2l6ZT0iMTEiPlR5cGljYWwgcmFuZ2U8L3RleHQ+CiAgPHRleHQgeD0iNjU2IiB5PSIzMTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxYTdhM2EiIGZvbnQtc2l6ZT0iMTEiPmFscGhhIDAuNzXigJMwLjkyPC90ZXh0PgoKICA8IS0tIExlZ2VuZCAtLT4KICA8cmVjdCB4PSIxMDAiIHk9IjcwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjgwIiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjY2NjIiBzdHJva2Utd2lkdGg9IjEiIHJ4PSI0IiBmaWxsLW9wYWNpdHk9IjAuOSIvPgogIDxsaW5lIHgxPSIxMTIiIHkxPSI5MCIgeDI9IjEzNSIgeTI9IjkwIiBzdHJva2U9IiM0YTllYzQiIHN0cm9rZS13aWR0aD0iMi41Ii8+CiAgPHRleHQgeD0iMTQyIiB5PSI5NCIgZmlsbD0iIzMzMyIgZm9udC1zaXplPSIxMSI+az0yICAoMiBkcmFmdCB0b2tlbnMpPC90ZXh0PgogIDxsaW5lIHgxPSIxMTIiIHkxPSIxMTAiIHgyPSIxMzUiIHkyPSIxMTAiIHN0cm9rZT0iIzI3YWU2MCIgc3Ryb2tlLXdpZHRoPSIyLjUiLz4KICA8dGV4dCB4PSIxNDIiIHk9IjExNCIgZmlsbD0iIzMzMyIgZm9udC1zaXplPSIxMSI+az00ICAoNCBkcmFmdCB0b2tlbnMpPC90ZXh0PgogIDxsaW5lIHgxPSIxMTIiIHkxPSIxMzAiIHgyPSIxMzUiIHkyPSIxMzAiIHN0cm9rZT0iI2U2N2UyMiIgc3Ryb2tlLXdpZHRoPSIyLjUiLz4KICA8dGV4dCB4PSIxNDIiIHk9IjEzNCIgZmlsbD0iIzMzMyIgZm9udC1zaXplPSIxMSI+az02ICAoNiBkcmFmdCB0b2tlbnMpPC90ZXh0PgoKICA8IS0tIHIgPSBUX2RyYWZ0L1RfdGFyZ2V0IG5vdGUgLS0+CiAgPHRleHQgeD0iNDMwIiB5PSI2NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg4OCIgZm9udC1zaXplPSIxMCI+QXNzdW1lcyBUX2RyYWZ0IC8gVF90YXJnZXQgPSAwLjEwICAoZS5nLiA3QiBkcmFmdCwgNzBCIHRhcmdldCk8L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "Speedup vs acceptance rate for k=2, k=4, k=6 draft tokens. Higher acceptance rates and larger k give greater speedup, with typical operation in the 0.75–0.92 acceptance range."
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The chart shows speedup as a function of acceptance rate for three values of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": ", assuming "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "r = 0.10"
+          },
+          {
+            "type": "text",
+            "text": " (draft step is 10% of target step time). Key observations:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "At "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "α = 0"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (every draft token rejected), all curves converge to 1× — no benefit, but no regression either (one target step per resampled token, same as standard decoding)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Speedup scales steeply with acceptance rate. Moving from 0.7 to 0.85 acceptance roughly doubles the gain at k=4."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Larger "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "k"
+                  },
+                  {
+                    "type": "text",
+                    "text": " gives higher peak speedup but is also more sensitive to acceptance rate. At low "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "α"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", k=6 underperforms k=2 because draft overhead outweighs the few tokens accepted."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "typical operating range"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (α = 0.75–0.92 on natural text with same-family models) delivers 2–3× speedup at k=4 — matching published benchmarks."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Measuring Speedup in Practice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The theoretical formula gives intuition, but the actual speedup depends on GPU architecture, memory capacity, batch size, and context length. The only reliable number is a direct benchmark on your hardware and workload:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\nDRAFT_ID  = \"meta-llama/Llama-3.2-1B-Instruct\"\nTARGET_ID = \"meta-llama/Llama-3.1-8B-Instruct\"   # use smaller pair for quick test\nMAX_NEW   = 200\nK         = 4\nWARMUP    = 2\nRUNS      = 5\n\ntokenizer = AutoTokenizer.from_pretrained(TARGET_ID)\ndraft_model  = AutoModelForCausalLM.from_pretrained(DRAFT_ID,  torch_dtype=torch.bfloat16, device_map=\"cuda\")\ntarget_model = AutoModelForCausalLM.from_pretrained(TARGET_ID, torch_dtype=torch.bfloat16, device_map=\"cuda\")\n\nprompts = [\n    \"Explain in detail how attention mechanisms work in transformer models.\",\n    \"Describe the economic implications of artificial intelligence on the labour market.\",\n    \"Write a comprehensive guide to Python decorators with examples.\",\n]\n\ndef timed_generate(model, inputs, assistant_model=None, runs=RUNS, warmup=WARMUP):\n    kwargs = dict(max_new_tokens=MAX_NEW, do_sample=False)\n    if assistant_model:\n        kwargs[\"assistant_model\"] = assistant_model\n        kwargs[\"num_assistant_tokens\"] = K\n\n    # Warmup\n    for _ in range(warmup):\n        with torch.no_grad():\n            model.generate(**inputs, **kwargs)\n\n    # Timed runs\n    torch.cuda.synchronize()\n    t0 = time.perf_counter()\n    total_new_tokens = 0\n    for _ in range(runs):\n        with torch.no_grad():\n            out = model.generate(**inputs, **kwargs)\n        total_new_tokens += out.shape[-1] - inputs[\"input_ids\"].shape[-1]\n    torch.cuda.synchronize()\n    elapsed = time.perf_counter() - t0\n    return total_new_tokens / elapsed  # tokens/sec\n\nfor prompt in prompts:\n    inputs = tokenizer(prompt, return_tensors=\"pt\").to(\"cuda\")\n    tps_std  = timed_generate(target_model, inputs)\n    tps_spec = timed_generate(target_model, inputs, assistant_model=draft_model)\n    print(f\"Prompt: {prompt[:50]}...\")\n    print(f\"  Standard:     {tps_std:6.1f} tok/s\")\n    print(f\"  Speculative:  {tps_spec:6.1f} tok/s\")\n    print(f\"  Speedup:      {tps_spec / tps_std:.2f}x\")\n    print()\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Using "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "torch.cuda.synchronize()"
+          },
+          {
+            "type": "text",
+            "text": " before timing is critical: GPU operations are asynchronous by default, so "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "time.perf_counter()"
+          },
+          {
+            "type": "text",
+            "text": " without synchronisation measures submission latency, not execution latency."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Optimal k: Balancing Draft Cost Against Expected Acceptance"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " is the primary tuning knob. The optimal value maximises the speedup formula with respect to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " for a given "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "r"
+          },
+          {
+            "type": "text",
+            "text": ". Taking the derivative and setting to zero gives an implicit equation, but in practice a grid search over k ∈ {2, 3, 4, 5, 6, 8} on a calibration workload is fastest:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import math\n\ndef theoretical_speedup(alpha: float, k: int, r: float) -> float:\n    \"\"\"\n    Expected speedup from speculative decoding.\n    alpha: per-token acceptance rate (0-1)\n    k:     number of draft tokens per step\n    r:     T_draft / T_target  (latency ratio)\n    \"\"\"\n    if alpha >= 1.0:\n        # Perfect acceptance: speedup = (k+1) / (kr + 1)\n        return (k + 1) / (k * r + 1)\n    expected_accepted = (1 - alpha ** (k + 1)) / (1 - alpha)\n    return expected_accepted / (k * r + 1)\n\n\ndef optimal_k(alpha: float, r: float, k_range=range(1, 16)) -> tuple[int, float]:\n    \"\"\"Find k that maximises theoretical speedup.\"\"\"\n    best_k, best_speedup = 1, 0.0\n    for k in k_range:\n        s = theoretical_speedup(alpha, k, r)\n        if s > best_speedup:\n            best_speedup, best_k = s, k\n    return best_k, best_speedup\n\n\n# Print the grid for typical alpha and r values\nprint(f\"{'alpha':>6} {'r':>6} {'best_k':>8} {'speedup':>9}\")\nfor alpha in [0.60, 0.70, 0.80, 0.85, 0.90, 0.95]:\n    for r in [0.05, 0.10, 0.15]:\n        k, s = optimal_k(alpha, r)\n        print(f\"{alpha:6.2f} {r:6.2f} {k:8d} {s:9.2f}x\")\n    print()\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running this reveals a practical rule: when "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "r ≈ 0.10"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α ≈ 0.80"
+          },
+          {
+            "type": "text",
+            "text": ", optimal "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " is 4–5. At "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α ≈ 0.90"
+          },
+          {
+            "type": "text",
+            "text": ", raising "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " to 6–8 adds meaningful gain. Below "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α = 0.65"
+          },
+          {
+            "type": "text",
+            "text": ", any "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k > 2"
+          },
+          {
+            "type": "text",
+            "text": " is wasteful."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Speedup by Workload Type"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Acceptance rate — and therefore speedup — varies substantially across task types. The draft model must predict the same token the target model would choose; tasks where the next token is highly predictable from local context favour speculative decoding:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Task type"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Typical α"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Typical speedup (k=4)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Why"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Natural language (chat, summarisation)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.78–0.88"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.0–2.8×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Both models trained on same corpus; high local predictability"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Code generation (Python, JS)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.82–0.92"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.5–3.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Code has long predictable spans (indentation, keywords, identifiers)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Structured output (JSON, SQL)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.60–0.78"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.3–2.0×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Schema-constrained outputs; draft may not share fine-tuning"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Creative writing (high temperature)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.50–0.70"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.1–1.7×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High entropy distributions → low acceptance regardless of model quality"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Translation (domain-specific)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.65–0.82"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1.5–2.3×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Depends on specialisation gap between draft and target"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Speedup vs Batch Size: When Speculation Stops Helping"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Speculative decoding speedup degrades as batch size increases, because the target model transitions from memory-bandwidth-bound to compute-bound. At large batches the weight matrices are already being streamed at full bandwidth — there is no idle arithmetic capacity to fill with extra draft-token verification:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\ndef speedup_vs_batch(\n    target_model,\n    draft_model,\n    tokenizer,\n    prompt: str,\n    batch_sizes: list[int],\n    max_new_tokens: int = 100,\n    k: int = 4,\n    runs: int = 3,\n) -> dict[int, float]:\n    results = {}\n    for bs in batch_sizes:\n        # Replicate a single prompt to fill the batch\n        inputs = tokenizer(\n            [prompt] * bs, return_tensors=\"pt\", padding=True\n        ).to(target_model.device)\n\n        def bench(use_spec: bool) -> float:\n            kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)\n            if use_spec:\n                kwargs[\"assistant_model\"] = draft_model\n                kwargs[\"num_assistant_tokens\"] = k\n            torch.cuda.synchronize()\n            t0 = time.perf_counter()\n            for _ in range(runs):\n                with torch.no_grad():\n                    target_model.generate(**inputs, **kwargs)\n            torch.cuda.synchronize()\n            return (time.perf_counter() - t0) / runs\n\n        t_std  = bench(False)\n        t_spec = bench(True)\n        results[bs] = t_std / t_spec  # speedup\n        print(f\"batch={bs:3d}  standard={t_std:.2f}s  spec={t_spec:.2f}s  speedup={results[bs]:.2f}x\")\n\n    return results\n\n# Expected output pattern:\n# batch=  1  standard=2.10s  spec=0.84s  speedup=2.50x\n# batch=  4  standard=2.12s  spec=1.10s  speedup=1.93x\n# batch= 16  standard=2.30s  spec=1.95s  speedup=1.18x\n# batch= 32  standard=2.80s  spec=2.70s  speedup=1.04x   <- near-zero benefit\n# batch= 64  standard=4.10s  spec=4.30s  speedup=0.95x   <- regression possible\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The transition from beneficial to neutral typically occurs around batch 16–32 for 70B-class models on A100 GPUs. At batch 64+, draft generation overhead can "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "reduce"
+          },
+          {
+            "type": "text",
+            "text": " throughput relative to standard decoding."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Published Benchmark Numbers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Representative results from public papers and systems at batch size 1, greedy decoding:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Target model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Draft model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Task"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reported speedup"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Source"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PaLM 540B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PaLM 8B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "MT-bench"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.9×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Leviathan et al., 2023"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GPT-3.5-level 70B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "7B same family"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Chat (HumanEval)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.0–2.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Chen et al., 2023"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Vicuna 33B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medusa heads"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "MT-bench"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2.2–2.8×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cai et al., 2024 (Medusa)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Llama-2 70B"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "EAGLE (1 layer)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "MT-bench"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3.0–3.5×"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Li et al., 2024 (EAGLE)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Measuring Acceptance Rate from vLLM Metrics"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM exposes Prometheus counters for speculative decoding. Use them to compute live acceptance rate and verify the speedup you're actually getting in production:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import requests\n\ndef get_spec_decode_stats(prometheus_url: str = \"http://localhost:8000/metrics\") -> dict:\n    \"\"\"Fetch speculative decoding stats from a running vLLM server.\"\"\"\n    resp = requests.get(prometheus_url, timeout=5)\n    resp.raise_for_status()\n\n    accepted = 0\n    draft = 0\n    for line in resp.text.splitlines():\n        if line.startswith(\"#\") or not line.strip():\n            continue\n        if \"spec_decode_num_accepted_tokens\" in line and \"{\" not in line:\n            accepted = float(line.split()[-1])\n        if \"spec_decode_num_draft_tokens\" in line and \"{\" not in line:\n            draft = float(line.split()[-1])\n\n    acceptance_rate = accepted / draft if draft > 0 else 0.0\n    return {\n        \"total_accepted_tokens\": accepted,\n        \"total_draft_tokens\": draft,\n        \"acceptance_rate\": acceptance_rate,\n    }\n\n\nstats = get_spec_decode_stats()\nprint(f\"Acceptance rate:  {stats['acceptance_rate']:.3f}\")\nprint(f\"Total accepted:   {stats['total_accepted_tokens']:,.0f}\")\nprint(f\"Total drafted:    {stats['total_draft_tokens']:,.0f}\")\n\n# Cross-check with theoretical speedup given your k and r\nfrom math import pow\nalpha = stats[\"acceptance_rate\"]\nk, r = 4, 0.10\nif alpha < 1.0:\n    exp_accepted = (1 - alpha**(k+1)) / (1 - alpha)\nelse:\n    exp_accepted = k + 1\ntheoretical = exp_accepted / (k * r + 1)\nprint(f\"Theoretical speedup at measured alpha: {theoretical:.2f}x\")\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes That Kill Speedup"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Measuring speedup without GPU synchronisation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "CUDA kernels launch asynchronously. "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "time.perf_counter()"
+          },
+          {
+            "type": "text",
+            "text": " immediately after "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "generate()"
+          },
+          {
+            "type": "text",
+            "text": " measures the Python dispatch time, not the GPU execution time. Always call "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "torch.cuda.synchronize()"
+          },
+          {
+            "type": "text",
+            "text": " before stopping the timer. Without this, the measured speedup is artificially high."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparing against a cold-cache baseline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the standard-decode baseline runs before GPU caches are warm, its first few iterations pay page-fault and weight-loading penalties that speculative decoding (which ran later) does not. Always run several warmup iterations before timing both paths."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enabling speculative decoding at high batch size"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At batch 32+ the draft model's "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " forward passes add overhead without freeing arithmetic capacity in the target. The result is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "negative speedup"
+          },
+          {
+            "type": "text",
+            "text": ". Disable speculation at high batch sizes — or set a runtime gate that switches decoding strategy based on current queue depth."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices for Maximising Speedup"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Profile α per workload, not per model pair. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Acceptance rate on code differs from chat by 10–15 percentage points. Benchmark on a sample of your actual prompts before choosing k."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Use greedy decoding (temperature=0) wherever the product allows. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Greedy gives the highest and most predictable acceptance rate. At temperature=0, the acceptance check is a simple token-equality test with no floating-point sampling noise."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Tune k with an automatic sweep, not by hand. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Run the speedup formula with measured α and r to find optimal k before committing to a production value. Re-run when the workload distribution changes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Monitor acceptance rate continuously in production. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "A drop below 0.65 should trigger an alert. Common causes: prompt-engineering changes that shift the distribution away from what the draft model was trained on, or workload mixing that increases the fraction of structured-output requests."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Gate on batch size. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Implement a runtime check: if the current active batch size exceeds a threshold (e.g. 16), fall back to standard decoding. vLLM supports this via the "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "--speculative-disable-by-batch-size"
+                  },
+                  {
+                    "type": "text",
+                    "text": " flag."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Speculative decoding speedup comes from exploiting unused arithmetic capacity in a memory-bandwidth-bound decode step: one target model pass verifies "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "k"
+              },
+              {
+                "type": "text",
+                "text": " draft tokens at roughly the cost of verifying one. The resulting speedup is governed by acceptance rate α, draft-to-target latency ratio r, and the number of draft tokens k. On natural text and code at batch size 1, same-family draft models achieve 2–3× with k=4; code tasks can reach 3–3.5× with higher α. The benefit disappears above batch ~16–32 as the target becomes compute-bound. Measure with proper GPU synchronisation on your actual workload; the theoretical formula is a reliable guide for choosing k once you know α."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
