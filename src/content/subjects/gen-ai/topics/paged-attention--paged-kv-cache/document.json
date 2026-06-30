@@ -1,0 +1,1661 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every autoregressive LLM decoding step appends a new key-vector and value-vector for every layer. By the time a 4096-token sequence completes, a Llama-3 70B model has produced ~80 GB of KV data per request. The original approach \u2014 pre-allocating a contiguous tensor of size "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_seq_len \u00d7 num_layers \u00d7 2 \u00d7 d_model \u00d7 dtype_bytes"
+          },
+          {
+            "type": "text",
+            "text": " \u2014 wastes enormous amounts of GPU memory because most requests never reach the maximum length. PagedAttention, introduced in vLLM, borrows virtual-memory paging from OS design to eliminate this waste."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Problem: KV Cache Fragmentation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A contiguous KV cache has two fragmentation modes. "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Internal fragmentation"
+          },
+          {
+            "type": "text",
+            "text": ": each request reserves space for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_seq_len"
+          },
+          {
+            "type": "text",
+            "text": " tokens but on average uses only 30\u201350% of that before generation finishes. "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "External fragmentation"
+          },
+          {
+            "type": "text",
+            "text": ": after requests of different lengths complete, the freed contiguous regions cannot be reused for longer requests without defragmentation. Together these effects mean GPU utilization often sits below 50% even on a fully-loaded server."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNTIwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjUyMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSwgc2Fucy1zZXJpZiI+CiAgPCEtLSBCYWNrZ3JvdW5kIC0tPgogIDxyZWN0IHdpZHRoPSI4NjAiIGhlaWdodD0iNTIwIiBmaWxsPSIjZjhmOWZhIiByeD0iOCIvPgogIAogIDwhLS0gVGl0bGUgLS0+CiAgPHRleHQgeD0iNDMwIiB5PSIzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPlBhZ2VkQXR0ZW50aW9uOiBLViBDYWNoZSBNZW1vcnkgTGF5b3V0PC90ZXh0PgoKICA8IS0tID09PSBMRUZUOiBDb250aWd1b3VzIChvbGQpID09PSAtLT4KICA8dGV4dCB4PSIyMDAiIHk9IjY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2MwMzkyYiI+Q29udGlndW91cyBLViBDYWNoZSAoUHJlLXZMTE0pPC90ZXh0PgoKICA8IS0tIEdQVSBtZW1vcnkgYmFyIC0tPgogIDxyZWN0IHg9IjMwIiB5PSI4MCIgd2lkdGg9IjM0MCIgaGVpZ2h0PSI1MCIgZmlsbD0iI2VjZjBmMSIgc3Ryb2tlPSIjYmRjM2M3IiBzdHJva2Utd2lkdGg9IjEiIHJ4PSIzIi8+CiAgPHRleHQgeD0iMjAwIiB5PSIxMDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPkdQVSBIQk0gKDIwIEdCKTwvdGV4dD4KCiAgPCEtLSBSZXEgQSAobGFyZ2UpIC0tPgogIDxyZWN0IHg9IjMwIiB5PSI4MCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSI1MCIgZmlsbD0iIzM0OThkYiIgb3BhY2l0eT0iMC44NSIgcng9IjIiLz4KICA8dGV4dCB4PSI5MCIgeT0iMTEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSJ3aGl0ZSIgZm9udC13ZWlnaHQ9ImJvbGQiPlJlcSBBIChtYXhfbGVuPTIwNDgpPC90ZXh0PgogIDwhLS0gUmVxIEIgKHNtYWxsIGJ1dCByZXNlcnZlZCBtYXgpIC0tPgogIDxyZWN0IHg9IjE1MCIgeT0iODAiIHdpZHRoPSIxMjAiIGhlaWdodD0iNTAiIGZpbGw9IiNlNzRjM2MiIG9wYWNpdHk9IjAuODUiIHJ4PSIyIi8+CiAgPHRleHQgeD0iMjEwIiB5PSIxMTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IndoaXRlIiBmb250LXdlaWdodD0iYm9sZCI+UmVxIEIgKG1heF9sZW49MjA0OCk8L3RleHQ+CiAgPCEtLSBSZXEgQyBmcmFnbWVudGVkIC0tPgogIDxyZWN0IHg9IjI3MCIgeT0iODAiIHdpZHRoPSI2MCIgaGVpZ2h0PSI1MCIgZmlsbD0iIzJlY2M3MSIgb3BhY2l0eT0iMC44NSIgcng9IjIiLz4KICA8dGV4dCB4PSIzMDAiIHk9IjExMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSJ3aGl0ZSI+UmVxIEM8L3RleHQ+CiAgPCEtLSBXYXN0ZSAtLT4KICA8cmVjdCB4PSIzMzAiIHk9IjgwIiB3aWR0aD0iNDAiIGhlaWdodD0iNTAiIGZpbGw9IiNlNzRjM2MiIG9wYWNpdHk9IjAuMyIgc3Ryb2tlPSIjZTc0YzNjIiBzdHJva2UtZGFzaGFycmF5PSI0LDIiIHJ4PSIyIi8+CiAgPHRleHQgeD0iMzUwIiB5PSIxMDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2MwMzkyYiI+d2FzdGVkPC90ZXh0PgoKICA8IS0tIFRva2VucyB1c2VkIHZzIHJlc2VydmVkIC0tPgogIDx0ZXh0IHg9IjMwIiB5PSIxNTAiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NTUiPlJlcSBBOiB1c2VzIDUxMi8yMDQ4IHRva2VucyDihpIgPC90ZXh0PgogIDx0ZXh0IHg9IjIwMCIgeT0iMTUwIiBmb250LXNpemU9IjEwIiBmaWxsPSIjYzAzOTJiIiBmb250LXdlaWdodD0iYm9sZCI+NzUlIHdhc3RlZDwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMTY1IiBmb250LXNpemU9IjEwIiBmaWxsPSIjNTU1Ij5SZXEgQjogdXNlcyA4MDAvMjA0OCB0b2tlbnMg4oaSIDwvdGV4dD4KICA8dGV4dCB4PSIyMDAiIHk9IjE2NSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2MwMzkyYiIgZm9udC13ZWlnaHQ9ImJvbGQiPjYxJSB3YXN0ZWQ8L3RleHQ+CgogIDwhLS0gUHJvYmxlbXMgLS0+CiAgPHJlY3QgeD0iMzAiIHk9IjE3OCIgd2lkdGg9IjM0MCIgaGVpZ2h0PSI2MCIgZmlsbD0iI2ZkZjJmMiIgc3Ryb2tlPSIjZTc0YzNjIiBzdHJva2Utd2lkdGg9IjEiIHJ4PSI0Ii8+CiAgPHRleHQgeD0iMjAwIiB5PSIxOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjYzAzOTJiIj5Qcm9ibGVtczwvdGV4dD4KICA8dGV4dCB4PSI0MCIgeT0iMjEyIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj7igKIgTXVzdCBwcmUtYWxsb2NhdGUgbWF4X2xlbiDDlyBkX21vZGVsIMOXIDIgw5cgYnl0ZXM8L3RleHQ+CiAgPHRleHQgeD0iNDAiIHk9IjIyNiIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzMyI+4oCiIEludGVybmFsIGZyYWdtZW50YXRpb246IHVudXNlZCB0YWlsIGFsd2F5cyByZXNlcnZlZDwvdGV4dD4KICA8dGV4dCB4PSI0MCIgeT0iMjQwIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj7igKIgTm8gc2hhcmluZyBiZXR3ZWVuIGJlYW0gc2VhcmNoIGJyYW5jaGVzPC90ZXh0PgoKICA8IS0tID09PSBSSUdIVDogUGFnZWQgPT09IC0tPgogIDx0ZXh0IHg9IjY0NSIgeT0iNjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTMiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMjdhZTYwIj5QYWdlZCBLViBDYWNoZSAodkxMTSk8L3RleHQ+CgogIDwhLS0gUGh5c2ljYWwgYmxvY2sgcG9vbCAtLT4KICA8dGV4dCB4PSI0OTAiIHk9Ijg4IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzJjM2U1MCI+UGh5c2ljYWwgQmxvY2sgUG9vbDwvdGV4dD4KICAKICA8IS0tIEJsb2NrcyBncmlkICg0eDQgPSAxNiBibG9ja3MsIGVhY2ggMTYgdG9rZW5zKSAtLT4KICA8Zz4KICAgIDwhLS0gUm93IDEgLS0+CiAgICA8cmVjdCB4PSI0OTAiIHk9Ijk1IiB3aWR0aD0iNTAiIGhlaWdodD0iMzUiIGZpbGw9IiMzNDk4ZGIiIG9wYWNpdHk9IjAuODUiIHJ4PSIyIi8+CiAgICA8dGV4dCB4PSI1MTUiIHk9IjExNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSJ3aGl0ZSI+QjAgKEEpPC90ZXh0PgogICAgPHJlY3QgeD0iNTQ1IiB5PSI5NSIgd2lkdGg9IjUwIiBoZWlnaHQ9IjM1IiBmaWxsPSIjMzQ5OGRiIiBvcGFjaXR5PSIwLjg1IiByeD0iMiIvPgogICAgPHRleHQgeD0iNTcwIiB5PSIxMTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0id2hpdGUiPkIxIChBKTwvdGV4dD4KICAgIDxyZWN0IHg9IjYwMCIgeT0iOTUiIHdpZHRoPSI1MCIgaGVpZ2h0PSIzNSIgZmlsbD0iI2U3NGMzYyIgb3BhY2l0eT0iMC44NSIgcng9IjIiLz4KICAgIDx0ZXh0IHg9IjYyNSIgeT0iMTE3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IndoaXRlIj5CMiAoQik8L3RleHQ+CiAgICA8cmVjdCB4PSI2NTUiIHk9Ijk1IiB3aWR0aD0iNTAiIGhlaWdodD0iMzUiIGZpbGw9IiMyZWNjNzEiIG9wYWNpdHk9IjAuODUiIHJ4PSIyIi8+CiAgICA8dGV4dCB4PSI2ODAiIHk9IjExNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSJ3aGl0ZSI+QjMgKEMpPC90ZXh0PgogICAgPHJlY3QgeD0iNzEwIiB5PSI5NSIgd2lkdGg9IjUwIiBoZWlnaHQ9IjM1IiBmaWxsPSIjZWNmMGYxIiBzdHJva2U9IiNiZGMzYzciIHN0cm9rZS13aWR0aD0iMSIgcng9IjIiLz4KICAgIDx0ZXh0IHg9IjczNSIgeT0iMTE3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4ODgiPkI0IGZyZWU8L3RleHQ+CiAgICA8IS0tIFJvdyAyIC0tPgogICAgPHJlY3QgeD0iNDkwIiB5PSIxMzUiIHdpZHRoPSI1MCIgaGVpZ2h0PSIzNSIgZmlsbD0iIzM0OThkYiIgb3BhY2l0eT0iMC44NSIgcng9IjIiLz4KICAgIDx0ZXh0IHg9IjUxNSIgeT0iMTU3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IndoaXRlIj5CNSAoQSk8L3RleHQ+CiAgICA8cmVjdCB4PSI1NDUiIHk9IjEzNSIgd2lkdGg9IjUwIiBoZWlnaHQ9IjM1IiBmaWxsPSIjZWNmMGYxIiBzdHJva2U9IiNiZGMzYzciIHN0cm9rZS13aWR0aD0iMSIgcng9IjIiLz4KICAgIDx0ZXh0IHg9IjU3MCIgeT0iMTU3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM4ODgiPkI2IGZyZWU8L3RleHQ+CiAgICA8cmVjdCB4PSI2MDAiIHk9IjEzNSIgd2lkdGg9IjUwIiBoZWlnaHQ9IjM1IiBmaWxsPSIjZTc0YzNjIiBvcGFjaXR5PSIwLjg1IiByeD0iMiIvPgogICAgPHRleHQgeD0iNjI1IiB5PSIxNTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0id2hpdGUiPkI3IChCKTwvdGV4dD4KICAgIDxyZWN0IHg9IjY1NSIgeT0iMTM1IiB3aWR0aD0iNTAiIGhlaWdodD0iMzUiIGZpbGw9IiNlY2YwZjEiIHN0cm9rZT0iI2JkYzNjNyIgc3Ryb2tlLXdpZHRoPSIxIiByeD0iMiIvPgogICAgPHRleHQgeD0iNjgwIiB5PSIxNTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzg4OCI+QjggZnJlZTwvdGV4dD4KICAgIDxyZWN0IHg9IjcxMCIgeT0iMTM1IiB3aWR0aD0iNTAiIGhlaWdodD0iMzUiIGZpbGw9IiMzNDk4ZGIiIG9wYWNpdHk9IjAuODUiIHJ4PSIyIi8+CiAgICA8dGV4dCB4PSI3MzUiIHk9IjE1NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSJ3aGl0ZSI+QjkgKEEpPC90ZXh0PgogIDwvZz4KICA8dGV4dCB4PSI0OTAiIHk9IjE4NSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNTU1Ij5FYWNoIGJsb2NrID0gMTYgdG9rZW5zIMOXIChLICsgVik8L3RleHQ+CgogIDwhLS0gQmxvY2sgdGFibGVzIC0tPgogIDx0ZXh0IHg9IjQ5MCIgeT0iMjA4IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzJjM2U1MCI+TG9naWNhbCDihpIgUGh5c2ljYWwgQmxvY2sgVGFibGU8L3RleHQ+CiAgCiAgPCEtLSBSZXEgQSB0YWJsZSAtLT4KICA8cmVjdCB4PSI0OTAiIHk9IjIxNSIgd2lkdGg9IjI3MCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzM0OThkYiIgb3BhY2l0eT0iMC4yIiByeD0iMiIvPgogIDx0ZXh0IHg9IjQ5NSIgeT0iMjI5IiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzI5ODBiOSI+UmVxIEE6PC90ZXh0PgogIDx0ZXh0IHg9IjU0NSIgeT0iMjI5IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5sb2dpY2FsWzBd4oaSQjAgIGxvZ2ljYWxbMV3ihpJCMSAgbG9naWNhbFsyXeKGkkI1ICBsb2dpY2FsWzNd4oaSQjk8L3RleHQ+CiAgPCEtLSBSZXEgQiB0YWJsZSAtLT4KICA8cmVjdCB4PSI0OTAiIHk9IjIzOCIgd2lkdGg9IjI3MCIgaGVpZ2h0PSIyMCIgZmlsbD0iI2U3NGMzYyIgb3BhY2l0eT0iMC4yIiByeD0iMiIvPgogIDx0ZXh0IHg9IjQ5NSIgeT0iMjUyIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2MwMzkyYiI+UmVxIEI6PC90ZXh0PgogIDx0ZXh0IHg9IjU0NSIgeT0iMjUyIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzMzIj5sb2dpY2FsWzBd4oaSQjIgIGxvZ2ljYWxbMV3ihpJCNzwvdGV4dD4KICA8IS0tIFJlcSBDIHRhYmxlIC0tPgogIDxyZWN0IHg9IjQ5MCIgeT0iMjYxIiB3aWR0aD0iMjcwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjMmVjYzcxIiBvcGFjaXR5PSIwLjIiIHJ4PSIyIi8+CiAgPHRleHQgeD0iNDk1IiB5PSIyNzUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMjdhZTYwIj5SZXEgQzo8L3RleHQ+CiAgPHRleHQgeD0iNTQ1IiB5PSIyNzUiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzMiPmxvZ2ljYWxbMF3ihpJCMzwvdGV4dD4KCiAgPCEtLSBCZW5lZml0cyBib3ggLS0+CiAgPHJlY3QgeD0iNDkwIiB5PSIyOTAiIHdpZHRoPSIzNDAiIGhlaWdodD0iNzAiIGZpbGw9IiNmMGZkZjQiIHN0cm9rZT0iIzI3YWU2MCIgc3Ryb2tlLXdpZHRoPSIxIiByeD0iNCIvPgogIDx0ZXh0IHg9IjY2MCIgeT0iMzA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzI3YWU2MCI+QmVuZWZpdHM8L3RleHQ+CiAgPHRleHQgeD0iNTAwIiB5PSIzMjQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzMiPuKAoiBOZWFyLXplcm8gd2FzdGU6IGFsbG9jYXRlIGJsb2NrcyBvbmx5IGFzIHRva2VucyBhcnJpdmU8L3RleHQ+CiAgPHRleHQgeD0iNTAwIiB5PSIzMzgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzMiPuKAoiBOb24tY29udGlndW91czogc2NhdHRlcmVkIGJsb2NrcyB3b3JrIHRyYW5zcGFyZW50bHk8L3RleHQ+CiAgPHRleHQgeD0iNTAwIiB5PSIzNTIiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzMiPuKAoiBDb3B5LW9uLXdyaXRlOiBiZWFtIGJyYW5jaGVzIHNoYXJlIHByZWZpeCBibG9ja3M8L3RleHQ+CgogIDwhLS0gPT09IEJPVFRPTTogVG9rZW4gaW5kZXggbWF0aCA9PT0gLS0+CiAgPHJlY3QgeD0iMzAiIHk9IjM4MCIgd2lkdGg9IjgwMCIgaGVpZ2h0PSIxMTUiIGZpbGw9IiNmZmYiIHN0cm9rZT0iI2RkZCIgc3Ryb2tlLXdpZHRoPSIxIiByeD0iNiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iNDAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzJjM2U1MCI+VG9rZW4gUG9zaXRpb24g4oaSIEJsb2NrIExvb2t1cDwvdGV4dD4KICAKICA8dGV4dCB4PSI1MCIgeT0iNDIyIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj5HaXZlbiB0b2tlbiBhdCBsb2dpY2FsIHBvc2l0aW9uIDwvdGV4dD4KICA8dGV4dCB4PSIyMTUiIHk9IjQyMiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzFhMWEyZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPmk8L3RleHQ+CiAgPHRleHQgeD0iMjI1IiB5PSI0MjIiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzMzMiPiB3aXRoIGJsb2NrIHNpemUgPC90ZXh0PgogIDx0ZXh0IHg9IjMzMCIgeT0iNDIyIiBmb250LXNpemU9IjExIiBmaWxsPSIjMWExYTJlIiBmb250LXdlaWdodD0iYm9sZCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSI+QjwvdGV4dD4KICA8dGV4dCB4PSIzNDIiIHk9IjQyMiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzMzMyI+OjwvdGV4dD4KICAKICA8cmVjdCB4PSI1MCIgeT0iNDMyIiB3aWR0aD0iNzYwIiBoZWlnaHQ9IjIyIiBmaWxsPSIjZjBmMGY1IiByeD0iMyIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iNDQ3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmaWxsPSIjMWExYTJlIj5ibG9ja19pZHggPSBpIC8vIEIgICAgb2Zmc2V0X2luX2Jsb2NrID0gaSAlIEIgICAgcGh5c2ljYWxfYmxvY2sgPSBibG9ja190YWJsZVtzZXFfaWRdW2Jsb2NrX2lkeF08L3RleHQ+CgogIDx0ZXh0IHg9IjUwIiB5PSI0NzIiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzMzMiPkZvciA8L3RleHQ+CiAgPHRleHQgeD0iNzAiIHk9IjQ3MiIgZm9udC1zaXplPSIxMSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZmlsbD0iIzFhMWEyZSI+Qj0xNjwvdGV4dD4KICA8dGV4dCB4PSIxMTAiIHk9IjQ3MiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzMzMyI+LCB0b2tlbiAzNyDihpIgYmxvY2sgPC90ZXh0PgogIDx0ZXh0IHg9IjIyMCIgeT0iNDcyIiBmb250LXNpemU9IjExIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmaWxsPSIjMWExYTJlIj4zNy8vMTY9MjwvdGV4dD4KICA8dGV4dCB4PSIyOTAiIHk9IjQ3MiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzMzMyI+LCBvZmZzZXQgPC90ZXh0PgogIDx0ZXh0IHg9IjM0MCIgeT0iNDcyIiBmb250LXNpemU9IjExIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmaWxsPSIjMWExYTJlIj4zNyUxNj01PC90ZXh0PgogIDx0ZXh0IHg9IjQwNSIgeT0iNDcyIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj4gIOKGkiAgcmVhZCA8L3RleHQ+CiAgPHRleHQgeD0iNDUwIiB5PSI0NzIiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZpbGw9IiMxYTFhMmUiPmt2X2NhY2hlW3BoeXNpY2FsX2Jsb2NrLCA1LCA6LCA6XTwvdGV4dD4KCiAgPHRleHQgeD0iNTAiIHk9IjQ4OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzg4OCI+VGhlIGJsb2NrIHRhYmxlIGlzIGEgc21hbGwgQ1BVLXNpZGUgbG9va3VwOyBhZGRyZXNzIHRyYW5zbGF0aW9uIGFkZHMgbmVnbGlnaWJsZSBvdmVyaGVhZCBjb21wYXJlZCB0byBhdHRlbnRpb24gY29tcHV0ZS48L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "PagedAttention: Contiguous vs Paged KV Cache Memory Layout",
+          "title": ""
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Page Layout: Blocks and Block Tables"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "PagedAttention divides the KV cache into fixed-size "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "physical blocks"
+          },
+          {
+            "type": "text",
+            "text": ". Each block holds the K and V tensors for exactly "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "block_size"
+          },
+          {
+            "type": "text",
+            "text": " tokens across all layers. The default in vLLM is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "block_size=16"
+          },
+          {
+            "type": "text",
+            "text": ". The shape of one physical block (for a single layer) is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{block\\_shape} = (2,\\; B,\\; H_{kv},\\; d_{head})"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where 2 is for K and V, "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B"
+          },
+          {
+            "type": "text",
+            "text": " is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "block_size"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "H_kv"
+          },
+          {
+            "type": "text",
+            "text": " is the number of KV heads (often fewer than Q heads in GQA), and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "d_head"
+          },
+          {
+            "type": "text",
+            "text": " is the per-head dimension. vLLM allocates "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "num_blocks \u00d7 num_layers"
+          },
+          {
+            "type": "text",
+            "text": " of these blocks into a flat GPU tensor called the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "kv_cache"
+          },
+          {
+            "type": "text",
+            "text": " pool at server startup."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Per-request, a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "block table"
+          },
+          {
+            "type": "text",
+            "text": " maps logical block indices (0, 1, 2, \u2026) to the physical block numbers assigned by the allocator. Given token at logical position "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "i"
+          },
+          {
+            "type": "text",
+            "text": ":"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{physical\\_block} = \\text{block\\_table}[\\lfloor i / B \\rfloor], \\quad \\text{offset} = i \\bmod B"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The block table itself is a small CPU-side integer array (one entry per logical block). At decode time vLLM copies it to GPU so the attention kernel can do the address translation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Block Allocator: Free List and Ref Counting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The block allocator maintains a free list of physical block numbers. When a new token is generated and no partially-filled block exists for the sequence, the allocator pops one block from the free list and adds it to that sequence's block table. When a sequence finishes (or is preempted), all its blocks are returned to the free list. Here is a minimal Python model of this allocator:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from __future__ import annotations\nfrom dataclasses import dataclass, field\nfrom typing import Dict, List, Optional\nimport torch\n\n@dataclass\nclass PhysicalBlock:\n    block_id: int\n    ref_count: int = 0   # >1 means shared (copy-on-write)\n\nclass BlockAllocator:\n    def __init__(self, num_blocks: int, block_size: int):\n        self.block_size = block_size\n        self.blocks: List[PhysicalBlock] = [PhysicalBlock(i) for i in range(num_blocks)]\n        self.free_list: List[int] = list(range(num_blocks))\n\n    def allocate(self) -> PhysicalBlock:\n        if not self.free_list:\n            raise MemoryError(\"No free KV cache blocks \u2014 need to preempt a request\")\n        block_id = self.free_list.pop()\n        blk = self.blocks[block_id]\n        blk.ref_count = 1\n        return blk\n\n    def free(self, blk: PhysicalBlock) -> None:\n        blk.ref_count -= 1\n        if blk.ref_count == 0:\n            self.free_list.append(blk.block_id)\n\n    def fork(self, blk: PhysicalBlock) -> None:\n        \"\"\"Increment ref_count for copy-on-write sharing (beam search).\"\"\"\n        blk.ref_count += 1\n\n    @property\n    def num_free_blocks(self) -> int:\n        return len(self.free_list)\n\n\nclass BlockTable:\n    \"\"\"Maps logical block index -> physical block for one sequence.\"\"\"\n    def __init__(self, allocator: BlockAllocator):\n        self.allocator = allocator\n        self.logical_to_physical: List[PhysicalBlock] = []\n\n    def append_token(self, pos: int) -> None:\n        \"\"\"Ensure a physical block exists for the token at position `pos`.\"\"\"\n        block_idx = pos // self.allocator.block_size\n        if block_idx >= len(self.logical_to_physical):\n            blk = self.allocator.allocate()\n            self.logical_to_physical.append(blk)\n\n    def get_physical_ids(self) -> List[int]:\n        return [b.block_id for b in self.logical_to_physical]\n\n    def free_all(self) -> None:\n        for blk in self.logical_to_physical:\n            self.allocator.free(blk)\n        self.logical_to_physical.clear()\n\n\n# Example: two concurrent sequences\nallocator = BlockAllocator(num_blocks=64, block_size=16)\nseq_a = BlockTable(allocator)\nseq_b = BlockTable(allocator)\n\n# Seq A generates 48 tokens (needs 3 blocks), Seq B generates 20 (needs 2 blocks)\nfor i in range(48):\n    seq_a.append_token(i)\nfor i in range(20):\n    seq_b.append_token(i)\n\nprint(f\"Seq A physical blocks: {seq_a.get_physical_ids()}\")  # 3 blocks\nprint(f\"Seq B physical blocks: {seq_b.get_physical_ids()}\")  # 2 blocks\nprint(f\"Free blocks remaining: {allocator.num_free_blocks}\")  # 64-5 = 59\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The PagedAttention Kernel"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At decode time a new query vector "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "q"
+          },
+          {
+            "type": "text",
+            "text": " (shape "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "[1, H, d]"
+          },
+          {
+            "type": "text",
+            "text": ") must attend to all previously generated K/V vectors. Because those vectors live in scattered physical blocks, the attention kernel takes the block table as an additional input and gathers blocks non-contiguously rather than assuming a flat buffer. The vLLM CUDA kernel does:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Load "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "block_table[seq_id]"
+                  },
+                  {
+                    "type": "text",
+                    "text": " from GPU memory (small int32 array, one entry per logical block)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For each logical block "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "j"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": read "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "kv_cache[physical_block_j, :, :, :]"
+                  },
+                  {
+                    "type": "text",
+                    "text": " into registers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Compute "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "q @ K_block.T"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and accumulate attention logits."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Apply online softmax across all blocks (same running-max technique as FlashAttention)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Accumulate "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "softmax(score) @ V_block"
+                  },
+                  {
+                    "type": "text",
+                    "text": " into the output register."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM exposes this through "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "vllm._custom_ops.paged_attention_v1"
+          },
+          {
+            "type": "text",
+            "text": " (and a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "_v2"
+          },
+          {
+            "type": "text",
+            "text": " variant for long contexts). These are CUDA kernels; you rarely call them directly. The public interface is the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "LLM"
+          },
+          {
+            "type": "text",
+            "text": " class:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from vllm import LLM, SamplingParams\n\n# vLLM manages the paged KV cache internally.\n# gpu_memory_utilization controls how much of HBM is reserved for the block pool.\n# block_size (default 16) sets how many tokens fit in one physical block.\nllm = LLM(\n    model=\"meta-llama/Llama-3-8b-hf\",\n    gpu_memory_utilization=0.90,   # 90% of GPU HBM \u2192 KV cache pool + weights\n    block_size=16,                  # tokens per physical block\n    max_model_len=8192,\n)\n\nparams = SamplingParams(temperature=0.8, max_tokens=512)\n\n# PagedAttention is invisible at the API level \u2014 blocks are allocated and freed\n# per token as each request grows and completes.\noutputs = llm.generate([\n    \"Explain paged virtual memory in operating systems.\",\n    \"Write a haiku about transformer attention.\",\n    \"What is the capital of France?\",\n], params)\n\nfor out in outputs:\n    print(out.outputs[0].text[:120])\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Copy-on-Write for Beam Search and Parallel Sampling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When beam search forks one sequence into N beams, the prefix KV blocks are "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "shared via reference counting"
+          },
+          {
+            "type": "text",
+            "text": " rather than copied. All beams point to the same physical blocks for the common prefix. When a beam needs to write a new token to a block that has ref_count > 1, the allocator performs a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "copy-on-write"
+          },
+          {
+            "type": "text",
+            "text": ": it allocates a fresh block, copies the old block's content, decrements the old block's ref_count, and updates the block table to point at the new block. This means "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "num_beams \u00d7 prefix_len"
+          },
+          {
+            "type": "text",
+            "text": " tokens cost only "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "prefix_len"
+          },
+          {
+            "type": "text",
+            "text": " blocks of GPU memory instead of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "num_beams \u00d7 prefix_len"
+          },
+          {
+            "type": "text",
+            "text": " blocks."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from vllm import LLM, SamplingParams\n\n# Beam search: 4 beams share prefix blocks via COW\nllm = LLM(model=\"meta-llama/Llama-3-8b-hf\")\n\nparams = SamplingParams(\n    n=4,               # 4 parallel samples (each gets independent block table)\n    best_of=4,         # beam-search style: generate 4 and pick best by logprob\n    temperature=0.0,   # greedy within each beam\n    max_tokens=256,\n    use_beam_search=True,\n)\n\noutputs = llm.generate([\"Summarize the key ideas of the French Revolution.\"], params)\nfor candidate in outputs[0].outputs:\n    print(f\"score={candidate.cumulative_logprob:.3f}: {candidate.text[:60]}...\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Block Pool Sizing and Preemption"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM estimates the block pool size at startup by profiling how much HBM the model weights consume, then subtracts that from the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "gpu_memory_utilization"
+          },
+          {
+            "type": "text",
+            "text": " target. The remainder is divided into blocks of size "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "block_size \u00d7 num_layers \u00d7 2 \u00d7 num_kv_heads \u00d7 d_head \u00d7 dtype_bytes"
+          },
+          {
+            "type": "text",
+            "text": ". You can inspect the computed pool size:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom vllm import LLM\n\nllm = LLM(\n    model=\"meta-llama/Llama-3-8b-hf\",\n    gpu_memory_utilization=0.85,\n    block_size=16,\n    dtype=\"float16\",\n)\n\n# Internal engine stats\ncache_config = llm.llm_engine.cache_config\nscheduler_config = llm.llm_engine.scheduler_config\n\nprint(f\"Block size (tokens): {cache_config.block_size}\")\nprint(f\"GPU blocks allocated: {cache_config.num_gpu_blocks}\")\nprint(f\"CPU blocks (swap):    {cache_config.num_cpu_blocks}\")\n\n# Compute bytes per block manually to cross-check\nmodel_cfg = llm.llm_engine.model_config\nnum_layers = model_cfg.get_num_layers(llm.llm_engine.parallel_config)\nnum_kv_heads = model_cfg.get_num_kv_heads(llm.llm_engine.parallel_config)\nhead_dim = model_cfg.get_head_size()\ndtype_bytes = 2  # float16\n\nbytes_per_block = (\n    cache_config.block_size * num_layers * 2 * num_kv_heads * head_dim * dtype_bytes\n)\ntotal_kv_bytes = cache_config.num_gpu_blocks * bytes_per_block\nprint(f\"KV cache pool: {total_kv_bytes / 1e9:.2f} GB\")\nprint(f\"Max concurrent tokens across all reqs: {cache_config.num_gpu_blocks * cache_config.block_size:,}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When the block pool is exhausted while a batch is in flight, vLLM "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "preempts"
+          },
+          {
+            "type": "text",
+            "text": " the lowest-priority request: it either (a) swaps its blocks to CPU RAM ("
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "num_cpu_blocks"
+          },
+          {
+            "type": "text",
+            "text": " reserves space for this) or (b) recomputes the prefix from scratch on resumption. Preemption is rare under well-tuned "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "gpu_memory_utilization"
+          },
+          {
+            "type": "text",
+            "text": " settings but visible in the engine logs as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Preempting request due to lack of KV cache blocks"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory Savings vs Contiguous Baseline"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Metric",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Contiguous KV cache",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PagedAttention",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory allocation strategy"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reserve max_len at request start"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Allocate one block per block_size new tokens"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Internal fragmentation"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (50\u201370% typical)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< (block_size \u2212 1) / avg_len (< 1% for long seqs)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Beam search memory overhead"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "num_beams \u00d7 prefix_len tokens"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "prefix_len tokens (copy-on-write)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Prompt caching (prefix reuse)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Impossible \u2014 contiguous layout differs per request"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hash-matched blocks shared across requests"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Throughput (vLLM paper, A10G)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1\u00d7 (baseline)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2\u20134\u00d7 higher output tokens/s"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prefix Caching: Block-Level KV Reuse"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM's "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "enable_prefix_caching=True"
+          },
+          {
+            "type": "text",
+            "text": " option extends paging further: completed physical blocks whose token content is identical to a block in a new request can be "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "reused directly"
+          },
+          {
+            "type": "text",
+            "text": " (ref_count incremented) without re-running the attention computation. The allocator hashes each block's token sequence and stores it in a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "token_hash \u2192 PhysicalBlock"
+          },
+          {
+            "type": "text",
+            "text": " map. This is highly effective when many requests share a long system prompt:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from vllm import LLM, SamplingParams\n\n# Enable prefix caching \u2014 blocks from completed requests stay resident\n# and are reused for new requests with matching token prefixes.\nllm = LLM(\n    model=\"meta-llama/Llama-3-8b-hf\",\n    enable_prefix_caching=True,\n    gpu_memory_utilization=0.85,\n)\n\nSYSTEM_PROMPT = \"You are a helpful assistant specialized in Python.\\n\\n\" + \"x\" * 3000\n\nparams = SamplingParams(max_tokens=128)\n\n# First request: fills prefix blocks from scratch\nout1 = llm.generate([SYSTEM_PROMPT + \"\\nQ: What is a decorator?\"], params)\n\n# Second request with same prefix: prefix blocks are cache-hit \u2192 faster TTFT\nout2 = llm.generate([SYSTEM_PROMPT + \"\\nQ: What is a generator?\"], params)\n\n# The TTFT for out2 should be significantly lower than out1 because\n# the long system prompt's KV is already in the block pool.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tuning block_size for Your Workload"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Smaller block_size (8):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " less waste on short requests, better for highly-variable-length workloads (chat). More block table entries, slight address-translation overhead."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Larger block_size (32, 64):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " higher GPU memory efficiency for long-context requests (RAG, summarization). Worse waste if most requests are short."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Prefix caching granularity:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " larger blocks are better because a cache hit requires the entire block to match. block_size=16 is a safe default for mixed workloads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "CPU swap (num_cpu_blocks):"
+                  },
+                  {
+                    "type": "text",
+                    "text": " leave at the default (~512) unless you want aggressive preemption tolerance. Swap adds PCIe latency."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benchmarking: Measuring the Throughput Gain"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The throughput improvement from PagedAttention is best measured by comparing output tokens per second at the same batch size. The gains are largest when requests have unpredictable or highly variable output lengths \u2014 exactly the cases where contiguous allocation wastes the most memory:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"\nThroughput benchmark: compare vLLM (paged) against HuggingFace (contiguous).\nRun on a single A100 80GB.\n\"\"\"\nimport time, torch\nfrom vllm import LLM, SamplingParams\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\nMODEL = \"meta-llama/Llama-3-8b-hf\"\nPROMPTS = [f\"Write a detailed explanation of topic number {i}.\" for i in range(64)]\nMAX_TOKENS = 256\n\n# --- vLLM (PagedAttention) ---\nllm = LLM(model=MODEL, gpu_memory_utilization=0.85)\nparams = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0)\n\nt0 = time.perf_counter()\noutputs = llm.generate(PROMPTS, params)\nvllm_time = time.perf_counter() - t0\n\ntotal_out_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)\nprint(f\"vLLM:  {total_out_tokens / vllm_time:.1f} output tokens/s  ({vllm_time:.1f}s total)\")\n\n# --- HuggingFace (contiguous KV) ---\ndel llm  # free VRAM\ntorch.cuda.empty_cache()\n\ntokenizer = AutoTokenizer.from_pretrained(MODEL)\nmodel = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch.float16, device_map=\"auto\")\n\nt0 = time.perf_counter()\nfor prompt in PROMPTS:  # HF doesn't easily batch variable-length outputs\n    inputs = tokenizer(prompt, return_tensors=\"pt\").to(\"cuda\")\n    with torch.no_grad():\n        out = model.generate(**inputs, max_new_tokens=MAX_TOKENS, do_sample=False)\nhf_time = time.perf_counter() - t0\n\n# approximate: each prompt averaged MAX_TOKENS new tokens\nhf_out_tokens = len(PROMPTS) * MAX_TOKENS\nprint(f\"HF:    {hf_out_tokens / hf_time:.1f} output tokens/s  ({hf_time:.1f}s total)\")\nprint(f\"Speedup: {(hf_out_tokens / hf_time) / (total_out_tokens / vllm_time):.2f}x (lower = vLLM faster)\")\n# Expected output (A100 80GB, Llama-3-8B fp16):\n#   vLLM:  ~1800 output tokens/s\n#   HF:    ~450 output tokens/s\n#   vLLM is ~4x faster on this 64-request batch\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "PagedAttention with Multi-GPU (Tensor Parallelism)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM extends PagedAttention to tensor-parallel multi-GPU setups transparently. Each GPU in a TP group holds a shard of the KV heads (as with normal TP), and each GPU maintains its own block pool for its shard. The block tables are replicated across GPUs, but the physical block IDs index into per-GPU VRAM independently:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from vllm import LLM, SamplingParams\n\n# 2-GPU tensor parallel: each GPU holds half the KV heads.\n# Each GPU maintains its own paged block pool.\nllm = LLM(\n    model=\"meta-llama/Llama-3-70b-hf\",\n    tensor_parallel_size=2,          # shard across 2 GPUs\n    gpu_memory_utilization=0.90,\n    block_size=16,\n)\n\nparams = SamplingParams(max_tokens=512, temperature=0.7)\noutputs = llm.generate([\"Explain the attention mechanism in transformers.\"], params)\nprint(outputs[0].outputs[0].text[:200])\n\n# Under the hood, each GPU worker runs the paged attention kernel on its\n# KV shard, then all-reduces the partial attention outputs across GPUs.\n# The block manager on the driver process tracks a unified logical\u2192physical\n# mapping, with offsets into each GPU's physical pool.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Pitfalls and Operational Notes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Out-of-memory at startup, not at inference time:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " vLLM pre-allocates the entire block pool upfront. If "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "gpu_memory_utilization=0.9"
+                  },
+                  {
+                    "type": "text",
+                    "text": " leaves too little room for activations, reduce it to 0.80\u20130.85."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "max_model_len limits the block table size:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " the maximum number of logical blocks per request is "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ceil(max_model_len / block_size)"
+                  },
+                  {
+                    "type": "text",
+                    "text": ". Setting "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "max_model_len"
+                  },
+                  {
+                    "type": "text",
+                    "text": " too high wastes GPU block table memory; set it to your actual 99th-percentile request length."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Prefix caching requires deterministic tokenization:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " block hashes are computed over token IDs. If a model's tokenizer produces different IDs for the same text (e.g., due to byte-fallback or BPE instability), prefix cache hits will be missed. Use a fixed tokenizer version."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Block fragmentation at block_size boundaries:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " the last block of each sequence is partially filled. With 1000 concurrent short requests of average length 30 tokens and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "block_size=16"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", each request wastes ~1 token slot on average \u2014 negligible. But with "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "block_size=64"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and 30-token requests, average waste rises to ~34 tokens per request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "CPU swap has PCIe bandwidth cost:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " swapping one 16-token block for Llama-3-8B takes ~32 KB \u00d7 32 layers = ~1 MB per block at fp16. Moving 100 blocks through PCIe 4.0 (64 GB/s) takes ~1.5 ms \u2014 noticeable latency if preemption is frequent."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "PagedAttention replaces fixed contiguous KV tensors with a pool of fixed-size physical blocks managed by a free list. A per-sequence block table translates logical token positions to physical block addresses at decode time. The result is near-zero fragmentation, copy-on-write beam search, and block-level prefix caching \u2014 each a consequence of the same virtual-memory abstraction applied to GPU KV buffers."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
