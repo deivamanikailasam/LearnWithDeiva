@@ -43,7 +43,11 @@ export const ENTERPRISE_GROUPINGS = {
     {
       id: 'requirements-definition',
       title: 'Requirements Definition',
-      leaves: ['success-criteria-kpis'],
+      leaves: [
+        'success-criteria-kpis',
+        'requirements-traceability',
+        'scope-boundaries-signoff',
+      ],
     },
   ],
   'solution-architecture-process': [
@@ -70,7 +74,11 @@ export const ENTERPRISE_GROUPINGS = {
     {
       id: 'security-architecture',
       title: 'Security Architecture',
-      leaves: ['threat-modeling-process'],
+      leaves: [
+        'threat-modeling-process',
+        'security-architecture-patterns',
+        'data-classification-in-design',
+      ],
     },
   ],
   'engineering-standards': [
@@ -92,7 +100,11 @@ export const ENTERPRISE_GROUPINGS = {
     {
       id: 'architecture-governance',
       title: 'Architecture Governance',
-      leaves: ['architectural-fitness-functions'],
+      leaves: [
+        'architectural-fitness-functions',
+        'architecture-principles-standards',
+        'technical-debt-guardrails',
+      ],
     },
   ],
   'developer-platform-program': [
@@ -196,7 +208,11 @@ export const ENTERPRISE_GROUPINGS = {
     {
       id: 'finops-operations',
       title: 'FinOps Operations',
-      leaves: ['finops-reporting'],
+      leaves: [
+        'finops-reporting',
+        'finops-personas-roles',
+        'docker-cloud-cost-allocation',
+      ],
     },
   ],
   'program-portfolio-management': [
@@ -234,7 +250,11 @@ export const ENTERPRISE_GROUPINGS = {
     {
       id: 'workforce-transformation',
       title: 'Workforce Transformation',
-      leaves: ['workforce-reskilling'],
+      leaves: [
+        'workforce-reskilling',
+        'skills-gap-analysis',
+        'role-transformation-playbooks',
+      ],
     },
   ],
   'legal-ethical-governance': [
@@ -462,7 +482,11 @@ export const ENTERPRISE_GROUPINGS = {
     {
       id: 'experimentation',
       title: 'Experimentation',
-      leaves: ['experimentation-program'],
+      leaves: [
+        'experimentation-program',
+        'ab-testing-containers',
+        'feature-experimentation',
+      ],
     },
   ],
 }

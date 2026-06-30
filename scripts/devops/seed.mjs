@@ -46,6 +46,8 @@ const LEVELS = {
   'go-for-devops': 'advanced',
   'configuration-languages': 'beginner',
   'regex-for-devops': 'intermediate',
+  'python-for-devops': 'intermediate',
+  'typescript-for-devops': 'intermediate',
   // 6. Build, Package & Artifact
   'build-tools': 'intermediate',
   'package-managers': 'beginner',
@@ -64,6 +66,7 @@ const LEVELS = {
   'cloudformation-cdk': 'intermediate',
   'crossplane': 'advanced',
   'other-iac-tools': 'intermediate',
+  'infrastructure-testing': 'advanced',
   // 9. Configuration Management
   'config-management-fundamentals': 'intermediate',
   'ansible': 'intermediate',
@@ -78,6 +81,8 @@ const LEVELS = {
   'other-cicd-tools': 'intermediate',
   'pipeline-as-code': 'intermediate',
   'self-hosted-runners': 'advanced',
+  'testing-quality-pipelines': 'intermediate',
+  'performance-engineering': 'intermediate',
   // 11. GitOps
   'gitops-fundamentals': 'advanced',
   'argo-cd': 'advanced',
@@ -93,6 +98,7 @@ const LEVELS = {
   'grafana-visualization': 'intermediate',
   'opentelemetry': 'advanced',
   'commercial-observability': 'intermediate',
+  'observability-profiling': 'advanced',
   // 14. Logging
   'log-management-fundamentals': 'intermediate',
   'elk-efk-stack': 'intermediate',
@@ -109,12 +115,14 @@ const LEVELS = {
   'error-budgets': 'advanced',
   'toil-automation': 'advanced',
   'capacity-planning': 'advanced',
+  'disaster-recovery-bcp': 'advanced',
   // 17. Incident Management
   'incident-response': 'intermediate',
   'on-call-practices': 'intermediate',
   'alerting-tools': 'intermediate',
   'postmortems': 'intermediate',
   'status-pages': 'intermediate',
+  'itsm-service-management': 'intermediate',
   // 18. Chaos & Resilience
   'chaos-engineering-principles': 'advanced',
   'chaos-engineering-tools': 'advanced',
@@ -127,6 +135,7 @@ const LEVELS = {
   'supply-chain-security': 'advanced',
   'runtime-security': 'advanced',
   'iac-security-scanning': 'advanced',
+  'cnapp-cloud-security': 'advanced',
   // 20. Compliance, Policy & Governance
   'compliance-frameworks': 'intermediate',
   'policy-as-code': 'advanced',
@@ -135,9 +144,11 @@ const LEVELS = {
   // 21. Cloud-Native & Multi-Cloud
   'cncf-landscape': 'intermediate',
   'cloud-service-models': 'beginner',
+  'cloud-provider-fundamentals': 'beginner',
   'multi-cloud-hybrid': 'advanced',
   'edge-computing': 'advanced',
   'serverless-for-devops': 'intermediate',
+  'event-streaming-messaging': 'intermediate',
   // 22. Platform Engineering
   'platform-engineering-fundamentals': 'advanced',
   'idp-tools': 'advanced',
@@ -170,6 +181,7 @@ const LEVELS = {
   'ebpf-for-devops': 'advanced',
   'webassembly-devops': 'advanced',
   'sustainable-devops': 'advanced',
+  'agentic-ai-devops': 'advanced',
   // 28. Career
   'devops-roles-career': 'beginner',
   'devops-certifications': 'intermediate',

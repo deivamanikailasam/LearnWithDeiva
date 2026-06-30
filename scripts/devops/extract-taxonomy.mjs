@@ -1,6 +1,6 @@
 /**
- * Extract intended topic structure from scripts/devops/part*.mjs and enterprise.mjs.
- * Outputs a map: rootId -> { subtopics: [{ id, title, leaves: [{ id, title }] }] }
+ * Extract intended topic structure from scripts/devops/part*.mjs.
+ * Groups entries by parentId (roadmap root topic id).
  *
  * Usage: node scripts/devops/extract-taxonomy.mjs
  */
@@ -11,41 +11,30 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCRIPTS_DIR = resolve(__dirname)
 
-/** @type {Map<string, { id: string, title: string, hasChildren: boolean, children?: { id: string, title: string }[] }[]>} */
+/** @type {Map<string, Map<string, { id: string, title: string, hasChildren: boolean, children?: { id: string, title: string }[] }>>} */
 const byRoot = new Map()
 
 function parsePartFile(path) {
   const src = readFileSync(path, 'utf8')
-  let currentRoot = null
+  const entryRe =
+    /\{\s*id:\s*'([^']+)',\s*title:\s*'([^']+)',\s*parentId:\s*'([^']+)'(?:,\s*level:\s*'[^']+')?(?:,\s*children:\s*\[([\s\S]*?)\])?\s*,?\s*\}/g
 
-  const rootRe = /\/\* ---- ([a-z0-9-]+)(?: \([^)]+\))? ---- \*\//g
-  const blocks = src.split(/(?=\/\* ---- [a-z0-9-]+(?: \([^)]+\))? ---- \*\/)/)
-
-  for (const block of blocks) {
-    const rootMatch = block.match(/\/\* ---- ([a-z0-9-]+)(?: \([^)]+\))? ---- \*\//)
-    if (rootMatch) currentRoot = rootMatch[1]
-
-    if (!currentRoot) continue
-
-    // Match addTopics entries whose parentId matches the current roadmap root
-    const entryRe =
-      /\{\s*id:\s*'([^']+)',\s*title:\s*'([^']+)',\s*parentId:\s*'([^']+)'(?:,\s*level:\s*'[^']+')?(?:,\s*children:\s*\[([\s\S]*?)\])?\s*,?\s*\}/g
-
-    let m
-    while ((m = entryRe.exec(block)) !== null) {
-      const [, id, title, parentId, childrenBlock] = m
-      if (parentId !== currentRoot) continue
-      const children = []
-      if (childrenBlock) {
-        const childRe = /\{\s*id:\s*'([^']+)',\s*title:\s*'([^']+)'/g
-        let cm
-        while ((cm = childRe.exec(childrenBlock)) !== null) {
-          children.push({ id: cm[1], title: cm[2] })
-        }
+  let m
+  while ((m = entryRe.exec(src)) !== null) {
+    const [, id, title, parentId, childrenBlock] = m
+    const children = []
+    if (childrenBlock) {
+      const childRe = /\{\s*id:\s*'([^']+)',\s*title:\s*'([^']+)'/g
+      let cm
+      while ((cm = childRe.exec(childrenBlock)) !== null) {
+        children.push({ id: cm[1], title: cm[2] })
       }
+    }
 
-      if (!byRoot.has(currentRoot)) byRoot.set(currentRoot, [])
-      byRoot.get(currentRoot).push({
+    if (!byRoot.has(parentId)) byRoot.set(parentId, new Map())
+    const rootEntries = byRoot.get(parentId)
+    if (!rootEntries.has(id)) {
+      rootEntries.set(id, {
         id,
         title,
         hasChildren: children.length > 0,
@@ -55,29 +44,9 @@ function parsePartFile(path) {
   }
 }
 
-function parseEnterpriseFile(path) {
-  const src = readFileSync(path, 'utf8')
-  const stageRe = /nodes:\s*\[([\s\S]*?)\]\s*,?\s*\}/g
-  // Simpler: find each root block with id and children array
-  const rootRe =
-    /\{\s*id:\s*'([^']+)',\s*title:\s*'([^']+)',\s*summary:[\s\S]*?children:\s*\[([\s\S]*?)\]\s*,?\s*\}/g
-  let m
-  while ((m = rootRe.exec(src)) !== null) {
-    const [, rootId, rootTitle, childrenBlock] = m
-    const children = []
-    const childRe = /\{\s*id:\s*'([^']+)',\s*title:\s*'([^']+)'/g
-    let cm
-    while ((cm = childRe.exec(childrenBlock)) !== null) {
-      children.push({ id: cm[1], title: cm[2] })
-    }
-    byRoot.set(rootId, children.map((c) => ({ ...c, hasChildren: false })))
-  }
-}
-
 for (const f of readdirSync(SCRIPTS_DIR).filter((n) => n.startsWith('part') && n.endsWith('.mjs'))) {
   parsePartFile(resolve(SCRIPTS_DIR, f))
 }
-// Enterprise/production topics use scripts/devops/enterprise-groupings.mjs instead.
 
 /** Heuristic titles for auto-grouped subtopics. */
 const GROUP_TITLE_HINTS = [
@@ -116,14 +85,9 @@ function slugify(title) {
     .slice(0, 48)
 }
 
-/**
- * Turn flat part-script entries into 3-level subtopic groupings.
- * Entries with children become subtopics; consecutive leaf entries are batched.
- */
 function buildGroupings(rootId, entries) {
   /** @type {{ id: string, title: string, leaves: { id: string, title: string }[] }[]} */
   const subtopics = []
-  /** @type {{ id: string, title: string }[]} */
   let leafBatch = []
 
   const flushBatch = () => {
@@ -133,11 +97,7 @@ function buildGroupings(rootId, entries) {
     if (subtopics.some((s) => s.id === groupId)) {
       groupId = `${groupId}-${subtopics.length + 1}`
     }
-    subtopics.push({
-      id: groupId,
-      title,
-      leaves: [...leafBatch],
-    })
+    subtopics.push({ id: groupId, title, leaves: [...leafBatch] })
     leafBatch = []
   }
 
@@ -151,7 +111,6 @@ function buildGroupings(rootId, entries) {
       })
     } else {
       leafBatch.push({ id: entry.id, title: entry.title })
-      // Batch size 4–7 for readability
       if (leafBatch.length >= 6) flushBatch()
     }
   }
@@ -162,16 +121,21 @@ function buildGroupings(rootId, entries) {
 /** @type {Record<string, { id: string, title: string, leaves: { id: string, title: string }[] }[]>} */
 const TAXONOMY = {}
 
-for (const [rootId, entries] of byRoot) {
-  TAXONOMY[rootId] = buildGroupings(rootId, entries)
+for (const [rootId, entryMap] of byRoot) {
+  TAXONOMY[rootId] = buildGroupings(rootId, [...entryMap.values()])
 }
 
 const outPath = resolve(__dirname, 'taxonomy.generated.mjs')
-const body = `/** Auto-generated from part scripts — do not edit by hand; re-run extract-taxonomy.mjs */\nexport const GENERATED_TAXONOMY = ${JSON.stringify(TAXONOMY, null, 2)}\n`
-writeFileSync(outPath, body)
+writeFileSync(
+  outPath,
+  `/** Auto-generated from part scripts — do not edit by hand; re-run extract-taxonomy.mjs */\nexport const GENERATED_TAXONOMY = ${JSON.stringify(TAXONOMY, null, 2)}\n`,
+)
 
-console.log(`Extracted taxonomy for ${Object.keys(TAXONOMY).length} root topics → ${outPath}`)
-for (const [rootId, subs] of Object.entries(TAXONOMY).slice(0, 3)) {
-  const leaves = subs.reduce((n, s) => n + s.leaves.length, 0)
-  console.log(`  ${rootId}: ${subs.length} subtopics, ${leaves} sub-subtopics`)
-}
+const roots = Object.keys(TAXONOMY).length
+const subs = Object.values(TAXONOMY).reduce((n, s) => n + s.length, 0)
+const leaves = Object.values(TAXONOMY).reduce(
+  (n, s) => n + s.reduce((m, sub) => m + sub.leaves.length, 0),
+  0,
+)
+console.log(`Extracted taxonomy for ${roots} root topics → ${outPath}`)
+console.log(`  Total subtopics: ${subs}, sub-subtopics: ${leaves}`)

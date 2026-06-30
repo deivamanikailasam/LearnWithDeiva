@@ -15,7 +15,12 @@ export const MANUAL_FLAT_OVERRIDES = {
     {
       id: 'history-ecosystem',
       title: 'History & Ecosystem',
-      leaves: ['history-of-containers'],
+      leaves: [
+        'history-of-containers',
+        { id: 'chroot-to-docker-evolution', title: 'From chroot to Docker' },
+        { id: 'open-source-container-ecosystem', title: 'Open Source Container Ecosystem' },
+        { id: 'container-standards-timeline', title: 'Container Standards Timeline' },
+      ],
     },
     {
       id: 'adoption-fit',

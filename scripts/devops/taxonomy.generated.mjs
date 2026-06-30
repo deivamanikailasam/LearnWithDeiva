@@ -1,6 +1,3536 @@
 /** Auto-generated from part scripts — do not edit by hand; re-run extract-taxonomy.mjs */
 export const GENERATED_TAXONOMY = {
+  "secrets-management": [
+    {
+      "id": "cloud-kms-hsm",
+      "title": "Cloud KMS & HSM",
+      "leaves": [
+        {
+          "id": "aws-kms",
+          "title": "AWS KMS"
+        },
+        {
+          "id": "aws-cloudhsm",
+          "title": "AWS CloudHSM"
+        },
+        {
+          "id": "azure-key-vault-hsm",
+          "title": "Azure Key Vault Managed HSM"
+        },
+        {
+          "id": "gcp-cloud-kms",
+          "title": "GCP Cloud KMS"
+        },
+        {
+          "id": "gcp-cloud-hsm",
+          "title": "GCP Cloud HSM"
+        },
+        {
+          "id": "oracle-cloud-kms",
+          "title": "OCI Vault & Key Management"
+        },
+        {
+          "id": "hashicorp-vault-transit",
+          "title": "HashiCorp Vault Transit Engine"
+        },
+        {
+          "id": "yubihsm",
+          "title": "YubiHSM 2"
+        },
+        {
+          "id": "thales-luna-hsm",
+          "title": "Thales Luna HSM"
+        },
+        {
+          "id": "entrust-nshield",
+          "title": "Entrust nShield"
+        },
+        {
+          "id": "envelope-encryption",
+          "title": "Envelope Encryption Pattern"
+        },
+        {
+          "id": "byok-hyok",
+          "title": "BYOK & HYOK Patterns"
+        }
+      ]
+    },
+    {
+      "id": "secrets-management--secrets-management-concepts-related-topics",
+      "title": "Secrets Management Concepts & Related Topics",
+      "leaves": [
+        {
+          "id": "secrets-management-concepts",
+          "title": "Secrets Management Concepts"
+        },
+        {
+          "id": "secret-rotation-practices",
+          "title": "Secret Rotation"
+        },
+        {
+          "id": "secret-zero-problem",
+          "title": "Secret Zero Problem"
+        }
+      ]
+    },
+    {
+      "id": "secrets-stores",
+      "title": "Secrets Stores",
+      "leaves": [
+        {
+          "id": "hashicorp-vault",
+          "title": "HashiCorp Vault"
+        },
+        {
+          "id": "aws-secrets-manager-overview",
+          "title": "AWS Secrets Manager (Overview)"
+        },
+        {
+          "id": "azure-key-vault-overview",
+          "title": "Azure Key Vault (Overview)"
+        },
+        {
+          "id": "google-secret-manager-overview",
+          "title": "Google Secret Manager (Overview)"
+        },
+        {
+          "id": "doppler",
+          "title": "Doppler"
+        },
+        {
+          "id": "1password-secrets-automation",
+          "title": "1Password Secrets Automation"
+        },
+        {
+          "id": "akeyless",
+          "title": "Akeyless"
+        },
+        {
+          "id": "infisical",
+          "title": "Infisical"
+        },
+        {
+          "id": "bitwarden-secrets-manager",
+          "title": "Bitwarden Secrets Manager"
+        },
+        {
+          "id": "cyberark-conjur",
+          "title": "CyberArk Conjur"
+        }
+      ]
+    },
+    {
+      "id": "k8s-secrets-tools",
+      "title": "Kubernetes Secret Tooling",
+      "leaves": [
+        {
+          "id": "k8s-native-secrets",
+          "title": "Kubernetes Native Secrets"
+        },
+        {
+          "id": "external-secrets-operator",
+          "title": "External Secrets Operator (ESO)"
+        },
+        {
+          "id": "sealed-secrets-bitnami",
+          "title": "Sealed Secrets (Bitnami)"
+        },
+        {
+          "id": "sops-mozilla",
+          "title": "SOPS (Mozilla)"
+        },
+        {
+          "id": "helm-secrets",
+          "title": "Helm Secrets"
+        },
+        {
+          "id": "vault-secrets-operator",
+          "title": "Vault Secrets Operator"
+        },
+        {
+          "id": "csi-secrets-store-driver",
+          "title": "Secrets Store CSI Driver"
+        }
+      ]
+    },
+    {
+      "id": "secret-detection-tools",
+      "title": "Secret Detection Tools",
+      "leaves": [
+        {
+          "id": "gitleaks",
+          "title": "GitLeaks"
+        },
+        {
+          "id": "trufflehog",
+          "title": "TruffleHog"
+        },
+        {
+          "id": "detect-secrets-yelp",
+          "title": "detect-secrets (Yelp)"
+        },
+        {
+          "id": "git-secrets-aws",
+          "title": "git-secrets (AWS)"
+        },
+        {
+          "id": "secretlint",
+          "title": "SecretLint"
+        },
+        {
+          "id": "ggshield",
+          "title": "GitGuardian ggshield"
+        }
+      ]
+    },
+    {
+      "id": "secrets-management--secrets-in-ci-cd-related-topics",
+      "title": "Secrets in CI/CD & Related Topics",
+      "leaves": [
+        {
+          "id": "secrets-in-cicd",
+          "title": "Secrets in CI/CD"
+        },
+        {
+          "id": "just-in-time-secrets",
+          "title": "Just-in-Time Secrets"
+        },
+        {
+          "id": "dynamic-secrets",
+          "title": "Dynamic Secrets"
+        },
+        {
+          "id": "workload-identity-secrets",
+          "title": "Workload Identity (OIDC, IRSA, Workload Identity Federation)"
+        }
+      ]
+    },
+    {
+      "id": "spiffe-spire-identity",
+      "title": "SPIFFE & SPIRE (Workload Identity)",
+      "leaves": [
+        {
+          "id": "spiffe-spec",
+          "title": "SPIFFE Specification"
+        },
+        {
+          "id": "spire-server",
+          "title": "SPIRE Server"
+        },
+        {
+          "id": "spire-agent",
+          "title": "SPIRE Agent"
+        },
+        {
+          "id": "jwt-svid",
+          "title": "JWT-SVIDs"
+        },
+        {
+          "id": "x509-svid",
+          "title": "X.509-SVIDs"
+        },
+        {
+          "id": "workload-attestation-spiffe",
+          "title": "Workload Attestation"
+        },
+        {
+          "id": "spiffe-trust-domain",
+          "title": "Trust Domains & Federation"
+        },
+        {
+          "id": "tornjak-spire-ui",
+          "title": "Tornjak (SPIRE UI)"
+        }
+      ]
+    },
+    {
+      "id": "iam-governance-platforms",
+      "title": "IAM Governance & PAM Platforms",
+      "leaves": [
+        {
+          "id": "aws-iam-access-analyzer",
+          "title": "AWS IAM Access Analyzer"
+        },
+        {
+          "id": "aws-iam-identity-center",
+          "title": "AWS IAM Identity Center (SSO)"
+        },
+        {
+          "id": "azure-pim",
+          "title": "Azure PIM (Privileged Identity Management)"
+        },
+        {
+          "id": "azure-entra-id",
+          "title": "Microsoft Entra ID Governance"
+        },
+        {
+          "id": "gcp-iam-recommender",
+          "title": "GCP IAM Recommender & Policy Intelligence"
+        },
+        {
+          "id": "sailpoint-identitynow",
+          "title": "SailPoint IdentityNow"
+        },
+        {
+          "id": "okta-identity-governance",
+          "title": "Okta Identity Governance"
+        },
+        {
+          "id": "cyberark-pam",
+          "title": "CyberArk PAM"
+        },
+        {
+          "id": "beyondtrust-pam",
+          "title": "BeyondTrust PAM"
+        },
+        {
+          "id": "delinea-thycotic",
+          "title": "Delinea (Thycotic)"
+        },
+        {
+          "id": "hashicorp-boundary",
+          "title": "HashiCorp Boundary"
+        },
+        {
+          "id": "teleport-iam",
+          "title": "Teleport (Access Plane)"
+        },
+        {
+          "id": "strongdm",
+          "title": "StrongDM"
+        }
+      ]
+    }
+  ],
+  "observability-fundamentals": [
+    {
+      "id": "k8s-debugging-tools",
+      "title": "Kubernetes Debugging & Live-Ops Tools",
+      "leaves": [
+        {
+          "id": "coroot",
+          "title": "Coroot"
+        },
+        {
+          "id": "komodor",
+          "title": "Komodor"
+        },
+        {
+          "id": "robusta-dev",
+          "title": "Robusta"
+        },
+        {
+          "id": "kubeshark",
+          "title": "Kubeshark"
+        },
+        {
+          "id": "kubectl-debug",
+          "title": "kubectl debug"
+        },
+        {
+          "id": "crane-tool",
+          "title": "Crane (go-containerregistry)"
+        },
+        {
+          "id": "kubescape-cli",
+          "title": "Kubescape"
+        },
+        {
+          "id": "inspektor-gadget-cross",
+          "title": "Inspektor Gadget (Cross-Reference)"
+        }
+      ]
+    },
+    {
+      "id": "observability-fundamentals--concepts-history-comparisons",
+      "title": "Concepts, History & Comparisons",
+      "leaves": [
+        {
+          "id": "monitoring-vs-observability",
+          "title": "Monitoring vs Observability"
+        }
+      ]
+    },
+    {
+      "id": "pillars-of-observability",
+      "title": "Pillars of Observability",
+      "leaves": [
+        {
+          "id": "pillar-metrics",
+          "title": "Metrics"
+        },
+        {
+          "id": "pillar-logs",
+          "title": "Logs"
+        },
+        {
+          "id": "pillar-traces",
+          "title": "Traces"
+        },
+        {
+          "id": "pillar-events",
+          "title": "Events"
+        },
+        {
+          "id": "pillar-profiles",
+          "title": "Continuous Profiles"
+        }
+      ]
+    },
+    {
+      "id": "observability-fundamentals--concepts-history-comparisons-4",
+      "title": "Concepts, History & Comparisons",
+      "leaves": [
+        {
+          "id": "observability-vs-telemetry",
+          "title": "Observability vs Telemetry"
+        },
+        {
+          "id": "black-box-vs-white-box",
+          "title": "Black-Box vs White-Box Monitoring"
+        }
+      ]
+    },
+    {
+      "id": "monitoring-methods",
+      "title": "Monitoring Methods",
+      "leaves": [
+        {
+          "id": "use-method",
+          "title": "USE Method (Utilization, Saturation, Errors)"
+        },
+        {
+          "id": "red-method",
+          "title": "RED Method (Rate, Errors, Duration)"
+        },
+        {
+          "id": "four-golden-signals",
+          "title": "Four Golden Signals"
+        }
+      ]
+    },
+    {
+      "id": "observability-fundamentals--core-linux-systems",
+      "title": "Core Linux Systems",
+      "leaves": [
+        {
+          "id": "observability-slo-link",
+          "title": "Observability ↔ SLOs"
+        },
+        {
+          "id": "cardinality-concept",
+          "title": "Cardinality"
+        }
+      ]
+    },
+    {
+      "id": "sampling-strategies-overview",
+      "title": "Sampling Strategies (Overview)",
+      "leaves": [
+        {
+          "id": "head-based-sampling",
+          "title": "Head-Based Sampling"
+        },
+        {
+          "id": "tail-based-sampling",
+          "title": "Tail-Based Sampling"
+        },
+        {
+          "id": "probability-sampling",
+          "title": "Probability Sampling"
+        },
+        {
+          "id": "rate-limiting-sampling",
+          "title": "Rate-Limiting Sampling"
+        }
+      ]
+    },
+    {
+      "id": "observability-fundamentals--high-cardinality-metrics-related-topics",
+      "title": "High-Cardinality Metrics & Related Topics",
+      "leaves": [
+        {
+          "id": "high-cardinality-metrics",
+          "title": "High-Cardinality Metrics"
+        },
+        {
+          "id": "push-vs-pull-metrics",
+          "title": "Push vs Pull Metric Collection"
+        },
+        {
+          "id": "tsdb-concept",
+          "title": "Time Series Databases (Concept)"
+        },
+        {
+          "id": "observability-data-lifecycle",
+          "title": "Observability Data Lifecycle"
+        },
+        {
+          "id": "telemetry-pipelines",
+          "title": "Telemetry Pipelines"
+        },
+        {
+          "id": "cost-of-observability",
+          "title": "Cost of Observability"
+        }
+      ]
+    },
+    {
+      "id": "observability-fundamentals--observability-for-serverless-related-topics",
+      "title": "Observability for Serverless & Related Topics",
+      "leaves": [
+        {
+          "id": "observability-serverless",
+          "title": "Observability for Serverless"
+        },
+        {
+          "id": "observability-microservices",
+          "title": "Observability for Microservices"
+        },
+        {
+          "id": "sli-burn-rate-alerts",
+          "title": "Burn-Rate Alerting (Multi-Window, Multi-Burn-Rate)"
+        },
+        {
+          "id": "ebpf-for-observability",
+          "title": "eBPF for Observability"
+        }
+      ]
+    }
+  ],
+  "api-gateways": [
+    {
+      "id": "modern-api-tooling",
+      "title": "Modern API Tooling (Protobuf, Connect, Smithy)",
+      "leaves": [
+        {
+          "id": "buf-build",
+          "title": "Buf CLI & Schema Registry"
+        },
+        {
+          "id": "connect-rpc",
+          "title": "Connect RPC (Buf)"
+        },
+        {
+          "id": "smithy-cli",
+          "title": "Smithy (AWS API Model)"
+        },
+        {
+          "id": "grpc-web",
+          "title": "gRPC-Web"
+        },
+        {
+          "id": "twirp-protocol",
+          "title": "Twirp"
+        },
+        {
+          "id": "protoc-gen-tools",
+          "title": "protoc / protoc-gen plugins"
+        },
+        {
+          "id": "asyncapi-generator",
+          "title": "AsyncAPI Generator"
+        },
+        {
+          "id": "openapi-generator-cli",
+          "title": "OpenAPI Generator CLI"
+        }
+      ]
+    },
+    {
+      "id": "api-gateways--api-gateway-fundamentals-related-topics",
+      "title": "API Gateway Fundamentals & Related Topics",
+      "leaves": [
+        {
+          "id": "api-gateway-fundamentals",
+          "title": "API Gateway Fundamentals"
+        },
+        {
+          "id": "api-gateway-patterns",
+          "title": "API Gateway Patterns (BFF, Aggregator, Edge)"
+        }
+      ]
+    },
+    {
+      "id": "cloud-managed-api-gateways",
+      "title": "Cloud-Managed API Gateways (Overview)",
+      "leaves": [
+        {
+          "id": "aws-api-gateway-overview",
+          "title": "AWS API Gateway"
+        },
+        {
+          "id": "azure-api-management-overview",
+          "title": "Azure API Management"
+        },
+        {
+          "id": "google-apigee-overview",
+          "title": "Google Apigee"
+        },
+        {
+          "id": "google-cloud-endpoints",
+          "title": "Google Cloud Endpoints"
+        }
+      ]
+    },
+    {
+      "id": "open-source-api-gateways",
+      "title": "Open-Source API Gateways",
+      "leaves": [
+        {
+          "id": "kong-gateway",
+          "title": "Kong Gateway"
+        },
+        {
+          "id": "tyk-gateway",
+          "title": "Tyk"
+        },
+        {
+          "id": "krakend",
+          "title": "KrakenD"
+        },
+        {
+          "id": "apache-apisix",
+          "title": "Apache APISIX"
+        },
+        {
+          "id": "traefik-gateway",
+          "title": "Traefik (Gateway Role)"
+        },
+        {
+          "id": "envoy-gateway",
+          "title": "Envoy Gateway"
+        },
+        {
+          "id": "emissary-ingress",
+          "title": "Emissary Ingress (Ambassador)"
+        },
+        {
+          "id": "gloo-gateway",
+          "title": "Solo.io Gloo Gateway"
+        },
+        {
+          "id": "wso2-api-manager",
+          "title": "WSO2 API Manager"
+        },
+        {
+          "id": "goku-api-gateway",
+          "title": "Goku API Gateway"
+        }
+      ]
+    },
+    {
+      "id": "api-gateway-features",
+      "title": "API Gateway Features",
+      "leaves": [
+        {
+          "id": "rate-limiting-gateway",
+          "title": "Rate Limiting & Throttling"
+        },
+        {
+          "id": "gateway-authentication",
+          "title": "Authentication & Authorization"
+        },
+        {
+          "id": "request-response-transformation",
+          "title": "Request / Response Transformation"
+        },
+        {
+          "id": "gateway-caching",
+          "title": "Response Caching"
+        },
+        {
+          "id": "api-composition",
+          "title": "API Composition & Aggregation"
+        },
+        {
+          "id": "gateway-webhooks",
+          "title": "Webhooks"
+        },
+        {
+          "id": "api-versioning",
+          "title": "API Versioning"
+        },
+        {
+          "id": "developer-portals",
+          "title": "Developer Portals"
+        },
+        {
+          "id": "gateway-analytics",
+          "title": "Analytics & Monetization"
+        },
+        {
+          "id": "gateway-cors",
+          "title": "CORS & Header Management"
+        }
+      ]
+    },
+    {
+      "id": "api-specifications",
+      "title": "API Specifications & Design",
+      "leaves": [
+        {
+          "id": "openapi-swagger",
+          "title": "OpenAPI / Swagger"
+        },
+        {
+          "id": "asyncapi",
+          "title": "AsyncAPI"
+        },
+        {
+          "id": "graphql-gateway",
+          "title": "GraphQL Gateway"
+        },
+        {
+          "id": "grpc-gateway",
+          "title": "gRPC Gateway"
+        },
+        {
+          "id": "json-rpc-spec",
+          "title": "JSON-RPC"
+        }
+      ]
+    },
+    {
+      "id": "api-gateways--concepts-history-comparisons",
+      "title": "Concepts, History & Comparisons",
+      "leaves": [
+        {
+          "id": "api-gateway-vs-service-mesh",
+          "title": "API Gateway vs Service Mesh vs Ingress"
+        },
+        {
+          "id": "gateway-api-spec",
+          "title": "Kubernetes Gateway API (Spec)"
+        }
+      ]
+    }
+  ],
+  "runtime-security": [
+    {
+      "id": "detection-engineering",
+      "title": "Detection Engineering",
+      "leaves": [
+        {
+          "id": "sigma-rules",
+          "title": "Sigma Rules"
+        },
+        {
+          "id": "yara-rules",
+          "title": "YARA Rules"
+        },
+        {
+          "id": "atomic-red-team",
+          "title": "Atomic Red Team (Red Canary)"
+        },
+        {
+          "id": "mitre-caldera",
+          "title": "MITRE CALDERA"
+        },
+        {
+          "id": "stratus-red-team",
+          "title": "Stratus Red Team (DataDog)"
+        },
+        {
+          "id": "mitre-attack-framework",
+          "title": "MITRE ATT&CK Framework"
+        },
+        {
+          "id": "mitre-d3fend",
+          "title": "MITRE D3FEND"
+        },
+        {
+          "id": "osquery-detection",
+          "title": "osquery (Detection)"
+        },
+        {
+          "id": "velociraptor-dfir",
+          "title": "Velociraptor (DFIR)"
+        }
+      ]
+    },
+    {
+      "id": "runtime-security--system-services-operations",
+      "title": "System Services & Operations",
+      "leaves": [
+        {
+          "id": "runtime-security-definition",
+          "title": "Runtime Security Definition"
+        },
+        {
+          "id": "behavioral-detection",
+          "title": "Behavioral Detection"
+        }
+      ]
+    },
+    {
+      "id": "falco",
+      "title": "Falco",
+      "leaves": [
+        {
+          "id": "falco-rules-engine",
+          "title": "Rules Engine"
+        },
+        {
+          "id": "falco-plugins",
+          "title": "Plugins"
+        },
+        {
+          "id": "falco-sidekick",
+          "title": "Falco Sidekick"
+        },
+        {
+          "id": "falco-talon",
+          "title": "Falco Talon (Response)"
+        }
+      ]
+    },
+    {
+      "id": "runtime-security--tetragon-isovalent-ebpf-related-topics",
+      "title": "Tetragon (Isovalent eBPF) & Related Topics",
+      "leaves": [
+        {
+          "id": "tetragon-runtime",
+          "title": "Tetragon (Isovalent eBPF)"
+        },
+        {
+          "id": "tracee-aqua",
+          "title": "Tracee (Aqua)"
+        },
+        {
+          "id": "sysdig-secure-runtime",
+          "title": "Sysdig Secure"
+        },
+        {
+          "id": "red-hat-acs-runtime",
+          "title": "Red Hat ACS / StackRox"
+        },
+        {
+          "id": "aqua-runtime",
+          "title": "Aqua Runtime Protection"
+        },
+        {
+          "id": "prisma-runtime",
+          "title": "Prisma Cloud Runtime"
+        }
+      ]
+    },
+    {
+      "id": "runtime-security--wiz-runtime-sensor-related-topics",
+      "title": "Wiz Runtime Sensor & Related Topics",
+      "leaves": [
+        {
+          "id": "wiz-runtime-sensor",
+          "title": "Wiz Runtime Sensor"
+        },
+        {
+          "id": "anomaly-detection-runtime",
+          "title": "Anomaly Detection"
+        },
+        {
+          "id": "file-integrity-monitoring",
+          "title": "File Integrity Monitoring (FIM)"
+        },
+        {
+          "id": "hids",
+          "title": "HIDS (Host Intrusion Detection)"
+        },
+        {
+          "id": "wazuh-hids",
+          "title": "Wazuh"
+        },
+        {
+          "id": "ossec-hids",
+          "title": "OSSEC"
+        }
+      ]
+    },
+    {
+      "id": "xdr-platforms",
+      "title": "XDR Platforms",
+      "leaves": [
+        {
+          "id": "crowdstrike-falcon-xdr",
+          "title": "CrowdStrike Falcon XDR"
+        },
+        {
+          "id": "palo-alto-cortex-xdr",
+          "title": "Palo Alto Cortex XDR"
+        },
+        {
+          "id": "microsoft-defender-xdr",
+          "title": "Microsoft Defender XDR"
+        },
+        {
+          "id": "sentinelone-singularity",
+          "title": "SentinelOne Singularity"
+        },
+        {
+          "id": "trellix-xdr",
+          "title": "Trellix XDR"
+        },
+        {
+          "id": "sophos-xdr",
+          "title": "Sophos XDR"
+        },
+        {
+          "id": "cybereason-xdr",
+          "title": "Cybereason XDR"
+        }
+      ]
+    },
+    {
+      "id": "confidential-computing",
+      "title": "Confidential Computing",
+      "leaves": [
+        {
+          "id": "aws-nitro-enclaves",
+          "title": "AWS Nitro Enclaves"
+        },
+        {
+          "id": "intel-sgx",
+          "title": "Intel SGX"
+        },
+        {
+          "id": "intel-tdx",
+          "title": "Intel TDX"
+        },
+        {
+          "id": "amd-sev-snp",
+          "title": "AMD SEV-SNP"
+        },
+        {
+          "id": "arm-cca",
+          "title": "ARM CCA (Realm Management Extension)"
+        },
+        {
+          "id": "azure-confidential-vm",
+          "title": "Azure Confidential VMs"
+        },
+        {
+          "id": "azure-confidential-containers",
+          "title": "Azure Confidential Containers (AKS)"
+        },
+        {
+          "id": "gcp-confidential-vm",
+          "title": "GCP Confidential VMs"
+        },
+        {
+          "id": "gke-confidential-nodes",
+          "title": "GKE Confidential Nodes"
+        },
+        {
+          "id": "coco-cncf",
+          "title": "Confidential Containers (CoCo) — CNCF Sandbox"
+        },
+        {
+          "id": "occlum-tee",
+          "title": "Occlum (LibOS for SGX)"
+        },
+        {
+          "id": "gramine-tee",
+          "title": "Gramine (LibOS)"
+        },
+        {
+          "id": "open-enclave-sdk",
+          "title": "Open Enclave SDK"
+        },
+        {
+          "id": "enarx-wasm-tee",
+          "title": "Enarx (WASM in TEEs)"
+        }
+      ]
+    }
+  ],
+  "continuous-learning": [
+    {
+      "id": "devops-standards-bodies",
+      "title": "DevOps Standards & Foundations",
+      "leaves": [
+        {
+          "id": "cdf-foundation",
+          "title": "CD Foundation (CDF)"
+        },
+        {
+          "id": "openssf-cross-ref-continuous",
+          "title": "OpenSSF (Cross-Reference)"
+        },
+        {
+          "id": "cncf-cross-ref-continuous",
+          "title": "CNCF (Cross-Reference)"
+        },
+        {
+          "id": "openinfra-foundation",
+          "title": "OpenInfra Foundation"
+        },
+        {
+          "id": "iso-iec-jtc1-sc42",
+          "title": "ISO/IEC JTC 1/SC 42 (AI)"
+        },
+        {
+          "id": "eclipse-foundation-edge",
+          "title": "Eclipse Foundation"
+        },
+        {
+          "id": "finops-foundation-cross",
+          "title": "FinOps Foundation (Cross-Reference)"
+        },
+        {
+          "id": "cloud-security-alliance",
+          "title": "Cloud Security Alliance (CSA)"
+        },
+        {
+          "id": "open-application-model-org",
+          "title": "OAM Community"
+        },
+        {
+          "id": "agile-alliance",
+          "title": "Agile Alliance"
+        }
+      ]
+    },
+    {
+      "id": "conferences-devops",
+      "title": "Conferences",
+      "leaves": [
+        {
+          "id": "kubecon-cloudnativecon",
+          "title": "KubeCon + CloudNativeCon"
+        },
+        {
+          "id": "devops-days",
+          "title": "DevOpsDays"
+        },
+        {
+          "id": "devops-enterprise-summit",
+          "title": "DevOps Enterprise Summit"
+        },
+        {
+          "id": "srecon-usenix",
+          "title": "SREcon (USENIX)"
+        },
+        {
+          "id": "devopsworld",
+          "title": "DevOps World"
+        },
+        {
+          "id": "hashiconf",
+          "title": "HashiConf"
+        },
+        {
+          "id": "platformcon",
+          "title": "PlatformCon"
+        },
+        {
+          "id": "gitops-con",
+          "title": "GitOpsCon"
+        },
+        {
+          "id": "observabilitycon",
+          "title": "ObservabilityCON"
+        },
+        {
+          "id": "re-invent-devops",
+          "title": "AWS re:Invent / re:Inforce"
+        },
+        {
+          "id": "google-cloud-next",
+          "title": "Google Cloud Next"
+        },
+        {
+          "id": "microsoft-build-ignite",
+          "title": "Microsoft Build / Ignite"
+        }
+      ]
+    },
+    {
+      "id": "devops-blogs-newsletters",
+      "title": "Blogs & Newsletters",
+      "leaves": [
+        {
+          "id": "cncf-blog",
+          "title": "CNCF Blog"
+        },
+        {
+          "id": "sre-weekly",
+          "title": "SRE Weekly"
+        },
+        {
+          "id": "devops-weekly",
+          "title": "DevOps Weekly"
+        },
+        {
+          "id": "kubernetes-blog",
+          "title": "Kubernetes Blog"
+        },
+        {
+          "id": "platform-weekly",
+          "title": "Platform Weekly"
+        },
+        {
+          "id": "last-week-in-aws",
+          "title": "Last Week in AWS"
+        },
+        {
+          "id": "cloud-native-now",
+          "title": "Cloud Native Now"
+        },
+        {
+          "id": "devops-com",
+          "title": "DevOps.com"
+        },
+        {
+          "id": "gradient-flow",
+          "title": "Gradient Flow (MLOps)"
+        }
+      ]
+    },
+    {
+      "id": "devops-podcasts",
+      "title": "Podcasts",
+      "leaves": [
+        {
+          "id": "kubernetes-podcast",
+          "title": "Kubernetes Podcast (Google)"
+        },
+        {
+          "id": "the-cloudcast",
+          "title": "The Cloudcast"
+        },
+        {
+          "id": "arrested-devops",
+          "title": "Arrested DevOps"
+        },
+        {
+          "id": "devops-cafe",
+          "title": "DevOps Cafe"
+        },
+        {
+          "id": "sre-prodcast",
+          "title": "Google SRE Prodcast"
+        },
+        {
+          "id": "platform-engineering-podcast",
+          "title": "Platform Engineering Podcast"
+        },
+        {
+          "id": "gradient-dissent",
+          "title": "Gradient Dissent (MLOps)"
+        }
+      ]
+    },
+    {
+      "id": "devops-books",
+      "title": "Foundational Books",
+      "leaves": [
+        {
+          "id": "phoenix-project-book",
+          "title": "The Phoenix Project"
+        },
+        {
+          "id": "unicorn-project-book",
+          "title": "The Unicorn Project"
+        },
+        {
+          "id": "devops-handbook-book",
+          "title": "The DevOps Handbook"
+        },
+        {
+          "id": "accelerate-book",
+          "title": "Accelerate (Forsgren, Humble, Kim)"
+        },
+        {
+          "id": "sre-book",
+          "title": "Site Reliability Engineering (Google)"
+        },
+        {
+          "id": "sre-workbook-book",
+          "title": "The SRE Workbook"
+        },
+        {
+          "id": "seeking-sre-book",
+          "title": "Seeking SRE"
+        },
+        {
+          "id": "team-topologies-book",
+          "title": "Team Topologies"
+        },
+        {
+          "id": "continuous-delivery-book",
+          "title": "Continuous Delivery (Humble & Farley)"
+        },
+        {
+          "id": "release-it-book",
+          "title": "Release It! (Michael Nygard)"
+        },
+        {
+          "id": "platform-engineering-book",
+          "title": "Platform Engineering on Kubernetes"
+        },
+        {
+          "id": "designing-data-intensive-apps",
+          "title": "Designing Data-Intensive Applications"
+        },
+        {
+          "id": "kim-mark-the-goal",
+          "title": "The Goal (Goldratt)"
+        }
+      ]
+    },
+    {
+      "id": "continuous-learning--open-source-contributions-related-topics",
+      "title": "Open Source Contributions & Related Topics",
+      "leaves": [
+        {
+          "id": "open-source-contribution",
+          "title": "Open Source Contributions"
+        },
+        {
+          "id": "mentoring-being-mentored",
+          "title": "Mentoring / Being Mentored"
+        },
+        {
+          "id": "learning-roadmaps",
+          "title": "Online Learning Roadmaps (roadmap.sh, etc.)"
+        }
+      ]
+    },
+    {
+      "id": "devops-mooc-platforms",
+      "title": "MOOC & Hands-On Platforms",
+      "leaves": [
+        {
+          "id": "kodekloud",
+          "title": "KodeKloud"
+        },
+        {
+          "id": "a-cloud-guru",
+          "title": "A Cloud Guru / Pluralsight"
+        },
+        {
+          "id": "linux-foundation-training",
+          "title": "Linux Foundation Training"
+        },
+        {
+          "id": "killercoda",
+          "title": "Killercoda"
+        },
+        {
+          "id": "instruqt",
+          "title": "Instruqt"
+        },
+        {
+          "id": "iximiuz-labs",
+          "title": "iximiuz Labs"
+        },
+        {
+          "id": "play-with-k8s-docker",
+          "title": "Play with Kubernetes / Docker"
+        },
+        {
+          "id": "qwiklabs-skill-boost",
+          "title": "Google Cloud Skills Boost (Qwiklabs)"
+        },
+        {
+          "id": "acg-microsoft-learn",
+          "title": "Microsoft Learn"
+        },
+        {
+          "id": "aws-skill-builder",
+          "title": "AWS Skill Builder"
+        }
+      ]
+    },
+    {
+      "id": "continuous-learning--communities-cncf-slack-reddit-discord",
+      "title": "Communities (CNCF Slack, Reddit, Discord)",
+      "leaves": [
+        {
+          "id": "communities-slack-discord",
+          "title": "Communities (CNCF Slack, Reddit, Discord)"
+        }
+      ]
+    }
+  ],
+  "python-for-devops": [
+    {
+      "id": "python-fundamentals-devops",
+      "title": "Python Fundamentals for DevOps",
+      "leaves": [
+        {
+          "id": "python-syntax-basics",
+          "title": "Python Syntax & Data Structures"
+        },
+        {
+          "id": "python-virtualenv-uv",
+          "title": "venv, pip & uv Package Management"
+        },
+        {
+          "id": "python-cli-argparse",
+          "title": "CLI Scripts with argparse & typer"
+        },
+        {
+          "id": "python-file-io-json",
+          "title": "File I/O, JSON & YAML in Python"
+        },
+        {
+          "id": "python-subprocess",
+          "title": "subprocess & Shelling Out"
+        },
+        {
+          "id": "python-requests-httpx",
+          "title": "HTTP Clients (requests & httpx)"
+        }
+      ]
+    },
+    {
+      "id": "python-automation-libraries",
+      "title": "Python Automation Libraries",
+      "leaves": [
+        {
+          "id": "boto3-aws-sdk",
+          "title": "boto3 (AWS SDK)"
+        },
+        {
+          "id": "azure-sdk-python",
+          "title": "Azure SDK for Python"
+        },
+        {
+          "id": "google-cloud-python",
+          "title": "Google Cloud Client Libraries"
+        },
+        {
+          "id": "kubernetes-python-client",
+          "title": "kubernetes Python Client"
+        },
+        {
+          "id": "docker-sdk-python",
+          "title": "Docker SDK for Python"
+        },
+        {
+          "id": "fabric-invoke",
+          "title": "Fabric & Invoke (Remote Execution)"
+        },
+        {
+          "id": "paramiko-ssh",
+          "title": "Paramiko (SSH)"
+        }
+      ]
+    },
+    {
+      "id": "python-iac-testing",
+      "title": "Python for IaC & Testing",
+      "leaves": [
+        {
+          "id": "pulumi-python",
+          "title": "Pulumi with Python"
+        },
+        {
+          "id": "cdk-python",
+          "title": "AWS CDK with Python"
+        },
+        {
+          "id": "pytest-devops",
+          "title": "pytest for Infrastructure Tests"
+        },
+        {
+          "id": "molecule-python",
+          "title": "Molecule (Ansible Testing)"
+        },
+        {
+          "id": "checkov-python-rules",
+          "title": "Writing Custom Checkov Policies"
+        }
+      ]
+    },
+    {
+      "id": "python-observability-data",
+      "title": "Python for Observability & Data",
+      "leaves": [
+        {
+          "id": "opentelemetry-python",
+          "title": "OpenTelemetry Python SDK"
+        },
+        {
+          "id": "pandas-ops-data",
+          "title": "pandas for Ops Data Analysis"
+        },
+        {
+          "id": "structlog-python",
+          "title": "Structured Logging (structlog)"
+        },
+        {
+          "id": "fastapi-internal-tools",
+          "title": "FastAPI for Internal Tools"
+        }
+      ]
+    }
+  ],
+  "typescript-for-devops": [
+    {
+      "id": "typescript-fundamentals-devops",
+      "title": "TypeScript Fundamentals for DevOps",
+      "leaves": [
+        {
+          "id": "typescript-node-basics",
+          "title": "TypeScript & Node.js Basics"
+        },
+        {
+          "id": "npm-pnpm-bun",
+          "title": "npm, pnpm & Bun Package Managers"
+        },
+        {
+          "id": "tsx-deno-runtime",
+          "title": "tsx, ts-node & Deno Runtimes"
+        },
+        {
+          "id": "typescript-cli-oclif",
+          "title": "CLI Tools with oclif & commander"
+        }
+      ]
+    },
+    {
+      "id": "typescript-iac-platform",
+      "title": "TypeScript for IaC & Platform",
+      "leaves": [
+        {
+          "id": "pulumi-typescript",
+          "title": "Pulumi with TypeScript"
+        },
+        {
+          "id": "aws-cdk-typescript",
+          "title": "AWS CDK with TypeScript"
+        },
+        {
+          "id": "cdktf-typescript",
+          "title": "CDK for Terraform (CDKTF) TypeScript"
+        },
+        {
+          "id": "projen-typescript",
+          "title": "Projen (Project Generators)"
+        },
+        {
+          "id": "sst-ion",
+          "title": "SST (Serverless Stack)"
+        }
+      ]
+    },
+    {
+      "id": "typescript-testing-tooling",
+      "title": "TypeScript Testing & Tooling",
+      "leaves": [
+        {
+          "id": "vitest-jest-devops",
+          "title": "Vitest & Jest for Tooling Tests"
+        },
+        {
+          "id": "playwright-api-testing",
+          "title": "Playwright for API Testing"
+        },
+        {
+          "id": "zod-config-validation",
+          "title": "Zod for Config Validation"
+        },
+        {
+          "id": "changesets-monorepo",
+          "title": "Changesets for Monorepo Releases"
+        }
+      ]
+    }
+  ],
+  "testing-quality-pipelines": [
+    {
+      "id": "test-pyramid-ci",
+      "title": "Test Pyramid in CI Pipelines",
+      "leaves": [
+        {
+          "id": "unit-tests-ci",
+          "title": "Unit Tests in CI"
+        },
+        {
+          "id": "integration-tests-ci",
+          "title": "Integration Tests in CI"
+        },
+        {
+          "id": "e2e-tests-ci",
+          "title": "End-to-End Tests in CI"
+        },
+        {
+          "id": "smoke-sanity-ci",
+          "title": "Smoke & Sanity Test Gates"
+        },
+        {
+          "id": "test-parallelization-sharding",
+          "title": "Test Parallelization & Sharding"
+        },
+        {
+          "id": "flaky-test-management",
+          "title": "Flaky Test Detection & Quarantine"
+        }
+      ]
+    },
+    {
+      "id": "quality-gates-ci",
+      "title": "Quality Gates & Policy in Pipelines",
+      "leaves": [
+        {
+          "id": "code-coverage-gates",
+          "title": "Code Coverage Thresholds"
+        },
+        {
+          "id": "mutation-testing-ci",
+          "title": "Mutation Testing (Stryker, PIT)"
+        },
+        {
+          "id": "sonarqube-quality-gate",
+          "title": "SonarQube Quality Gates"
+        },
+        {
+          "id": "codecov-coveralls",
+          "title": "Codecov & Coveralls"
+        },
+        {
+          "id": "pr-quality-checks",
+          "title": "PR Quality Checks & Required Status"
+        }
+      ]
+    },
+    {
+      "id": "contract-mutation-testing",
+      "title": "Contract & API Testing in CI",
+      "leaves": [
+        {
+          "id": "pact-contract-testing",
+          "title": "Pact Contract Testing"
+        },
+        {
+          "id": "schemathesis-api",
+          "title": "Schemathesis (OpenAPI Fuzzing)"
+        },
+        {
+          "id": "dredd-api-testing",
+          "title": "Dredd API Testing"
+        },
+        {
+          "id": "postman-newman-ci",
+          "title": "Postman & Newman in CI"
+        },
+        {
+          "id": "karate-api-testing",
+          "title": "Karate (API Test Framework)"
+        }
+      ]
+    },
+    {
+      "id": "test-environments-data",
+      "title": "Test Environments & Data in CI",
+      "leaves": [
+        {
+          "id": "ephemeral-test-envs",
+          "title": "Ephemeral Test Environments"
+        },
+        {
+          "id": "testcontainers",
+          "title": "Testcontainers"
+        },
+        {
+          "id": "service-virtualization",
+          "title": "Service Virtualization (WireMock, Mountebank)"
+        },
+        {
+          "id": "synthetic-test-data-ci",
+          "title": "Synthetic & Anonymized Test Data"
+        }
+      ]
+    }
+  ],
+  "performance-engineering": [
+    {
+      "id": "load-testing-fundamentals",
+      "title": "Load & Performance Testing Fundamentals",
+      "leaves": [
+        {
+          "id": "performance-test-types",
+          "title": "Load, Stress, Spike & Soak Tests"
+        },
+        {
+          "id": "performance-slas-nfrs",
+          "title": "Performance SLAs & NFRs"
+        },
+        {
+          "id": "workload-modelling",
+          "title": "Workload Modelling & Traffic Patterns"
+        },
+        {
+          "id": "performance-test-environments",
+          "title": "Performance Test Environments"
+        }
+      ]
+    },
+    {
+      "id": "load-testing-tools",
+      "title": "Load Testing Tools",
+      "leaves": [
+        {
+          "id": "grafana-k6-deep",
+          "title": "Grafana k6 (Scripting & Cloud)"
+        },
+        {
+          "id": "locust-python-load",
+          "title": "Locust"
+        },
+        {
+          "id": "jmeter-load",
+          "title": "Apache JMeter"
+        },
+        {
+          "id": "gatling-load",
+          "title": "Gatling"
+        },
+        {
+          "id": "artillery-load",
+          "title": "Artillery"
+        },
+        {
+          "id": "vegeta-load",
+          "title": "Vegeta"
+        },
+        {
+          "id": "hey-load",
+          "title": "hey (HTTP Load Generator)"
+        }
+      ]
+    },
+    {
+      "id": "performance-analysis",
+      "title": "Performance Analysis & Optimization",
+      "leaves": [
+        {
+          "id": "apm-performance-analysis",
+          "title": "APM-Driven Performance Analysis"
+        },
+        {
+          "id": "flame-graphs-perf",
+          "title": "Flame Graphs & Profiling for Perf"
+        },
+        {
+          "id": "database-query-tuning",
+          "title": "Database Query Performance Tuning"
+        },
+        {
+          "id": "cdn-edge-performance",
+          "title": "CDN & Edge Performance Optimization"
+        },
+        {
+          "id": "performance-regression-ci",
+          "title": "Performance Regression in CI"
+        }
+      ]
+    }
+  ],
+  "disaster-recovery-bcp": [
+    {
+      "id": "dr-fundamentals",
+      "title": "Disaster Recovery Fundamentals",
+      "leaves": [
+        {
+          "id": "rto-rpo-deep",
+          "title": "RTO, RPO & Recovery Objectives"
+        },
+        {
+          "id": "backup-strategies-dr",
+          "title": "Backup Strategies (3-2-1, Immutable)"
+        },
+        {
+          "id": "recovery-tiering",
+          "title": "Recovery Tiering & Criticality Classes"
+        },
+        {
+          "id": "dr-runbooks",
+          "title": "DR Runbooks & Playbooks"
+        }
+      ]
+    },
+    {
+      "id": "bcp-planning",
+      "title": "Business Continuity Planning",
+      "leaves": [
+        {
+          "id": "bcp-framework",
+          "title": "BCP Framework & ISO 22301"
+        },
+        {
+          "id": "crisis-communication-dr",
+          "title": "Crisis Communication During Outages"
+        },
+        {
+          "id": "failover-failback",
+          "title": "Failover & Failback Procedures"
+        },
+        {
+          "id": "geographic-redundancy",
+          "title": "Geographic Redundancy & Multi-Region DR"
+        }
+      ]
+    },
+    {
+      "id": "dr-patterns-tools",
+      "title": "DR Patterns & Cloud Tools",
+      "leaves": [
+        {
+          "id": "active-active-dr",
+          "title": "Active-Active & Active-Passive DR"
+        },
+        {
+          "id": "pilot-light-warm-standby",
+          "title": "Pilot Light, Warm Standby & Cold DR"
+        },
+        {
+          "id": "velero-k8s-backup",
+          "title": "Velero (Kubernetes Backup)"
+        },
+        {
+          "id": "aws-dr-services",
+          "title": "AWS DR (Route 53, DRS, Backup)"
+        },
+        {
+          "id": "azure-site-recovery",
+          "title": "Azure Site Recovery"
+        },
+        {
+          "id": "gcp-dr-services",
+          "title": "GCP DR & Backup Services"
+        }
+      ]
+    },
+    {
+      "id": "dr-testing-exercises",
+      "title": "DR Testing & Exercises",
+      "leaves": [
+        {
+          "id": "dr-drills-tabletop",
+          "title": "Tabletop & DR Drills"
+        },
+        {
+          "id": "chaos-for-dr",
+          "title": "Chaos Engineering for DR Validation"
+        },
+        {
+          "id": "dr-test-cadence",
+          "title": "DR Test Cadence & Compliance Evidence"
+        }
+      ]
+    }
+  ],
+  "observability-profiling": [
+    {
+      "id": "profiling-fundamentals",
+      "title": "Continuous Profiling Fundamentals",
+      "leaves": [
+        {
+          "id": "cpu-memory-profiling",
+          "title": "CPU & Memory Profiling Concepts"
+        },
+        {
+          "id": "sampling-vs-instrumentation",
+          "title": "Sampling vs Instrumentation Profilers"
+        },
+        {
+          "id": "profiling-production-safety",
+          "title": "Production-Safe Profiling"
+        },
+        {
+          "id": "profiling-otel-integration",
+          "title": "Profiling & OpenTelemetry Integration"
+        }
+      ]
+    },
+    {
+      "id": "profiling-platforms",
+      "title": "Profiling Platforms & Tools",
+      "leaves": [
+        {
+          "id": "grafana-pyroscope-deep",
+          "title": "Grafana Pyroscope"
+        },
+        {
+          "id": "parca-continuous",
+          "title": "Parca"
+        },
+        {
+          "id": "google-cloud-profiler",
+          "title": "Google Cloud Profiler"
+        },
+        {
+          "id": "datadog-profiler",
+          "title": "Datadog Continuous Profiler"
+        },
+        {
+          "id": "elastic-universal-profiling",
+          "title": "Elastic Universal Profiling"
+        },
+        {
+          "id": "async-profiler-java",
+          "title": "Async Profiler (JVM)"
+        },
+        {
+          "id": "pprof-go",
+          "title": "pprof (Go)"
+        }
+      ]
+    },
+    {
+      "id": "ebpf-profiling",
+      "title": "eBPF-Based Profiling",
+      "leaves": [
+        {
+          "id": "bpftrace-profiling",
+          "title": "bpftrace for Ad-Hoc Profiling"
+        },
+        {
+          "id": "pixie-profiling",
+          "title": "Pixie (Auto-Profiling)"
+        },
+        {
+          "id": "otel-ebpf-profiler",
+          "title": "OpenTelemetry eBPF Profiler"
+        }
+      ]
+    }
+  ],
+  "itsm-service-management": [
+    {
+      "id": "itsm-fundamentals",
+      "title": "ITSM Fundamentals for DevOps",
+      "leaves": [
+        {
+          "id": "itil4-devops",
+          "title": "ITIL 4 & DevOps Integration"
+        },
+        {
+          "id": "incident-problem-change",
+          "title": "Incident, Problem & Change Management"
+        },
+        {
+          "id": "cmdb-service-catalog",
+          "title": "CMDB & Service Catalog"
+        },
+        {
+          "id": "sla-ola-uc",
+          "title": "SLA, OLA & Underpinning Contracts"
+        }
+      ]
+    },
+    {
+      "id": "itsm-platforms",
+      "title": "ITSM Platforms",
+      "leaves": [
+        {
+          "id": "servicenow-itsm",
+          "title": "ServiceNow ITSM"
+        },
+        {
+          "id": "jira-service-management",
+          "title": "Jira Service Management"
+        },
+        {
+          "id": "freshservice-itsm",
+          "title": "Freshservice"
+        },
+        {
+          "id": "bmc-helix-itsm",
+          "title": "BMC Helix ITSM"
+        },
+        {
+          "id": "pagerduty-service-catalog",
+          "title": "PagerDuty Service Catalog"
+        }
+      ]
+    },
+    {
+      "id": "chatops-platforms",
+      "title": "ChatOps & Collaboration Platforms",
+      "leaves": [
+        {
+          "id": "slack-chatops",
+          "title": "Slack ChatOps (Workflows & Apps)"
+        },
+        {
+          "id": "microsoft-teams-ops",
+          "title": "Microsoft Teams for Ops"
+        },
+        {
+          "id": "mattermost-chatops",
+          "title": "Mattermost"
+        },
+        {
+          "id": "discord-ops-bots",
+          "title": "Discord Ops Bots"
+        },
+        {
+          "id": "incident-io-chatops",
+          "title": "incident.io ChatOps"
+        }
+      ]
+    }
+  ],
+  "cloud-provider-fundamentals": [
+    {
+      "id": "cloud-shared-responsibility",
+      "title": "Cloud Shared Responsibility & Models",
+      "leaves": [
+        {
+          "id": "shared-responsibility-model",
+          "title": "Shared Responsibility Model"
+        },
+        {
+          "id": "cloud-deployment-models-deep",
+          "title": "Public, Private, Hybrid & Sovereign Cloud"
+        },
+        {
+          "id": "cloud-regions-availability",
+          "title": "Regions, AZs & Availability Domains"
+        },
+        {
+          "id": "cloud-well-architected-agnostic",
+          "title": "Well-Architected Principles (Cloud-Agnostic)"
+        }
+      ]
+    },
+    {
+      "id": "cloud-identity-networking-basics",
+      "title": "Cloud Identity & Networking Basics",
+      "leaves": [
+        {
+          "id": "cloud-iam-fundamentals",
+          "title": "Cloud IAM Fundamentals"
+        },
+        {
+          "id": "cloud-vpc-networking-basics",
+          "title": "VPC / VNet / VPC Networking Basics"
+        },
+        {
+          "id": "cloud-storage-types",
+          "title": "Object, Block & File Storage Types"
+        },
+        {
+          "id": "cloud-managed-services-catalog",
+          "title": "Managed Services vs Self-Managed"
+        }
+      ]
+    },
+    {
+      "id": "cloud-provider-landscape",
+      "title": "Major Cloud Provider Landscape",
+      "leaves": [
+        {
+          "id": "aws-overview-devops",
+          "title": "AWS for DevOps (Overview)"
+        },
+        {
+          "id": "azure-overview-devops",
+          "title": "Azure for DevOps (Overview)"
+        },
+        {
+          "id": "gcp-overview-devops",
+          "title": "GCP for DevOps (Overview)"
+        },
+        {
+          "id": "oracle-ibm-cloud-overview",
+          "title": "Oracle Cloud & IBM Cloud (Overview)"
+        },
+        {
+          "id": "digitalocean-linode-vultr",
+          "title": "DigitalOcean, Linode & Vultr"
+        }
+      ]
+    }
+  ],
+  "event-streaming-messaging": [
+    {
+      "id": "messaging-fundamentals",
+      "title": "Event-Driven & Messaging Fundamentals",
+      "leaves": [
+        {
+          "id": "pub-sub-patterns",
+          "title": "Pub/Sub & Event-Driven Patterns"
+        },
+        {
+          "id": "message-queues-vs-streams",
+          "title": "Message Queues vs Event Streams"
+        },
+        {
+          "id": "event-schema-evolution",
+          "title": "Event Schema & Evolution (Avro, Protobuf)"
+        },
+        {
+          "id": "dead-letter-queues",
+          "title": "Dead Letter Queues & Retry Patterns"
+        }
+      ]
+    },
+    {
+      "id": "kafka-ecosystem",
+      "title": "Apache Kafka Ecosystem",
+      "leaves": [
+        {
+          "id": "kafka-fundamentals-ops",
+          "title": "Kafka Fundamentals for Operators"
+        },
+        {
+          "id": "kafka-connect",
+          "title": "Kafka Connect"
+        },
+        {
+          "id": "kafka-streams-ops",
+          "title": "Kafka Streams (Operations View)"
+        },
+        {
+          "id": "confluent-platform",
+          "title": "Confluent Platform & Cloud"
+        },
+        {
+          "id": "redpanda-kafka",
+          "title": "Redpanda"
+        },
+        {
+          "id": "amazon-msk",
+          "title": "Amazon MSK"
+        },
+        {
+          "id": "strimzi-kafka-k8s",
+          "title": "Strimzi (Kafka on Kubernetes)"
+        }
+      ]
+    },
+    {
+      "id": "other-messaging-platforms",
+      "title": "Other Messaging Platforms",
+      "leaves": [
+        {
+          "id": "rabbitmq-ops",
+          "title": "RabbitMQ"
+        },
+        {
+          "id": "nats-jetstream",
+          "title": "NATS & JetStream"
+        },
+        {
+          "id": "apache-pulsar",
+          "title": "Apache Pulsar"
+        },
+        {
+          "id": "aws-sqs-sns-eventbridge",
+          "title": "AWS SQS, SNS & EventBridge"
+        },
+        {
+          "id": "azure-service-bus",
+          "title": "Azure Service Bus & Event Hubs"
+        },
+        {
+          "id": "google-pubsub",
+          "title": "Google Cloud Pub/Sub"
+        }
+      ]
+    }
+  ],
+  "cnapp-cloud-security": [
+    {
+      "id": "cnapp-fundamentals",
+      "title": "CNAPP Fundamentals",
+      "leaves": [
+        {
+          "id": "cnapp-cspm-cwpp-ciem",
+          "title": "CSPM, CWPP & CIEM in CNAPP"
+        },
+        {
+          "id": "cloud-security-posture",
+          "title": "Cloud Security Posture Management"
+        },
+        {
+          "id": "cloud-workload-protection",
+          "title": "Cloud Workload Protection"
+        },
+        {
+          "id": "cloud-identity-entitlements",
+          "title": "Cloud Identity Entitlement Management"
+        }
+      ]
+    },
+    {
+      "id": "cnapp-platforms",
+      "title": "CNAPP Platforms",
+      "leaves": [
+        {
+          "id": "wiz-cnapp",
+          "title": "Wiz"
+        },
+        {
+          "id": "prisma-cloud-paloalto",
+          "title": "Prisma Cloud (Palo Alto)"
+        },
+        {
+          "id": "orca-security",
+          "title": "Orca Security"
+        },
+        {
+          "id": "lacework-cnapp",
+          "title": "Lacework (Fortinet)"
+        },
+        {
+          "id": "sysdig-secure-cnapp",
+          "title": "Sysdig Secure"
+        },
+        {
+          "id": "microsoft-defender-cspm",
+          "title": "Microsoft Defender for Cloud"
+        }
+      ]
+    },
+    {
+      "id": "cloud-native-threat-detection",
+      "title": "Cloud-Native Threat Detection",
+      "leaves": [
+        {
+          "id": "guardduty-threat-detection",
+          "title": "AWS GuardDuty"
+        },
+        {
+          "id": "azure-defender-threats",
+          "title": "Microsoft Defender for Cloud Alerts"
+        },
+        {
+          "id": "gcp-security-command-center",
+          "title": "GCP Security Command Center"
+        },
+        {
+          "id": "cloud-trail-audit-analytics",
+          "title": "Cloud Audit Log Analytics"
+        }
+      ]
+    }
+  ],
+  "agentic-ai-devops": [
+    {
+      "id": "agentic-devops-fundamentals",
+      "title": "Agentic DevOps Fundamentals",
+      "leaves": [
+        {
+          "id": "ai-agents-for-ops",
+          "title": "AI Agents for Operations"
+        },
+        {
+          "id": "agent-orchestration-patterns",
+          "title": "Agent Orchestration Patterns"
+        },
+        {
+          "id": "human-in-the-loop-agents",
+          "title": "Human-in-the-Loop Agent Workflows"
+        },
+        {
+          "id": "agent-guardrails-devops",
+          "title": "Guardrails for DevOps AI Agents"
+        }
+      ]
+    },
+    {
+      "id": "coding-agent-platforms",
+      "title": "AI Coding Agent Platforms",
+      "leaves": [
+        {
+          "id": "cursor-background-agents",
+          "title": "Cursor Background Agents"
+        },
+        {
+          "id": "github-copilot-coding-agent",
+          "title": "GitHub Copilot Coding Agent"
+        },
+        {
+          "id": "devin-cognition",
+          "title": "Devin (Cognition)"
+        },
+        {
+          "id": "amazon-q-developer",
+          "title": "Amazon Q Developer"
+        },
+        {
+          "id": "gitlab-duo-agent",
+          "title": "GitLab Duo Agent Platform"
+        },
+        {
+          "id": "openai-codex-agent",
+          "title": "OpenAI Codex Agent"
+        }
+      ]
+    },
+    {
+      "id": "ai-remediation-automation",
+      "title": "AI Remediation & Pipeline Automation",
+      "leaves": [
+        {
+          "id": "ai-incident-triage",
+          "title": "AI Incident Triage & Summarization"
+        },
+        {
+          "id": "ai-root-cause-analysis",
+          "title": "AI-Assisted Root Cause Analysis"
+        },
+        {
+          "id": "ai-runbook-generation",
+          "title": "AI Runbook & Playbook Generation"
+        },
+        {
+          "id": "ai-policy-remediation",
+          "title": "AI Policy Violation Remediation"
+        },
+        {
+          "id": "mcp-devops-integration",
+          "title": "Model Context Protocol (MCP) for DevOps"
+        }
+      ]
+    }
+  ],
+  "infrastructure-testing": [
+    {
+      "id": "iac-testing-fundamentals",
+      "title": "Infrastructure Testing Fundamentals",
+      "leaves": [
+        {
+          "id": "iac-test-pyramid",
+          "title": "Infrastructure Test Pyramid"
+        },
+        {
+          "id": "static-analysis-iac",
+          "title": "Static Analysis for IaC"
+        },
+        {
+          "id": "policy-testing-iac",
+          "title": "Policy Testing (OPA, Sentinel)"
+        },
+        {
+          "id": "drift-detection-testing",
+          "title": "Drift Detection as Testing"
+        }
+      ]
+    },
+    {
+      "id": "terraform-testing-tools",
+      "title": "Terraform & OpenTofu Testing",
+      "leaves": [
+        {
+          "id": "terratest-deep",
+          "title": "Terratest"
+        },
+        {
+          "id": "terraform-test-framework",
+          "title": "terraform test Framework"
+        },
+        {
+          "id": "kitchen-terraform",
+          "title": "kitchen-terraform"
+        },
+        {
+          "id": "tftest-opentofu",
+          "title": "OpenTofu tftest"
+        },
+        {
+          "id": "localstack-terraform-test",
+          "title": "LocalStack for Terraform Tests"
+        }
+      ]
+    },
+    {
+      "id": "config-mgmt-testing",
+      "title": "Configuration Management Testing",
+      "leaves": [
+        {
+          "id": "ansible-molecule-deep",
+          "title": "Molecule (Ansible)"
+        },
+        {
+          "id": "inspec-compliance",
+          "title": "InSpec Compliance Testing"
+        },
+        {
+          "id": "test-kitchen-chef",
+          "title": "Test Kitchen (Chef)"
+        },
+        {
+          "id": "serverspec",
+          "title": "Serverspec"
+        },
+        {
+          "id": "goss-testing",
+          "title": "goss (Quick Server Validation)"
+        }
+      ]
+    },
+    {
+      "id": "kubernetes-policy-testing",
+      "title": "Kubernetes & Policy Testing",
+      "leaves": [
+        {
+          "id": "kyverno-test-cli",
+          "title": "Kyverno Test CLI & Chainsaw"
+        },
+        {
+          "id": "kubeconform-validation",
+          "title": "kubeconform"
+        },
+        {
+          "id": "kube-score",
+          "title": "kube-score"
+        },
+        {
+          "id": "datree-k8s",
+          "title": "Datree (Policy)"
+        },
+        {
+          "id": "monokle-k8s",
+          "title": "Monokle"
+        }
+      ]
+    }
+  ],
+  "other-service-meshes": [
+    {
+      "id": "cilium-service-mesh",
+      "title": "Cilium Service Mesh",
+      "leaves": [
+        {
+          "id": "cilium-ebpf-dataplane",
+          "title": "Cilium eBPF Data Plane"
+        },
+        {
+          "id": "cilium-hubble-observability",
+          "title": "Hubble Observability"
+        },
+        {
+          "id": "cilium-gateway-api",
+          "title": "Cilium Gateway API"
+        },
+        {
+          "id": "cilium-mutual-auth",
+          "title": "Cilium Mutual Authentication"
+        }
+      ]
+    },
+    {
+      "id": "consul-connect-mesh",
+      "title": "Consul Connect",
+      "leaves": [
+        {
+          "id": "consul-service-mesh",
+          "title": "Consul Service Mesh"
+        },
+        {
+          "id": "consul-intentions",
+          "title": "Consul Intentions (L4/L7 AuthZ)"
+        },
+        {
+          "id": "consul-api-gateway",
+          "title": "Consul API Gateway"
+        }
+      ]
+    },
+    {
+      "id": "kuma-service-mesh",
+      "title": "Kuma / Kong Mesh",
+      "leaves": [
+        {
+          "id": "kuma-universal-k8s",
+          "title": "Kuma on Kubernetes & Universal"
+        },
+        {
+          "id": "kuma-policies",
+          "title": "Kuma Traffic & Security Policies"
+        },
+        {
+          "id": "kong-mesh-enterprise",
+          "title": "Kong Mesh (Enterprise)"
+        }
+      ]
+    },
+    {
+      "id": "other-service-meshes--hashicorp-consul-connect-related-topics",
+      "title": "HashiCorp Consul Connect & Related Topics",
+      "leaves": [
+        {
+          "id": "consul-connect",
+          "title": "HashiCorp Consul Connect"
+        },
+        {
+          "id": "kuma-mesh",
+          "title": "Kuma"
+        },
+        {
+          "id": "nginx-service-mesh",
+          "title": "NGINX Service Mesh"
+        },
+        {
+          "id": "tetrate-service-bridge",
+          "title": "Tetrate Service Bridge (TSB)"
+        },
+        {
+          "id": "gloo-mesh",
+          "title": "Solo.io Gloo Mesh"
+        },
+        {
+          "id": "osm-discontinued",
+          "title": "Open Service Mesh (OSM) — Discontinued"
+        }
+      ]
+    },
+    {
+      "id": "other-service-meshes--aws-app-mesh-discontinued-related-topics",
+      "title": "AWS App Mesh — Discontinued & Related Topics",
+      "leaves": [
+        {
+          "id": "aws-app-mesh-discontinued",
+          "title": "AWS App Mesh — Discontinued"
+        },
+        {
+          "id": "maesh-traefik-mesh-discontinued",
+          "title": "Maesh / Traefik Mesh — Discontinued"
+        }
+      ]
+    }
+  ],
+  "other-gitops-tools": [
+    {
+      "id": "spinnaker-gitops",
+      "title": "Spinnaker",
+      "leaves": [
+        {
+          "id": "spinnaker-pipelines",
+          "title": "Spinnaker Pipelines"
+        },
+        {
+          "id": "spinnaker-deployment-strategies",
+          "title": "Spinnaker Deployment Strategies"
+        },
+        {
+          "id": "spinnaker-k8s-provider",
+          "title": "Spinnaker Kubernetes Provider"
+        }
+      ]
+    },
+    {
+      "id": "werf-gitops",
+      "title": "Werf",
+      "leaves": [
+        {
+          "id": "werf-giterminism",
+          "title": "Werf Giterminism"
+        },
+        {
+          "id": "werf-converge",
+          "title": "Werf Converge & Cleanup"
+        }
+      ]
+    },
+    {
+      "id": "jenkins-x-gitops",
+      "title": "Jenkins X",
+      "leaves": [
+        {
+          "id": "jenkins-x-lighthouse",
+          "title": "Jenkins X Lighthouse"
+        },
+        {
+          "id": "jenkins-x-tekton",
+          "title": "Jenkins X & Tekton"
+        }
+      ]
+    },
+    {
+      "id": "akuity-platform",
+      "title": "Akuity Platform",
+      "leaves": [
+        {
+          "id": "akuity-managed-argocd",
+          "title": "Akuity Managed Argo CD"
+        },
+        {
+          "id": "kargo-progressive-delivery",
+          "title": "Kargo (Progressive Delivery)"
+        }
+      ]
+    },
+    {
+      "id": "other-gitops-tools--spinnaker-related-topics",
+      "title": "Spinnaker & Related Topics",
+      "leaves": [
+        {
+          "id": "spinnaker",
+          "title": "Spinnaker"
+        },
+        {
+          "id": "werf",
+          "title": "Werf"
+        },
+        {
+          "id": "jenkins-x",
+          "title": "Jenkins X"
+        },
+        {
+          "id": "weave-gitops",
+          "title": "Weave GitOps"
+        },
+        {
+          "id": "codefresh-gitops",
+          "title": "Codefresh GitOps"
+        },
+        {
+          "id": "octopus-deploy",
+          "title": "Octopus Deploy"
+        }
+      ]
+    },
+    {
+      "id": "other-gitops-tools--rancher-fleet-related-topics",
+      "title": "Rancher Fleet & Related Topics",
+      "leaves": [
+        {
+          "id": "rancher-fleet",
+          "title": "Rancher Fleet"
+        },
+        {
+          "id": "kargo",
+          "title": "Kargo"
+        },
+        {
+          "id": "kubevela",
+          "title": "KubeVela"
+        },
+        {
+          "id": "bunnyshell",
+          "title": "Bunnyshell"
+        },
+        {
+          "id": "plural-platform",
+          "title": "Plural"
+        },
+        {
+          "id": "argonaut",
+          "title": "Argonaut (Commercial Argo)"
+        }
+      ]
+    }
+  ],
+  "cloud-service-models": [
+    {
+      "id": "service-model-types",
+      "title": "Cloud Service Model Types",
+      "leaves": [
+        {
+          "id": "iaas-deep",
+          "title": "Infrastructure as a Service (IaaS)"
+        },
+        {
+          "id": "paas-deep",
+          "title": "Platform as a Service (PaaS)"
+        },
+        {
+          "id": "saas-deep",
+          "title": "Software as a Service (SaaS)"
+        },
+        {
+          "id": "faas-serverless-deep",
+          "title": "Functions as a Service (FaaS)"
+        },
+        {
+          "id": "caas-containers-deep",
+          "title": "Containers as a Service (CaaS)"
+        },
+        {
+          "id": "dbaas-maas",
+          "title": "DBaaS, MaaS & XaaS Variants"
+        }
+      ]
+    },
+    {
+      "id": "cloud-economics-consumption",
+      "title": "Cloud Economics & Consumption",
+      "leaves": [
+        {
+          "id": "pay-as-you-go-reserved",
+          "title": "Pay-As-You-Go vs Reserved Capacity"
+        },
+        {
+          "id": "cloud-billing-models",
+          "title": "Cloud Billing & Metering Models"
+        },
+        {
+          "id": "egress-data-transfer-costs",
+          "title": "Egress & Data Transfer Costs"
+        },
+        {
+          "id": "cloud-marketplace-models",
+          "title": "Cloud Marketplace Models"
+        }
+      ]
+    },
+    {
+      "id": "cloud-native-vs-cloud-enabled",
+      "title": "Cloud-Native vs Cloud-Enabled",
+      "leaves": [
+        {
+          "id": "twelve-factor-apps",
+          "title": "Twelve-Factor App Methodology"
+        },
+        {
+          "id": "cloud-native-design-principles",
+          "title": "Cloud-Native Design Principles"
+        },
+        {
+          "id": "lift-and-shift-vs-refactor",
+          "title": "Lift-and-Shift vs Refactor vs Replatform"
+        }
+      ]
+    },
+    {
+      "id": "cloud-service-models--iaas-infrastructure-as-a-service-related-topics",
+      "title": "IaaS (Infrastructure as a Service) & Related Topics",
+      "leaves": [
+        {
+          "id": "iaas-overview",
+          "title": "IaaS (Infrastructure as a Service)"
+        },
+        {
+          "id": "paas-overview",
+          "title": "PaaS (Platform as a Service)"
+        },
+        {
+          "id": "saas-overview",
+          "title": "SaaS (Software as a Service)"
+        },
+        {
+          "id": "faas-overview",
+          "title": "FaaS (Function as a Service)"
+        },
+        {
+          "id": "caas-overview",
+          "title": "CaaS (Container as a Service)"
+        },
+        {
+          "id": "baas-overview",
+          "title": "BaaS (Backend as a Service)"
+        }
+      ]
+    },
+    {
+      "id": "cloud-service-models--dbaas-database-as-a-service-related-topics",
+      "title": "DBaaS (Database as a Service) & Related Topics",
+      "leaves": [
+        {
+          "id": "dbaas-overview",
+          "title": "DBaaS (Database as a Service)"
+        },
+        {
+          "id": "monitoring-as-service",
+          "title": "MaaS (Monitoring as a Service)"
+        },
+        {
+          "id": "shared-responsibility-model",
+          "title": "Shared Responsibility Model"
+        },
+        {
+          "id": "managed-vs-self-hosted",
+          "title": "Managed vs Self-Hosted Trade-offs"
+        },
+        {
+          "id": "cloud-deployment-models",
+          "title": "Cloud Deployment Models (Public / Private / Hybrid / Community)"
+        }
+      ]
+    }
+  ],
+  "database-cicd": [
+    {
+      "id": "database-pipeline-patterns",
+      "title": "Database Pipeline Patterns",
+      "leaves": [
+        {
+          "id": "declarative-vs-sequential-migrations",
+          "title": "Declarative vs Sequential Migrations"
+        },
+        {
+          "id": "expand-contract-pattern",
+          "title": "Expand-Contract Migration Pattern"
+        },
+        {
+          "id": "blue-green-schema-changes",
+          "title": "Blue-Green Schema Changes"
+        },
+        {
+          "id": "shadow-database-testing",
+          "title": "Shadow Database Testing"
+        }
+      ]
+    },
+    {
+      "id": "database-cicd-tools",
+      "title": "Database CI/CD Tools & Integration",
+      "leaves": [
+        {
+          "id": "liquibase-cicd",
+          "title": "Liquibase in CI/CD"
+        },
+        {
+          "id": "flyway-cicd",
+          "title": "Flyway in CI/CD"
+        },
+        {
+          "id": "atlas-cicd",
+          "title": "Atlas in CI/CD"
+        },
+        {
+          "id": "bytebase-cicd",
+          "title": "Bytebase CI/CD"
+        },
+        {
+          "id": "sqitch-cicd",
+          "title": "Sqitch"
+        }
+      ]
+    },
+    {
+      "id": "database-governance-cicd",
+      "title": "Database Change Governance",
+      "leaves": [
+        {
+          "id": "db-change-approval-workflows",
+          "title": "DB Change Approval Workflows"
+        },
+        {
+          "id": "rollback-strategies-db",
+          "title": "Database Rollback Strategies"
+        },
+        {
+          "id": "compliance-audit-db-changes",
+          "title": "Compliance Audit for DB Changes"
+        }
+      ]
+    },
+    {
+      "id": "database-cicd--database-ci-cd-fundamentals-related-topics",
+      "title": "Database CI/CD Fundamentals & Related Topics",
+      "leaves": [
+        {
+          "id": "db-cicd-fundamentals",
+          "title": "Database CI/CD Fundamentals"
+        },
+        {
+          "id": "db-pipeline-stages",
+          "title": "DB Pipeline Stages"
+        },
+        {
+          "id": "db-environments-strategy",
+          "title": "DB Environments Strategy"
+        },
+        {
+          "id": "db-pre-deploy-checks",
+          "title": "Pre-Deploy Checks"
+        },
+        {
+          "id": "db-data-seeding",
+          "title": "Data Seeding & Fixtures"
+        },
+        {
+          "id": "db-blue-green-data",
+          "title": "Blue/Green for Databases"
+        }
+      ]
+    },
+    {
+      "id": "database-cicd--branching-release-workflows",
+      "title": "Branching & Release Workflows",
+      "leaves": [
+        {
+          "id": "db-feature-flags",
+          "title": "Feature Flags for Schema Changes"
+        },
+        {
+          "id": "db-change-approval",
+          "title": "Change Approval & Review Workflows"
+        }
+      ]
+    }
+  ],
+  "kubernetes-cost-management": [
+    {
+      "id": "k8s-cost-visibility",
+      "title": "Kubernetes Cost Visibility",
+      "leaves": [
+        {
+          "id": "kubecost-platform",
+          "title": "Kubecost"
+        },
+        {
+          "id": "opencost-cncf",
+          "title": "OpenCost (CNCF)"
+        },
+        {
+          "id": "cast-ai-cost",
+          "title": "Cast AI"
+        },
+        {
+          "id": "cloudzero-k8s",
+          "title": "CloudZero for Kubernetes"
+        }
+      ]
+    },
+    {
+      "id": "k8s-cost-optimization",
+      "title": "Kubernetes Cost Optimization",
+      "leaves": [
+        {
+          "id": "rightsizing-k8s-requests",
+          "title": "Rightsizing Requests & Limits"
+        },
+        {
+          "id": "spot-preemptible-nodes",
+          "title": "Spot & Preemptible Node Strategies"
+        },
+        {
+          "id": "cluster-autoscaler-cost",
+          "title": "Cluster Autoscaler for Cost"
+        },
+        {
+          "id": "goldilocks-vpa",
+          "title": "Goldilocks & VPA Recommendations"
+        },
+        {
+          "id": "idle-resource-cleanup-k8s",
+          "title": "Idle Resource Cleanup"
+        }
+      ]
+    },
+    {
+      "id": "k8s-chargeback-allocation",
+      "title": "Kubernetes Chargeback & Allocation",
+      "leaves": [
+        {
+          "id": "namespace-chargeback",
+          "title": "Namespace-Level Chargeback"
+        },
+        {
+          "id": "label-based-allocation-k8s",
+          "title": "Label-Based Cost Allocation"
+        },
+        {
+          "id": "shared-cost-splitting-k8s",
+          "title": "Shared Cluster Cost Splitting"
+        }
+      ]
+    },
+    {
+      "id": "kubernetes-cost-management--kubecost-related-topics",
+      "title": "Kubecost & Related Topics",
+      "leaves": [
+        {
+          "id": "kubecost",
+          "title": "Kubecost"
+        },
+        {
+          "id": "opencost-cncf",
+          "title": "OpenCost (CNCF)"
+        },
+        {
+          "id": "cast-ai-k8s",
+          "title": "CAST AI for Kubernetes"
+        },
+        {
+          "id": "stormforge",
+          "title": "StormForge / Optimize Live"
+        },
+        {
+          "id": "pixie-cost",
+          "title": "Pixie (Cost Visibility)"
+        },
+        {
+          "id": "kubernetes-resource-quotas",
+          "title": "Resource Quotas & LimitRanges"
+        }
+      ]
+    },
+    {
+      "id": "kubernetes-cost-management--namespace-level-chargeback-related-topics",
+      "title": "Namespace-Level Chargeback & Related Topics",
+      "leaves": [
+        {
+          "id": "namespace-chargeback",
+          "title": "Namespace-Level Chargeback"
+        },
+        {
+          "id": "goldilocks-vpa",
+          "title": "Goldilocks & VPA Recommendations"
+        },
+        {
+          "id": "karpenter-cost",
+          "title": "Karpenter (Cost-Aware Autoscaling)"
+        },
+        {
+          "id": "k8s-cost-best-practices",
+          "title": "Kubernetes Cost Best Practices"
+        }
+      ]
+    }
+  ],
+  "ai-coding-agents-devops": [
+    {
+      "id": "background-coding-agents",
+      "title": "Background Coding Agents",
+      "leaves": [
+        {
+          "id": "cursor-background-agent",
+          "title": "Cursor Background Agents"
+        },
+        {
+          "id": "copilot-workspace-agent",
+          "title": "GitHub Copilot Workspace"
+        },
+        {
+          "id": "sweep-ai-pr-bot",
+          "title": "Sweep AI (PR Bot)"
+        },
+        {
+          "id": "coderabbit-review",
+          "title": "CodeRabbit"
+        }
+      ]
+    },
+    {
+      "id": "autonomous-fixers",
+      "title": "Autonomous Fixers & Remediation Bots",
+      "leaves": [
+        {
+          "id": "dependabot-renovate-ai",
+          "title": "Dependabot & Renovate (AI-Enhanced)"
+        },
+        {
+          "id": "snyk-auto-fix",
+          "title": "Snyk Auto-Fix"
+        },
+        {
+          "id": "mintlify-doc-bots",
+          "title": "AI Documentation Bots"
+        },
+        {
+          "id": "test-generation-agents",
+          "title": "AI Test Generation Agents"
+        }
+      ]
+    },
+    {
+      "id": "agent-security-governance",
+      "title": "Agent Security & Governance",
+      "leaves": [
+        {
+          "id": "agent-permissions-scoping",
+          "title": "Agent Permissions & Scoping"
+        },
+        {
+          "id": "agent-audit-trails",
+          "title": "Agent Audit Trails"
+        },
+        {
+          "id": "secrets-in-agent-context",
+          "title": "Secrets Handling in Agent Context"
+        },
+        {
+          "id": "agent-rate-cost-limits",
+          "title": "Agent Rate & Cost Limits"
+        }
+      ]
+    },
+    {
+      "id": "ai-coding-agents-devops--autonomous-pr-bots-related-topics",
+      "title": "Autonomous PR Bots & Related Topics",
+      "leaves": [
+        {
+          "id": "autonomous-pr-bots",
+          "title": "Autonomous PR Bots"
+        },
+        {
+          "id": "auto-dependency-bots",
+          "title": "AI Dependency Update Bots"
+        },
+        {
+          "id": "agent-security-considerations",
+          "title": "Agent Security Considerations"
+        },
+        {
+          "id": "agent-cicd-integration",
+          "title": "Agent Integration with CI/CD"
+        },
+        {
+          "id": "agent-rate-cost-limits",
+          "title": "Agent Rate Limits & Cost Controls"
+        }
+      ]
+    }
+  ],
+  "system-administration": [
+    {
+      "id": "windows-server-admin",
+      "title": "Windows Server Administration",
+      "leaves": [
+        {
+          "id": "windows-server-core",
+          "title": "Windows Server Core & Roles"
+        },
+        {
+          "id": "iis-administration",
+          "title": "IIS Administration"
+        },
+        {
+          "id": "windows-services-sc",
+          "title": "Windows Services & sc.exe"
+        },
+        {
+          "id": "wsl2-devops",
+          "title": "WSL 2 for DevOps on Windows"
+        }
+      ]
+    },
+    {
+      "id": "windows-automation",
+      "title": "Windows Automation",
+      "leaves": [
+        {
+          "id": "powershell-remoting",
+          "title": "PowerShell Remoting (WinRM)"
+        },
+        {
+          "id": "desired-state-configuration",
+          "title": "PowerShell DSC"
+        },
+        {
+          "id": "group-policy-devops",
+          "title": "Group Policy for DevOps"
+        },
+        {
+          "id": "windows-containers",
+          "title": "Windows Containers"
+        }
+      ]
+    },
+    {
+      "id": "systemd",
+      "title": "systemd",
+      "leaves": [
+        {
+          "id": "systemctl",
+          "title": "systemctl"
+        },
+        {
+          "id": "systemd-units-services",
+          "title": "Unit Files & Services"
+        },
+        {
+          "id": "systemd-timers",
+          "title": "systemd Timers"
+        },
+        {
+          "id": "journald",
+          "title": "journald & journalctl"
+        },
+        {
+          "id": "systemd-targets",
+          "title": "systemd Targets"
+        },
+        {
+          "id": "systemd-sandboxing",
+          "title": "systemd Service Sandboxing"
+        }
+      ]
+    },
+    {
+      "id": "system-administration--system-services-operations",
+      "title": "System Services & Operations",
+      "leaves": [
+        {
+          "id": "init-systems",
+          "title": "Other Init Systems (sysvinit, OpenRC, runit)"
+        }
+      ]
+    },
+    {
+      "id": "cron-scheduling",
+      "title": "Cron & Scheduling",
+      "leaves": [
+        {
+          "id": "crontab",
+          "title": "crontab"
+        },
+        {
+          "id": "anacron",
+          "title": "anacron"
+        },
+        {
+          "id": "at-batch",
+          "title": "at & batch"
+        },
+        {
+          "id": "systemd-timers-vs-cron",
+          "title": "systemd Timers vs Cron"
+        }
+      ]
+    },
+    {
+      "id": "system-logging",
+      "title": "System Logging",
+      "leaves": [
+        {
+          "id": "syslog",
+          "title": "syslog"
+        },
+        {
+          "id": "rsyslog",
+          "title": "rsyslog"
+        },
+        {
+          "id": "syslog-ng",
+          "title": "syslog-ng"
+        },
+        {
+          "id": "journald-logging",
+          "title": "journald"
+        },
+        {
+          "id": "log-rotation-logrotate",
+          "title": "logrotate"
+        }
+      ]
+    },
+    {
+      "id": "process-supervision",
+      "title": "Process Supervision",
+      "leaves": [
+        {
+          "id": "supervisord",
+          "title": "supervisord"
+        },
+        {
+          "id": "runit",
+          "title": "runit"
+        },
+        {
+          "id": "s6-supervision",
+          "title": "s6"
+        },
+        {
+          "id": "monit",
+          "title": "monit"
+        }
+      ]
+    },
+    {
+      "id": "performance-monitoring-tools",
+      "title": "Performance Monitoring Tools",
+      "leaves": [
+        {
+          "id": "cpu-monitoring",
+          "title": "CPU Monitoring"
+        },
+        {
+          "id": "memory-monitoring",
+          "title": "Memory Monitoring"
+        },
+        {
+          "id": "disk-io-monitoring",
+          "title": "Disk I/O Monitoring"
+        },
+        {
+          "id": "network-monitoring-local",
+          "title": "Network Monitoring"
+        },
+        {
+          "id": "iostat-vmstat-mpstat",
+          "title": "iostat, vmstat & mpstat"
+        },
+        {
+          "id": "sar",
+          "title": "sar (sysstat)"
+        },
+        {
+          "id": "strace-ltrace",
+          "title": "strace & ltrace"
+        },
+        {
+          "id": "perf-linux",
+          "title": "perf"
+        },
+        {
+          "id": "bpftrace",
+          "title": "bpftrace"
+        },
+        {
+          "id": "flame-graphs",
+          "title": "Flame Graphs"
+        }
+      ]
+    },
+    {
+      "id": "storage-management",
+      "title": "Storage Management",
+      "leaves": [
+        {
+          "id": "disk-partitioning",
+          "title": "Disk Partitioning"
+        },
+        {
+          "id": "filesystems-overview",
+          "title": "Filesystems (ext4, xfs, btrfs, zfs)"
+        },
+        {
+          "id": "lvm",
+          "title": "LVM"
+        },
+        {
+          "id": "raid-software",
+          "title": "Software RAID (mdadm)"
+        },
+        {
+          "id": "mount-fstab",
+          "title": "Mount & /etc/fstab"
+        },
+        {
+          "id": "swap-management",
+          "title": "Swap Management"
+        },
+        {
+          "id": "nfs-smb",
+          "title": "NFS & SMB Shares"
+        }
+      ]
+    },
+    {
+      "id": "kernel-tuning",
+      "title": "Kernel Tuning",
+      "leaves": [
+        {
+          "id": "sysctl",
+          "title": "sysctl"
+        },
+        {
+          "id": "ulimit-rlimits",
+          "title": "ulimit & rlimits"
+        },
+        {
+          "id": "tcp-tuning",
+          "title": "TCP Tuning"
+        },
+        {
+          "id": "huge-pages",
+          "title": "Transparent & Huge Pages"
+        }
+      ]
+    },
+    {
+      "id": "system-administration--system-services-operations-11",
+      "title": "System Services & Operations",
+      "leaves": [
+        {
+          "id": "package-management-deep",
+          "title": "Linux Package Management (apt, dnf, pacman)"
+        }
+      ]
+    },
+    {
+      "id": "backup-recovery",
+      "title": "Backup & Recovery",
+      "leaves": [
+        {
+          "id": "rsync-backups",
+          "title": "rsync-based Backups"
+        },
+        {
+          "id": "snapshots",
+          "title": "Snapshots (LVM, ZFS, btrfs)"
+        },
+        {
+          "id": "restic",
+          "title": "restic"
+        },
+        {
+          "id": "borgbackup",
+          "title": "BorgBackup"
+        },
+        {
+          "id": "duplicity-bacula",
+          "title": "Duplicity & Bacula"
+        }
+      ]
+    },
+    {
+      "id": "host-hardening",
+      "title": "Host Hardening Basics",
+      "leaves": [
+        {
+          "id": "selinux",
+          "title": "SELinux"
+        },
+        {
+          "id": "apparmor",
+          "title": "AppArmor"
+        },
+        {
+          "id": "iptables",
+          "title": "iptables"
+        },
+        {
+          "id": "nftables",
+          "title": "nftables"
+        },
+        {
+          "id": "firewalld-ufw",
+          "title": "firewalld & ufw"
+        },
+        {
+          "id": "fail2ban",
+          "title": "fail2ban"
+        },
+        {
+          "id": "cis-benchmarks-os",
+          "title": "CIS Benchmarks (OS)"
+        }
+      ]
+    },
+    {
+      "id": "system-administration--system-services-operations-14",
+      "title": "System Services & Operations",
+      "leaves": [
+        {
+          "id": "time-sync-ntp",
+          "title": "Time Synchronization (NTP, chrony)"
+        }
+      ]
+    }
+  ],
+  "cicd-fundamentals": [
+    {
+      "id": "trunk-based-development",
+      "title": "Trunk-Based Development",
+      "leaves": [
+        {
+          "id": "trunk-based-principles",
+          "title": "Trunk-Based Development Principles"
+        },
+        {
+          "id": "feature-flags-trunk",
+          "title": "Feature Flags with Trunk-Based Dev"
+        },
+        {
+          "id": "short-lived-branches",
+          "title": "Short-Lived Feature Branches"
+        },
+        {
+          "id": "branch-by-abstraction",
+          "title": "Branch by Abstraction"
+        }
+      ]
+    },
+    {
+      "id": "monorepo-pipelines",
+      "title": "Monorepo Pipeline Strategies",
+      "leaves": [
+        {
+          "id": "affected-target-detection",
+          "title": "Affected Target Detection"
+        },
+        {
+          "id": "bazel-remote-cache-ci",
+          "title": "Bazel Remote Cache in CI"
+        },
+        {
+          "id": "nx-turborepo-ci",
+          "title": "Nx & Turborepo in CI"
+        },
+        {
+          "id": "path-filter-workflows",
+          "title": "Path Filters in Workflows"
+        }
+      ]
+    },
+    {
+      "id": "cicd-fundamentals--concepts-history-comparisons",
+      "title": "Concepts, History & Comparisons",
+      "leaves": [
+        {
+          "id": "what-is-ci-cd",
+          "title": "What is CI / CD?"
+        },
+        {
+          "id": "ci-vs-cd-delivery-vs-deployment",
+          "title": "CI vs Continuous Delivery vs Continuous Deployment"
+        },
+        {
+          "id": "cicd-principles",
+          "title": "CI/CD Principles"
+        }
+      ]
+    },
+    {
+      "id": "pipeline-stages",
+      "title": "Pipeline Stages",
+      "leaves": [
+        {
+          "id": "source-stage",
+          "title": "Source"
+        },
+        {
+          "id": "build-stage",
+          "title": "Build"
+        },
+        {
+          "id": "test-stage",
+          "title": "Test"
+        },
+        {
+          "id": "package-stage",
+          "title": "Package"
+        },
+        {
+          "id": "security-scan-stage",
+          "title": "Security Scan"
+        },
+        {
+          "id": "deploy-stage",
+          "title": "Deploy"
+        },
+        {
+          "id": "verify-stage",
+          "title": "Verify / Smoke Test"
+        },
+        {
+          "id": "promote-stage",
+          "title": "Promote"
+        }
+      ]
+    },
+    {
+      "id": "cicd-fundamentals--pipeline-triggers-push-pr-schedule-manual-webhoo",
+      "title": "Pipeline Triggers (push, PR, schedule, manual, webhook) & Related Topics",
+      "leaves": [
+        {
+          "id": "pipeline-triggers",
+          "title": "Pipeline Triggers (push, PR, schedule, manual, webhook)"
+        },
+        {
+          "id": "artifacts-and-promotion",
+          "title": "Artifacts & Artifact Promotion"
+        },
+        {
+          "id": "cicd-environments",
+          "title": "Environments (Dev, Stage, Prod)"
+        },
+        {
+          "id": "approvals-and-gates",
+          "title": "Approvals & Gates"
+        },
+        {
+          "id": "pipeline-architecture-patterns",
+          "title": "Pipeline Architecture (Linear, Parallel, Fan-In/Out)"
+        },
+        {
+          "id": "build-agents-runners",
+          "title": "Build Agents & Runners (Concept)"
+        }
+      ]
+    },
+    {
+      "id": "cicd-fundamentals--network-foundations",
+      "title": "Network Foundations",
+      "leaves": [
+        {
+          "id": "pipeline-caching-artifacts",
+          "title": "Caching & Artifact Sharing"
+        },
+        {
+          "id": "parallel-jobs",
+          "title": "Parallel & Matrix Jobs"
+        },
+        {
+          "id": "pipeline-observability",
+          "title": "Pipeline Observability"
+        },
+        {
+          "id": "pipeline-security-overview",
+          "title": "Pipeline Security & SLSA (Overview)"
+        },
+        {
+          "id": "secrets-in-pipelines",
+          "title": "Secrets in Pipelines"
+        },
+        {
+          "id": "pipeline-metrics",
+          "title": "Pipeline Metrics (DORA-aligned)"
+        }
+      ]
+    },
+    {
+      "id": "cicd-fundamentals--hermetic-reproducible-pipeline-builds-related-to",
+      "title": "Hermetic & Reproducible Pipeline Builds & Related Topics",
+      "leaves": [
+        {
+          "id": "hermetic-builds-cicd",
+          "title": "Hermetic & Reproducible Pipeline Builds"
+        },
+        {
+          "id": "pr-validation-pipelines",
+          "title": "Pull Request Validation Pipelines"
+        },
+        {
+          "id": "trunk-based-cicd",
+          "title": "Trunk-Based CI/CD"
+        },
+        {
+          "id": "monorepo-cicd-strategies",
+          "title": "Monorepo CI/CD Strategies"
+        },
+        {
+          "id": "polyrepo-cicd-strategies",
+          "title": "Polyrepo CI/CD Strategies"
+        },
+        {
+          "id": "continuous-integration-anti-patterns",
+          "title": "CI/CD Anti-Patterns"
+        }
+      ]
+    },
+    {
+      "id": "cicd-fundamentals--fast-feedback-loops",
+      "title": "Fast Feedback Loops",
+      "leaves": [
+        {
+          "id": "fast-feedback-loops",
+          "title": "Fast Feedback Loops"
+        }
+      ]
+    }
+  ],
   "devops-fundamentals": [
+    {
+      "id": "platform-engineering-intro",
+      "title": "Platform Engineering Introduction",
+      "leaves": [
+        {
+          "id": "platform-vs-devops-vs-sre",
+          "title": "Platform Engineering vs DevOps vs SRE"
+        },
+        {
+          "id": "internal-developer-platform-intro",
+          "title": "Internal Developer Platform (IDP) Intro"
+        },
+        {
+          "id": "golden-path-intro",
+          "title": "Golden Paths Introduction"
+        }
+      ]
+    },
     {
       "id": "devops-fundamentals--concepts-history-comparisons",
       "title": "Concepts, History & Comparisons",
@@ -146,6 +3676,108 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "accelerate-book",
           "title": "Accelerate (Forsgren, Humble, Kim)"
+        }
+      ]
+    }
+  ],
+  "iac-fundamentals": [
+    {
+      "id": "gitops-for-infrastructure",
+      "title": "GitOps for Infrastructure",
+      "leaves": [
+        {
+          "id": "infra-repo-structure",
+          "title": "Infrastructure Repository Structure"
+        },
+        {
+          "id": "environment-branching-iac",
+          "title": "Environment Branching vs Directories"
+        },
+        {
+          "id": "iac-pr-workflows",
+          "title": "IaC Pull Request Workflows"
+        }
+      ]
+    },
+    {
+      "id": "iac-fundamentals--what-is-infrastructure-as-code-related-topics",
+      "title": "What is Infrastructure as Code? & Related Topics",
+      "leaves": [
+        {
+          "id": "what-is-iac",
+          "title": "What is Infrastructure as Code?"
+        },
+        {
+          "id": "iac-benefits-challenges",
+          "title": "IaC Benefits & Challenges"
+        },
+        {
+          "id": "imperative-vs-declarative-iac",
+          "title": "Imperative vs Declarative IaC"
+        },
+        {
+          "id": "iac-state-management-concept",
+          "title": "State Management (Concept)"
+        },
+        {
+          "id": "iac-drift-detection-concept",
+          "title": "Drift Detection (Concept)"
+        },
+        {
+          "id": "iac-idempotency",
+          "title": "Idempotency in IaC"
+        }
+      ]
+    },
+    {
+      "id": "iac-fundamentals--mutable-vs-immutable-infrastructure-related-topi",
+      "title": "Mutable vs Immutable Infrastructure & Related Topics",
+      "leaves": [
+        {
+          "id": "mutable-vs-immutable-infra",
+          "title": "Mutable vs Immutable Infrastructure"
+        },
+        {
+          "id": "iac-modules-reusability",
+          "title": "Modules & Reusability"
+        },
+        {
+          "id": "providers-resources-concept",
+          "title": "Providers & Resources (Concept)"
+        },
+        {
+          "id": "plan-apply-destroy-cycle",
+          "title": "Plan → Apply → Destroy Cycle"
+        },
+        {
+          "id": "iac-testing-concept",
+          "title": "Testing IaC (Concept)"
+        },
+        {
+          "id": "iac-vs-config-mgmt",
+          "title": "IaC vs Configuration Management"
+        }
+      ]
+    },
+    {
+      "id": "iac-fundamentals--multi-cloud-iac-abstraction-related-topics",
+      "title": "Multi-Cloud IaC Abstraction & Related Topics",
+      "leaves": [
+        {
+          "id": "multi-cloud-iac-abstraction",
+          "title": "Multi-Cloud IaC Abstraction"
+        },
+        {
+          "id": "iac-secret-handling-concept",
+          "title": "Secret Handling in IaC (Concept)"
+        },
+        {
+          "id": "gitops-for-infra",
+          "title": "GitOps for Infrastructure"
+        },
+        {
+          "id": "iac-anti-patterns",
+          "title": "IaC Anti-Patterns"
         }
       ]
     }
@@ -846,300 +4478,6 @@ export const GENERATED_TAXONOMY = {
       ]
     }
   ],
-  "system-administration": [
-    {
-      "id": "systemd",
-      "title": "systemd",
-      "leaves": [
-        {
-          "id": "systemctl",
-          "title": "systemctl"
-        },
-        {
-          "id": "systemd-units-services",
-          "title": "Unit Files & Services"
-        },
-        {
-          "id": "systemd-timers",
-          "title": "systemd Timers"
-        },
-        {
-          "id": "journald",
-          "title": "journald & journalctl"
-        },
-        {
-          "id": "systemd-targets",
-          "title": "systemd Targets"
-        },
-        {
-          "id": "systemd-sandboxing",
-          "title": "systemd Service Sandboxing"
-        }
-      ]
-    },
-    {
-      "id": "system-administration--system-services-operations",
-      "title": "System Services & Operations",
-      "leaves": [
-        {
-          "id": "init-systems",
-          "title": "Other Init Systems (sysvinit, OpenRC, runit)"
-        }
-      ]
-    },
-    {
-      "id": "cron-scheduling",
-      "title": "Cron & Scheduling",
-      "leaves": [
-        {
-          "id": "crontab",
-          "title": "crontab"
-        },
-        {
-          "id": "anacron",
-          "title": "anacron"
-        },
-        {
-          "id": "at-batch",
-          "title": "at & batch"
-        },
-        {
-          "id": "systemd-timers-vs-cron",
-          "title": "systemd Timers vs Cron"
-        }
-      ]
-    },
-    {
-      "id": "system-logging",
-      "title": "System Logging",
-      "leaves": [
-        {
-          "id": "syslog",
-          "title": "syslog"
-        },
-        {
-          "id": "rsyslog",
-          "title": "rsyslog"
-        },
-        {
-          "id": "syslog-ng",
-          "title": "syslog-ng"
-        },
-        {
-          "id": "journald-logging",
-          "title": "journald"
-        },
-        {
-          "id": "log-rotation-logrotate",
-          "title": "logrotate"
-        }
-      ]
-    },
-    {
-      "id": "process-supervision",
-      "title": "Process Supervision",
-      "leaves": [
-        {
-          "id": "supervisord",
-          "title": "supervisord"
-        },
-        {
-          "id": "runit",
-          "title": "runit"
-        },
-        {
-          "id": "s6-supervision",
-          "title": "s6"
-        },
-        {
-          "id": "monit",
-          "title": "monit"
-        }
-      ]
-    },
-    {
-      "id": "performance-monitoring-tools",
-      "title": "Performance Monitoring Tools",
-      "leaves": [
-        {
-          "id": "cpu-monitoring",
-          "title": "CPU Monitoring"
-        },
-        {
-          "id": "memory-monitoring",
-          "title": "Memory Monitoring"
-        },
-        {
-          "id": "disk-io-monitoring",
-          "title": "Disk I/O Monitoring"
-        },
-        {
-          "id": "network-monitoring-local",
-          "title": "Network Monitoring"
-        },
-        {
-          "id": "iostat-vmstat-mpstat",
-          "title": "iostat, vmstat & mpstat"
-        },
-        {
-          "id": "sar",
-          "title": "sar (sysstat)"
-        },
-        {
-          "id": "strace-ltrace",
-          "title": "strace & ltrace"
-        },
-        {
-          "id": "perf-linux",
-          "title": "perf"
-        },
-        {
-          "id": "bpftrace",
-          "title": "bpftrace"
-        },
-        {
-          "id": "flame-graphs",
-          "title": "Flame Graphs"
-        }
-      ]
-    },
-    {
-      "id": "storage-management",
-      "title": "Storage Management",
-      "leaves": [
-        {
-          "id": "disk-partitioning",
-          "title": "Disk Partitioning"
-        },
-        {
-          "id": "filesystems-overview",
-          "title": "Filesystems (ext4, xfs, btrfs, zfs)"
-        },
-        {
-          "id": "lvm",
-          "title": "LVM"
-        },
-        {
-          "id": "raid-software",
-          "title": "Software RAID (mdadm)"
-        },
-        {
-          "id": "mount-fstab",
-          "title": "Mount & /etc/fstab"
-        },
-        {
-          "id": "swap-management",
-          "title": "Swap Management"
-        },
-        {
-          "id": "nfs-smb",
-          "title": "NFS & SMB Shares"
-        }
-      ]
-    },
-    {
-      "id": "kernel-tuning",
-      "title": "Kernel Tuning",
-      "leaves": [
-        {
-          "id": "sysctl",
-          "title": "sysctl"
-        },
-        {
-          "id": "ulimit-rlimits",
-          "title": "ulimit & rlimits"
-        },
-        {
-          "id": "tcp-tuning",
-          "title": "TCP Tuning"
-        },
-        {
-          "id": "huge-pages",
-          "title": "Transparent & Huge Pages"
-        }
-      ]
-    },
-    {
-      "id": "system-administration--system-services-operations-9",
-      "title": "System Services & Operations",
-      "leaves": [
-        {
-          "id": "package-management-deep",
-          "title": "Linux Package Management (apt, dnf, pacman)"
-        }
-      ]
-    },
-    {
-      "id": "backup-recovery",
-      "title": "Backup & Recovery",
-      "leaves": [
-        {
-          "id": "rsync-backups",
-          "title": "rsync-based Backups"
-        },
-        {
-          "id": "snapshots",
-          "title": "Snapshots (LVM, ZFS, btrfs)"
-        },
-        {
-          "id": "restic",
-          "title": "restic"
-        },
-        {
-          "id": "borgbackup",
-          "title": "BorgBackup"
-        },
-        {
-          "id": "duplicity-bacula",
-          "title": "Duplicity & Bacula"
-        }
-      ]
-    },
-    {
-      "id": "host-hardening",
-      "title": "Host Hardening Basics",
-      "leaves": [
-        {
-          "id": "selinux",
-          "title": "SELinux"
-        },
-        {
-          "id": "apparmor",
-          "title": "AppArmor"
-        },
-        {
-          "id": "iptables",
-          "title": "iptables"
-        },
-        {
-          "id": "nftables",
-          "title": "nftables"
-        },
-        {
-          "id": "firewalld-ufw",
-          "title": "firewalld & ufw"
-        },
-        {
-          "id": "fail2ban",
-          "title": "fail2ban"
-        },
-        {
-          "id": "cis-benchmarks-os",
-          "title": "CIS Benchmarks (OS)"
-        }
-      ]
-    },
-    {
-      "id": "system-administration--system-services-operations-12",
-      "title": "System Services & Operations",
-      "leaves": [
-        {
-          "id": "time-sync-ntp",
-          "title": "Time Synchronization (NTP, chrony)"
-        }
-      ]
-    }
-  ],
   "networking-fundamentals": [
     {
       "id": "networking-fundamentals--network-foundations",
@@ -1350,6 +4688,90 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "zerotier",
           "title": "ZeroTier"
+        }
+      ]
+    },
+    {
+      "id": "ddos-protection",
+      "title": "DDoS Protection",
+      "leaves": [
+        {
+          "id": "aws-shield",
+          "title": "AWS Shield (Standard & Advanced)"
+        },
+        {
+          "id": "cloudflare-ddos-mitigation",
+          "title": "Cloudflare DDoS Mitigation"
+        },
+        {
+          "id": "azure-ddos-protection",
+          "title": "Azure DDoS Protection"
+        },
+        {
+          "id": "gcp-cloud-armor-ddos",
+          "title": "GCP Cloud Armor (DDoS)"
+        },
+        {
+          "id": "akamai-prolexic",
+          "title": "Akamai Prolexic"
+        },
+        {
+          "id": "radware-defense",
+          "title": "Radware DefensePro"
+        },
+        {
+          "id": "neustar-ddos",
+          "title": "Neustar / Security Solutions DDoS"
+        },
+        {
+          "id": "arbor-netscout",
+          "title": "NETSCOUT Arbor"
+        }
+      ]
+    },
+    {
+      "id": "network-observability",
+      "title": "Network Observability",
+      "leaves": [
+        {
+          "id": "kentik",
+          "title": "Kentik"
+        },
+        {
+          "id": "thousandeyes",
+          "title": "Cisco ThousandEyes"
+        },
+        {
+          "id": "librenms",
+          "title": "LibreNMS"
+        },
+        {
+          "id": "observium",
+          "title": "Observium"
+        },
+        {
+          "id": "netbox-ipam",
+          "title": "NetBox (IPAM/DCIM)"
+        },
+        {
+          "id": "netflow-protocol",
+          "title": "NetFlow"
+        },
+        {
+          "id": "sflow-protocol",
+          "title": "sFlow"
+        },
+        {
+          "id": "ipfix-protocol",
+          "title": "IPFIX"
+        },
+        {
+          "id": "pingmesh",
+          "title": "PingMesh"
+        },
+        {
+          "id": "ntopng",
+          "title": "ntopng"
         }
       ]
     }
@@ -1726,6 +5148,56 @@ export const GENERATED_TAXONOMY = {
           "title": "Amazon CloudFront (CDN overview)"
         }
       ]
+    },
+    {
+      "id": "waf-overview",
+      "title": "Web Application Firewalls (WAF)",
+      "leaves": [
+        {
+          "id": "aws-waf",
+          "title": "AWS WAF"
+        },
+        {
+          "id": "cloudflare-waf",
+          "title": "Cloudflare WAF"
+        },
+        {
+          "id": "azure-waf",
+          "title": "Azure WAF (Front Door & App Gateway)"
+        },
+        {
+          "id": "gcp-cloud-armor-waf",
+          "title": "GCP Cloud Armor (WAF)"
+        },
+        {
+          "id": "akamai-app-protector",
+          "title": "Akamai App & API Protector"
+        },
+        {
+          "id": "f5-bigip-asm",
+          "title": "F5 BIG-IP Advanced WAF (ASM)"
+        },
+        {
+          "id": "modsecurity-waf",
+          "title": "ModSecurity"
+        },
+        {
+          "id": "owasp-coreruleset",
+          "title": "OWASP Core Rule Set (CRS)"
+        },
+        {
+          "id": "wallarm-waf",
+          "title": "Wallarm"
+        },
+        {
+          "id": "imperva-waf",
+          "title": "Imperva WAF"
+        },
+        {
+          "id": "fastly-next-gen-waf",
+          "title": "Fastly Next-Gen WAF (Signal Sciences)"
+        }
+      ]
     }
   ],
   "tls-ssl-pki": [
@@ -1866,6 +5338,56 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "post-quantum-crypto",
           "title": "Post-Quantum Cryptography (PQC) Overview"
+        }
+      ]
+    },
+    {
+      "id": "zero-trust-platforms",
+      "title": "Zero-Trust Network Access (ZTNA) Platforms",
+      "leaves": [
+        {
+          "id": "beyondcorp-google",
+          "title": "Google BeyondCorp Enterprise"
+        },
+        {
+          "id": "cloudflare-one",
+          "title": "Cloudflare One (Zero Trust)"
+        },
+        {
+          "id": "cloudflare-tunnel",
+          "title": "Cloudflare Tunnel"
+        },
+        {
+          "id": "cloudflare-access",
+          "title": "Cloudflare Access"
+        },
+        {
+          "id": "zscaler-zpa",
+          "title": "Zscaler Private Access (ZPA)"
+        },
+        {
+          "id": "twingate-ztna",
+          "title": "Twingate"
+        },
+        {
+          "id": "netskope-private-access",
+          "title": "Netskope Private Access"
+        },
+        {
+          "id": "perimeter81",
+          "title": "Check Point Perimeter 81"
+        },
+        {
+          "id": "banyan-security",
+          "title": "SonicWall (Banyan) Cloud Secure Edge"
+        },
+        {
+          "id": "tailscale-ztna",
+          "title": "Tailscale (Zero Trust Mode)"
+        },
+        {
+          "id": "openziti-platform",
+          "title": "OpenZiti / NetFoundry"
         }
       ]
     }
@@ -3524,6 +7046,106 @@ export const GENERATED_TAXONOMY = {
           "title": "Incremental Builds"
         }
       ]
+    },
+    {
+      "id": "container-image-builders",
+      "title": "Container Image Builders",
+      "leaves": [
+        {
+          "id": "kaniko-builder",
+          "title": "Kaniko (Google)"
+        },
+        {
+          "id": "buildah-builder",
+          "title": "Buildah (Red Hat)"
+        },
+        {
+          "id": "ko-builder",
+          "title": "ko (Go images)"
+        },
+        {
+          "id": "jib-builder",
+          "title": "Jib (Java images)"
+        },
+        {
+          "id": "paketo-cnb",
+          "title": "Paketo Cloud Native Buildpacks"
+        },
+        {
+          "id": "heroku-cnb",
+          "title": "Heroku Cloud Native Buildpacks"
+        },
+        {
+          "id": "nerdctl-build",
+          "title": "nerdctl (containerd CLI)"
+        },
+        {
+          "id": "img-rootless",
+          "title": "img (rootless OCI builds)"
+        },
+        {
+          "id": "melange-chainguard",
+          "title": "Melange (Chainguard)"
+        },
+        {
+          "id": "apko-chainguard",
+          "title": "apko (Chainguard)"
+        },
+        {
+          "id": "depot-image-build",
+          "title": "Depot Image Build"
+        },
+        {
+          "id": "docker-buildx-cross-ref",
+          "title": "Docker Buildx (Cross-Reference)"
+        }
+      ]
+    },
+    {
+      "id": "machine-image-builders",
+      "title": "Machine Image & Bake Tools",
+      "leaves": [
+        {
+          "id": "hashicorp-packer",
+          "title": "HashiCorp Packer"
+        },
+        {
+          "id": "aws-ec2-image-builder",
+          "title": "AWS EC2 Image Builder"
+        },
+        {
+          "id": "azure-image-builder",
+          "title": "Azure VM Image Builder"
+        },
+        {
+          "id": "gcp-image-builder",
+          "title": "GCP Image Builder (Cloud Build)"
+        },
+        {
+          "id": "cloud-init",
+          "title": "cloud-init"
+        },
+        {
+          "id": "ignition-fcos",
+          "title": "Ignition (CoreOS / Flatcar)"
+        },
+        {
+          "id": "kickstart-rhel",
+          "title": "Kickstart (RHEL)"
+        },
+        {
+          "id": "preseed-debian",
+          "title": "Preseed (Debian)"
+        },
+        {
+          "id": "autoyast-suse",
+          "title": "AutoYaST (SUSE)"
+        },
+        {
+          "id": "lorax-imagefactory",
+          "title": "Lorax / ImageFactory"
+        }
+      ]
     }
   ],
   "package-managers": [
@@ -3638,6 +7260,40 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "nfpm",
           "title": "nFPM"
+        }
+      ]
+    },
+    {
+      "id": "dev-environment-tools",
+      "title": "Reproducible Dev Environment Tools",
+      "leaves": [
+        {
+          "id": "nix-flakes",
+          "title": "Nix Flakes"
+        },
+        {
+          "id": "devbox-jetify",
+          "title": "Devbox (Jetify)"
+        },
+        {
+          "id": "devenv-cachix",
+          "title": "Devenv (Cachix)"
+        },
+        {
+          "id": "flox-cli",
+          "title": "Flox"
+        },
+        {
+          "id": "hermit-cli",
+          "title": "Hermit"
+        },
+        {
+          "id": "shadowenv",
+          "title": "Shadowenv"
+        },
+        {
+          "id": "aqua-cli",
+          "title": "aquaproj/aqua"
         }
       ]
     }
@@ -3910,6 +7566,44 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "registry-replication",
           "title": "Registry Replication & Geo-Distribution"
+        }
+      ]
+    },
+    {
+      "id": "hardened-base-images",
+      "title": "Hardened & Minimal Base Images",
+      "leaves": [
+        {
+          "id": "chainguard-images",
+          "title": "Chainguard Images"
+        },
+        {
+          "id": "wolfi-os",
+          "title": "Wolfi OS"
+        },
+        {
+          "id": "google-distroless-cross-ref",
+          "title": "Google Distroless (Cross-Reference)"
+        },
+        {
+          "id": "rapidfort-platform",
+          "title": "RapidFort"
+        },
+        {
+          "id": "minimus-images",
+          "title": "Minimus OS Images"
+        },
+        {
+          "id": "redhat-ubi",
+          "title": "Red Hat Universal Base Images (UBI)"
+        },
+        {
+          "id": "iron-bank-dod",
+          "title": "Iron Bank (DoD)"
+        },
+        {
+          "id": "bitnami-secure-images",
+          "title": "Bitnami Secure Images"
         }
       ]
     }
@@ -4230,310 +7924,6 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "linkerd-performance",
           "title": "Linkerd Performance Characteristics"
-        }
-      ]
-    }
-  ],
-  "other-service-meshes": [
-    {
-      "id": "other-service-meshes--cilium-service-mesh-ebpf-sidecar-less-related-to",
-      "title": "Cilium Service Mesh (eBPF, Sidecar-Less) & Related Topics",
-      "leaves": [
-        {
-          "id": "cilium-service-mesh",
-          "title": "Cilium Service Mesh (eBPF, Sidecar-Less)"
-        },
-        {
-          "id": "consul-connect",
-          "title": "HashiCorp Consul Connect"
-        },
-        {
-          "id": "kuma-mesh",
-          "title": "Kuma"
-        },
-        {
-          "id": "nginx-service-mesh",
-          "title": "NGINX Service Mesh"
-        },
-        {
-          "id": "tetrate-service-bridge",
-          "title": "Tetrate Service Bridge (TSB)"
-        },
-        {
-          "id": "gloo-mesh",
-          "title": "Solo.io Gloo Mesh"
-        }
-      ]
-    },
-    {
-      "id": "other-service-meshes--open-service-mesh-osm-discontinued-related-topic",
-      "title": "Open Service Mesh (OSM) — Discontinued & Related Topics",
-      "leaves": [
-        {
-          "id": "osm-discontinued",
-          "title": "Open Service Mesh (OSM) — Discontinued"
-        },
-        {
-          "id": "aws-app-mesh-discontinued",
-          "title": "AWS App Mesh — Discontinued"
-        },
-        {
-          "id": "maesh-traefik-mesh-discontinued",
-          "title": "Maesh / Traefik Mesh — Discontinued"
-        }
-      ]
-    }
-  ],
-  "api-gateways": [
-    {
-      "id": "api-gateways--api-gateway-fundamentals-related-topics",
-      "title": "API Gateway Fundamentals & Related Topics",
-      "leaves": [
-        {
-          "id": "api-gateway-fundamentals",
-          "title": "API Gateway Fundamentals"
-        },
-        {
-          "id": "api-gateway-patterns",
-          "title": "API Gateway Patterns (BFF, Aggregator, Edge)"
-        }
-      ]
-    },
-    {
-      "id": "cloud-managed-api-gateways",
-      "title": "Cloud-Managed API Gateways (Overview)",
-      "leaves": [
-        {
-          "id": "aws-api-gateway-overview",
-          "title": "AWS API Gateway"
-        },
-        {
-          "id": "azure-api-management-overview",
-          "title": "Azure API Management"
-        },
-        {
-          "id": "google-apigee-overview",
-          "title": "Google Apigee"
-        },
-        {
-          "id": "google-cloud-endpoints",
-          "title": "Google Cloud Endpoints"
-        }
-      ]
-    },
-    {
-      "id": "open-source-api-gateways",
-      "title": "Open-Source API Gateways",
-      "leaves": [
-        {
-          "id": "kong-gateway",
-          "title": "Kong Gateway"
-        },
-        {
-          "id": "tyk-gateway",
-          "title": "Tyk"
-        },
-        {
-          "id": "krakend",
-          "title": "KrakenD"
-        },
-        {
-          "id": "apache-apisix",
-          "title": "Apache APISIX"
-        },
-        {
-          "id": "traefik-gateway",
-          "title": "Traefik (Gateway Role)"
-        },
-        {
-          "id": "envoy-gateway",
-          "title": "Envoy Gateway"
-        },
-        {
-          "id": "emissary-ingress",
-          "title": "Emissary Ingress (Ambassador)"
-        },
-        {
-          "id": "gloo-gateway",
-          "title": "Solo.io Gloo Gateway"
-        },
-        {
-          "id": "wso2-api-manager",
-          "title": "WSO2 API Manager"
-        },
-        {
-          "id": "goku-api-gateway",
-          "title": "Goku API Gateway"
-        }
-      ]
-    },
-    {
-      "id": "api-gateway-features",
-      "title": "API Gateway Features",
-      "leaves": [
-        {
-          "id": "rate-limiting-gateway",
-          "title": "Rate Limiting & Throttling"
-        },
-        {
-          "id": "gateway-authentication",
-          "title": "Authentication & Authorization"
-        },
-        {
-          "id": "request-response-transformation",
-          "title": "Request / Response Transformation"
-        },
-        {
-          "id": "gateway-caching",
-          "title": "Response Caching"
-        },
-        {
-          "id": "api-composition",
-          "title": "API Composition & Aggregation"
-        },
-        {
-          "id": "gateway-webhooks",
-          "title": "Webhooks"
-        },
-        {
-          "id": "api-versioning",
-          "title": "API Versioning"
-        },
-        {
-          "id": "developer-portals",
-          "title": "Developer Portals"
-        },
-        {
-          "id": "gateway-analytics",
-          "title": "Analytics & Monetization"
-        },
-        {
-          "id": "gateway-cors",
-          "title": "CORS & Header Management"
-        }
-      ]
-    },
-    {
-      "id": "api-specifications",
-      "title": "API Specifications & Design",
-      "leaves": [
-        {
-          "id": "openapi-swagger",
-          "title": "OpenAPI / Swagger"
-        },
-        {
-          "id": "asyncapi",
-          "title": "AsyncAPI"
-        },
-        {
-          "id": "graphql-gateway",
-          "title": "GraphQL Gateway"
-        },
-        {
-          "id": "grpc-gateway",
-          "title": "gRPC Gateway"
-        },
-        {
-          "id": "json-rpc-spec",
-          "title": "JSON-RPC"
-        }
-      ]
-    },
-    {
-      "id": "api-gateways--concepts-history-comparisons",
-      "title": "Concepts, History & Comparisons",
-      "leaves": [
-        {
-          "id": "api-gateway-vs-service-mesh",
-          "title": "API Gateway vs Service Mesh vs Ingress"
-        },
-        {
-          "id": "gateway-api-spec",
-          "title": "Kubernetes Gateway API (Spec)"
-        }
-      ]
-    }
-  ],
-  "iac-fundamentals": [
-    {
-      "id": "iac-fundamentals--what-is-infrastructure-as-code-related-topics",
-      "title": "What is Infrastructure as Code? & Related Topics",
-      "leaves": [
-        {
-          "id": "what-is-iac",
-          "title": "What is Infrastructure as Code?"
-        },
-        {
-          "id": "iac-benefits-challenges",
-          "title": "IaC Benefits & Challenges"
-        },
-        {
-          "id": "imperative-vs-declarative-iac",
-          "title": "Imperative vs Declarative IaC"
-        },
-        {
-          "id": "iac-state-management-concept",
-          "title": "State Management (Concept)"
-        },
-        {
-          "id": "iac-drift-detection-concept",
-          "title": "Drift Detection (Concept)"
-        },
-        {
-          "id": "iac-idempotency",
-          "title": "Idempotency in IaC"
-        }
-      ]
-    },
-    {
-      "id": "iac-fundamentals--mutable-vs-immutable-infrastructure-related-topi",
-      "title": "Mutable vs Immutable Infrastructure & Related Topics",
-      "leaves": [
-        {
-          "id": "mutable-vs-immutable-infra",
-          "title": "Mutable vs Immutable Infrastructure"
-        },
-        {
-          "id": "iac-modules-reusability",
-          "title": "Modules & Reusability"
-        },
-        {
-          "id": "providers-resources-concept",
-          "title": "Providers & Resources (Concept)"
-        },
-        {
-          "id": "plan-apply-destroy-cycle",
-          "title": "Plan → Apply → Destroy Cycle"
-        },
-        {
-          "id": "iac-testing-concept",
-          "title": "Testing IaC (Concept)"
-        },
-        {
-          "id": "iac-vs-config-mgmt",
-          "title": "IaC vs Configuration Management"
-        }
-      ]
-    },
-    {
-      "id": "iac-fundamentals--multi-cloud-iac-abstraction-related-topics",
-      "title": "Multi-Cloud IaC Abstraction & Related Topics",
-      "leaves": [
-        {
-          "id": "multi-cloud-iac-abstraction",
-          "title": "Multi-Cloud IaC Abstraction"
-        },
-        {
-          "id": "iac-secret-handling-concept",
-          "title": "Secret Handling in IaC (Concept)"
-        },
-        {
-          "id": "gitops-for-infra",
-          "title": "GitOps for Infrastructure"
-        },
-        {
-          "id": "iac-anti-patterns",
-          "title": "IaC Anti-Patterns"
         }
       ]
     }
@@ -6140,164 +9530,6 @@ export const GENERATED_TAXONOMY = {
       ]
     }
   ],
-  "cicd-fundamentals": [
-    {
-      "id": "cicd-fundamentals--concepts-history-comparisons",
-      "title": "Concepts, History & Comparisons",
-      "leaves": [
-        {
-          "id": "what-is-ci-cd",
-          "title": "What is CI / CD?"
-        },
-        {
-          "id": "ci-vs-cd-delivery-vs-deployment",
-          "title": "CI vs Continuous Delivery vs Continuous Deployment"
-        },
-        {
-          "id": "cicd-principles",
-          "title": "CI/CD Principles"
-        }
-      ]
-    },
-    {
-      "id": "pipeline-stages",
-      "title": "Pipeline Stages",
-      "leaves": [
-        {
-          "id": "source-stage",
-          "title": "Source"
-        },
-        {
-          "id": "build-stage",
-          "title": "Build"
-        },
-        {
-          "id": "test-stage",
-          "title": "Test"
-        },
-        {
-          "id": "package-stage",
-          "title": "Package"
-        },
-        {
-          "id": "security-scan-stage",
-          "title": "Security Scan"
-        },
-        {
-          "id": "deploy-stage",
-          "title": "Deploy"
-        },
-        {
-          "id": "verify-stage",
-          "title": "Verify / Smoke Test"
-        },
-        {
-          "id": "promote-stage",
-          "title": "Promote"
-        }
-      ]
-    },
-    {
-      "id": "cicd-fundamentals--pipeline-triggers-push-pr-schedule-manual-webhoo",
-      "title": "Pipeline Triggers (push, PR, schedule, manual, webhook) & Related Topics",
-      "leaves": [
-        {
-          "id": "pipeline-triggers",
-          "title": "Pipeline Triggers (push, PR, schedule, manual, webhook)"
-        },
-        {
-          "id": "artifacts-and-promotion",
-          "title": "Artifacts & Artifact Promotion"
-        },
-        {
-          "id": "cicd-environments",
-          "title": "Environments (Dev, Stage, Prod)"
-        },
-        {
-          "id": "approvals-and-gates",
-          "title": "Approvals & Gates"
-        },
-        {
-          "id": "pipeline-architecture-patterns",
-          "title": "Pipeline Architecture (Linear, Parallel, Fan-In/Out)"
-        },
-        {
-          "id": "build-agents-runners",
-          "title": "Build Agents & Runners (Concept)"
-        }
-      ]
-    },
-    {
-      "id": "cicd-fundamentals--network-foundations",
-      "title": "Network Foundations",
-      "leaves": [
-        {
-          "id": "pipeline-caching-artifacts",
-          "title": "Caching & Artifact Sharing"
-        },
-        {
-          "id": "parallel-jobs",
-          "title": "Parallel & Matrix Jobs"
-        },
-        {
-          "id": "pipeline-observability",
-          "title": "Pipeline Observability"
-        },
-        {
-          "id": "pipeline-security-overview",
-          "title": "Pipeline Security & SLSA (Overview)"
-        },
-        {
-          "id": "secrets-in-pipelines",
-          "title": "Secrets in Pipelines"
-        },
-        {
-          "id": "pipeline-metrics",
-          "title": "Pipeline Metrics (DORA-aligned)"
-        }
-      ]
-    },
-    {
-      "id": "cicd-fundamentals--hermetic-reproducible-pipeline-builds-related-to",
-      "title": "Hermetic & Reproducible Pipeline Builds & Related Topics",
-      "leaves": [
-        {
-          "id": "hermetic-builds-cicd",
-          "title": "Hermetic & Reproducible Pipeline Builds"
-        },
-        {
-          "id": "pr-validation-pipelines",
-          "title": "Pull Request Validation Pipelines"
-        },
-        {
-          "id": "trunk-based-cicd",
-          "title": "Trunk-Based CI/CD"
-        },
-        {
-          "id": "monorepo-cicd-strategies",
-          "title": "Monorepo CI/CD Strategies"
-        },
-        {
-          "id": "polyrepo-cicd-strategies",
-          "title": "Polyrepo CI/CD Strategies"
-        },
-        {
-          "id": "continuous-integration-anti-patterns",
-          "title": "CI/CD Anti-Patterns"
-        }
-      ]
-    },
-    {
-      "id": "cicd-fundamentals--fast-feedback-loops",
-      "title": "Fast Feedback Loops",
-      "leaves": [
-        {
-          "id": "fast-feedback-loops",
-          "title": "Fast Feedback Loops"
-        }
-      ]
-    }
-  ],
   "jenkins": [
     {
       "id": "jenkins--jenkins-architecture-controller-agents",
@@ -7090,6 +10322,52 @@ export const GENERATED_TAXONOMY = {
           "title": "Spot / Preemptible Runners"
         }
       ]
+    },
+    {
+      "id": "managed-runner-services",
+      "title": "Managed CI Runner Services",
+      "leaves": [
+        {
+          "id": "depot-runners",
+          "title": "Depot (Build & Runners)"
+        },
+        {
+          "id": "namespace-runners",
+          "title": "Namespace.so"
+        },
+        {
+          "id": "blacksmith-runners",
+          "title": "Blacksmith"
+        },
+        {
+          "id": "buildjet-runners",
+          "title": "BuildJet"
+        },
+        {
+          "id": "cirun-runners",
+          "title": "Cirun"
+        },
+        {
+          "id": "runs-on-runners",
+          "title": "RunsOn (AWS-native)"
+        },
+        {
+          "id": "ubicloud-runners",
+          "title": "Ubicloud"
+        },
+        {
+          "id": "warpbuild-runners",
+          "title": "WarpBuild"
+        },
+        {
+          "id": "actuated-runners",
+          "title": "Actuated (OpenFaaS)"
+        },
+        {
+          "id": "runforge-runners",
+          "title": "RunForge"
+        }
+      ]
     }
   ],
   "gitops-fundamentals": [
@@ -7522,68 +10800,6 @@ export const GENERATED_TAXONOMY = {
       ]
     }
   ],
-  "other-gitops-tools": [
-    {
-      "id": "other-gitops-tools--spinnaker-related-topics",
-      "title": "Spinnaker & Related Topics",
-      "leaves": [
-        {
-          "id": "spinnaker",
-          "title": "Spinnaker"
-        },
-        {
-          "id": "werf",
-          "title": "Werf"
-        },
-        {
-          "id": "jenkins-x",
-          "title": "Jenkins X"
-        },
-        {
-          "id": "weave-gitops",
-          "title": "Weave GitOps"
-        },
-        {
-          "id": "codefresh-gitops",
-          "title": "Codefresh GitOps"
-        },
-        {
-          "id": "octopus-deploy",
-          "title": "Octopus Deploy"
-        }
-      ]
-    },
-    {
-      "id": "other-gitops-tools--rancher-fleet-related-topics",
-      "title": "Rancher Fleet & Related Topics",
-      "leaves": [
-        {
-          "id": "rancher-fleet",
-          "title": "Rancher Fleet"
-        },
-        {
-          "id": "kargo",
-          "title": "Kargo"
-        },
-        {
-          "id": "kubevela",
-          "title": "KubeVela"
-        },
-        {
-          "id": "bunnyshell",
-          "title": "Bunnyshell"
-        },
-        {
-          "id": "plural-platform",
-          "title": "Plural"
-        },
-        {
-          "id": "argonaut",
-          "title": "Argonaut (Commercial Argo)"
-        }
-      ]
-    }
-  ],
   "deployment-strategies": [
     {
       "id": "deployment-strategies--recreate-big-bang-deployment-related-topics",
@@ -7968,164 +11184,6 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "progressive-delivery-best-practices",
           "title": "Progressive Delivery Best Practices"
-        }
-      ]
-    }
-  ],
-  "observability-fundamentals": [
-    {
-      "id": "observability-fundamentals--concepts-history-comparisons",
-      "title": "Concepts, History & Comparisons",
-      "leaves": [
-        {
-          "id": "monitoring-vs-observability",
-          "title": "Monitoring vs Observability"
-        }
-      ]
-    },
-    {
-      "id": "pillars-of-observability",
-      "title": "Pillars of Observability",
-      "leaves": [
-        {
-          "id": "pillar-metrics",
-          "title": "Metrics"
-        },
-        {
-          "id": "pillar-logs",
-          "title": "Logs"
-        },
-        {
-          "id": "pillar-traces",
-          "title": "Traces"
-        },
-        {
-          "id": "pillar-events",
-          "title": "Events"
-        },
-        {
-          "id": "pillar-profiles",
-          "title": "Continuous Profiles"
-        }
-      ]
-    },
-    {
-      "id": "observability-fundamentals--concepts-history-comparisons-3",
-      "title": "Concepts, History & Comparisons",
-      "leaves": [
-        {
-          "id": "observability-vs-telemetry",
-          "title": "Observability vs Telemetry"
-        },
-        {
-          "id": "black-box-vs-white-box",
-          "title": "Black-Box vs White-Box Monitoring"
-        }
-      ]
-    },
-    {
-      "id": "monitoring-methods",
-      "title": "Monitoring Methods",
-      "leaves": [
-        {
-          "id": "use-method",
-          "title": "USE Method (Utilization, Saturation, Errors)"
-        },
-        {
-          "id": "red-method",
-          "title": "RED Method (Rate, Errors, Duration)"
-        },
-        {
-          "id": "four-golden-signals",
-          "title": "Four Golden Signals"
-        }
-      ]
-    },
-    {
-      "id": "observability-fundamentals--core-linux-systems",
-      "title": "Core Linux Systems",
-      "leaves": [
-        {
-          "id": "observability-slo-link",
-          "title": "Observability ↔ SLOs"
-        },
-        {
-          "id": "cardinality-concept",
-          "title": "Cardinality"
-        }
-      ]
-    },
-    {
-      "id": "sampling-strategies-overview",
-      "title": "Sampling Strategies (Overview)",
-      "leaves": [
-        {
-          "id": "head-based-sampling",
-          "title": "Head-Based Sampling"
-        },
-        {
-          "id": "tail-based-sampling",
-          "title": "Tail-Based Sampling"
-        },
-        {
-          "id": "probability-sampling",
-          "title": "Probability Sampling"
-        },
-        {
-          "id": "rate-limiting-sampling",
-          "title": "Rate-Limiting Sampling"
-        }
-      ]
-    },
-    {
-      "id": "observability-fundamentals--high-cardinality-metrics-related-topics",
-      "title": "High-Cardinality Metrics & Related Topics",
-      "leaves": [
-        {
-          "id": "high-cardinality-metrics",
-          "title": "High-Cardinality Metrics"
-        },
-        {
-          "id": "push-vs-pull-metrics",
-          "title": "Push vs Pull Metric Collection"
-        },
-        {
-          "id": "tsdb-concept",
-          "title": "Time Series Databases (Concept)"
-        },
-        {
-          "id": "observability-data-lifecycle",
-          "title": "Observability Data Lifecycle"
-        },
-        {
-          "id": "telemetry-pipelines",
-          "title": "Telemetry Pipelines"
-        },
-        {
-          "id": "cost-of-observability",
-          "title": "Cost of Observability"
-        }
-      ]
-    },
-    {
-      "id": "observability-fundamentals--observability-for-serverless-related-topics",
-      "title": "Observability for Serverless & Related Topics",
-      "leaves": [
-        {
-          "id": "observability-serverless",
-          "title": "Observability for Serverless"
-        },
-        {
-          "id": "observability-microservices",
-          "title": "Observability for Microservices"
-        },
-        {
-          "id": "sli-burn-rate-alerts",
-          "title": "Burn-Rate Alerting (Multi-Window, Multi-Burn-Rate)"
-        },
-        {
-          "id": "ebpf-for-observability",
-          "title": "eBPF for Observability"
         }
       ]
     }
@@ -11642,6 +14700,144 @@ export const GENERATED_TAXONOMY = {
           "title": "SBOM (Concept Overview)"
         }
       ]
+    },
+    {
+      "id": "aspm-platforms",
+      "title": "ASPM (Application Security Posture Management)",
+      "leaves": [
+        {
+          "id": "apiiro-aspm",
+          "title": "Apiiro"
+        },
+        {
+          "id": "armorcode-aspm",
+          "title": "ArmorCode"
+        },
+        {
+          "id": "ox-security-aspm",
+          "title": "OX Security"
+        },
+        {
+          "id": "backslash-security",
+          "title": "Backslash Security"
+        },
+        {
+          "id": "legit-security",
+          "title": "Legit Security"
+        },
+        {
+          "id": "cycode-aspm",
+          "title": "Cycode"
+        },
+        {
+          "id": "tromzo-aspm",
+          "title": "Tromzo"
+        },
+        {
+          "id": "arnica-aspm",
+          "title": "Arnica"
+        },
+        {
+          "id": "bionic-aspm",
+          "title": "Bionic (Continuous AppSec)"
+        },
+        {
+          "id": "jit-aspm",
+          "title": "Jit.io"
+        },
+        {
+          "id": "phoenix-security-aspm",
+          "title": "Phoenix Security"
+        }
+      ]
+    },
+    {
+      "id": "vulnerability-management-platforms",
+      "title": "Vulnerability Management Platforms",
+      "leaves": [
+        {
+          "id": "tenable-vm",
+          "title": "Tenable.io / Nessus"
+        },
+        {
+          "id": "qualys-vmdr",
+          "title": "Qualys VMDR"
+        },
+        {
+          "id": "rapid7-insightvm",
+          "title": "Rapid7 InsightVM (Nexpose)"
+        },
+        {
+          "id": "openvas-greenbone",
+          "title": "OpenVAS / Greenbone"
+        },
+        {
+          "id": "microsoft-defender-vm",
+          "title": "Microsoft Defender Vulnerability Management"
+        },
+        {
+          "id": "frontline-vm",
+          "title": "Frontline Vulnerability Manager (Digital Defense)"
+        },
+        {
+          "id": "wiz-vm",
+          "title": "Wiz Vulnerability Management"
+        },
+        {
+          "id": "edgescan",
+          "title": "Edgescan"
+        },
+        {
+          "id": "crowdstrike-spotlight",
+          "title": "CrowdStrike Falcon Spotlight"
+        }
+      ]
+    },
+    {
+      "id": "authorization-platforms",
+      "title": "Authorization (AuthZ) Platforms",
+      "leaves": [
+        {
+          "id": "cerbos-authz",
+          "title": "Cerbos"
+        },
+        {
+          "id": "oso-authz",
+          "title": "Oso"
+        },
+        {
+          "id": "openfga-authz",
+          "title": "OpenFGA (CNCF)"
+        },
+        {
+          "id": "authzed-spicedb",
+          "title": "AuthZed / SpiceDB"
+        },
+        {
+          "id": "permit-io-authz",
+          "title": "Permit.io"
+        },
+        {
+          "id": "casbin-authz",
+          "title": "Casbin"
+        },
+        {
+          "id": "aws-verified-permissions",
+          "title": "AWS Verified Permissions (Cedar)"
+        },
+        {
+          "id": "opa-as-authz",
+          "title": "OPA as Authorization (Cross-Reference)"
+        },
+        {
+          "id": "styra-das-authz",
+          "title": "Styra DAS (Cross-Reference)"
+        },
+        {
+          "id": "topaz-authz",
+          "title": "Topaz (Cross-Reference)"
+        }
+      ]
     }
   ],
   "sast-dast-sca": [
@@ -11840,156 +15036,38 @@ export const GENERATED_TAXONOMY = {
           "title": "SAST vs DAST vs IAST vs SCA"
         }
       ]
-    }
-  ],
-  "secrets-management": [
-    {
-      "id": "secrets-management--secrets-management-concepts-related-topics",
-      "title": "Secrets Management Concepts & Related Topics",
-      "leaves": [
-        {
-          "id": "secrets-management-concepts",
-          "title": "Secrets Management Concepts"
-        },
-        {
-          "id": "secret-rotation-practices",
-          "title": "Secret Rotation"
-        },
-        {
-          "id": "secret-zero-problem",
-          "title": "Secret Zero Problem"
-        }
-      ]
     },
     {
-      "id": "secrets-stores",
-      "title": "Secrets Stores",
+      "id": "modern-supply-chain-platforms",
+      "title": "Modern Supply Chain & SCA Platforms",
       "leaves": [
         {
-          "id": "hashicorp-vault",
-          "title": "HashiCorp Vault"
+          "id": "endor-labs-platform",
+          "title": "Endor Labs"
         },
         {
-          "id": "aws-secrets-manager-overview",
-          "title": "AWS Secrets Manager (Overview)"
+          "id": "socket-dev-platform",
+          "title": "Socket.dev"
         },
         {
-          "id": "azure-key-vault-overview",
-          "title": "Azure Key Vault (Overview)"
+          "id": "phylum-io",
+          "title": "Phylum"
         },
         {
-          "id": "google-secret-manager-overview",
-          "title": "Google Secret Manager (Overview)"
+          "id": "aikido-security",
+          "title": "Aikido Security"
         },
         {
-          "id": "doppler",
-          "title": "Doppler"
+          "id": "chainguard-enforce",
+          "title": "Chainguard Enforce"
         },
         {
-          "id": "1password-secrets-automation",
-          "title": "1Password Secrets Automation"
+          "id": "vulnert-renovate-pro",
+          "title": "Mend Renovate Enterprise"
         },
         {
-          "id": "akeyless",
-          "title": "Akeyless"
-        },
-        {
-          "id": "infisical",
-          "title": "Infisical"
-        },
-        {
-          "id": "bitwarden-secrets-manager",
-          "title": "Bitwarden Secrets Manager"
-        },
-        {
-          "id": "cyberark-conjur",
-          "title": "CyberArk Conjur"
-        }
-      ]
-    },
-    {
-      "id": "k8s-secrets-tools",
-      "title": "Kubernetes Secret Tooling",
-      "leaves": [
-        {
-          "id": "k8s-native-secrets",
-          "title": "Kubernetes Native Secrets"
-        },
-        {
-          "id": "external-secrets-operator",
-          "title": "External Secrets Operator (ESO)"
-        },
-        {
-          "id": "sealed-secrets-bitnami",
-          "title": "Sealed Secrets (Bitnami)"
-        },
-        {
-          "id": "sops-mozilla",
-          "title": "SOPS (Mozilla)"
-        },
-        {
-          "id": "helm-secrets",
-          "title": "Helm Secrets"
-        },
-        {
-          "id": "vault-secrets-operator",
-          "title": "Vault Secrets Operator"
-        },
-        {
-          "id": "csi-secrets-store-driver",
-          "title": "Secrets Store CSI Driver"
-        }
-      ]
-    },
-    {
-      "id": "secret-detection-tools",
-      "title": "Secret Detection Tools",
-      "leaves": [
-        {
-          "id": "gitleaks",
-          "title": "GitLeaks"
-        },
-        {
-          "id": "trufflehog",
-          "title": "TruffleHog"
-        },
-        {
-          "id": "detect-secrets-yelp",
-          "title": "detect-secrets (Yelp)"
-        },
-        {
-          "id": "git-secrets-aws",
-          "title": "git-secrets (AWS)"
-        },
-        {
-          "id": "secretlint",
-          "title": "SecretLint"
-        },
-        {
-          "id": "ggshield",
-          "title": "GitGuardian ggshield"
-        }
-      ]
-    },
-    {
-      "id": "secrets-management--secrets-in-ci-cd-related-topics",
-      "title": "Secrets in CI/CD & Related Topics",
-      "leaves": [
-        {
-          "id": "secrets-in-cicd",
-          "title": "Secrets in CI/CD"
-        },
-        {
-          "id": "just-in-time-secrets",
-          "title": "Just-in-Time Secrets"
-        },
-        {
-          "id": "dynamic-secrets",
-          "title": "Dynamic Secrets"
-        },
-        {
-          "id": "workload-identity-secrets",
-          "title": "Workload Identity (OIDC, IRSA, Workload Identity Federation)"
+          "id": "safedep-vet",
+          "title": "SafeDep vet"
         }
       ]
     }
@@ -12344,104 +15422,6 @@ export const GENERATED_TAXONOMY = {
       ]
     }
   ],
-  "runtime-security": [
-    {
-      "id": "runtime-security--system-services-operations",
-      "title": "System Services & Operations",
-      "leaves": [
-        {
-          "id": "runtime-security-definition",
-          "title": "Runtime Security Definition"
-        },
-        {
-          "id": "behavioral-detection",
-          "title": "Behavioral Detection"
-        }
-      ]
-    },
-    {
-      "id": "falco",
-      "title": "Falco",
-      "leaves": [
-        {
-          "id": "falco-rules-engine",
-          "title": "Rules Engine"
-        },
-        {
-          "id": "falco-plugins",
-          "title": "Plugins"
-        },
-        {
-          "id": "falco-sidekick",
-          "title": "Falco Sidekick"
-        },
-        {
-          "id": "falco-talon",
-          "title": "Falco Talon (Response)"
-        }
-      ]
-    },
-    {
-      "id": "runtime-security--tetragon-isovalent-ebpf-related-topics",
-      "title": "Tetragon (Isovalent eBPF) & Related Topics",
-      "leaves": [
-        {
-          "id": "tetragon-runtime",
-          "title": "Tetragon (Isovalent eBPF)"
-        },
-        {
-          "id": "tracee-aqua",
-          "title": "Tracee (Aqua)"
-        },
-        {
-          "id": "sysdig-secure-runtime",
-          "title": "Sysdig Secure"
-        },
-        {
-          "id": "red-hat-acs-runtime",
-          "title": "Red Hat ACS / StackRox"
-        },
-        {
-          "id": "aqua-runtime",
-          "title": "Aqua Runtime Protection"
-        },
-        {
-          "id": "prisma-runtime",
-          "title": "Prisma Cloud Runtime"
-        }
-      ]
-    },
-    {
-      "id": "runtime-security--wiz-runtime-sensor-related-topics",
-      "title": "Wiz Runtime Sensor & Related Topics",
-      "leaves": [
-        {
-          "id": "wiz-runtime-sensor",
-          "title": "Wiz Runtime Sensor"
-        },
-        {
-          "id": "anomaly-detection-runtime",
-          "title": "Anomaly Detection"
-        },
-        {
-          "id": "file-integrity-monitoring",
-          "title": "File Integrity Monitoring (FIM)"
-        },
-        {
-          "id": "hids",
-          "title": "HIDS (Host Intrusion Detection)"
-        },
-        {
-          "id": "wazuh-hids",
-          "title": "Wazuh"
-        },
-        {
-          "id": "ossec-hids",
-          "title": "OSSEC"
-        }
-      ]
-    }
-  ],
   "iac-security-scanning": [
     {
       "id": "iac-security-scanning--static-iac-scanning-concept",
@@ -12702,6 +15682,32 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "continuous-compliance",
           "title": "Continuous Compliance"
+        }
+      ]
+    },
+    {
+      "id": "continuous-controls-monitoring",
+      "title": "Continuous Controls Monitoring (CCM)",
+      "leaves": [
+        {
+          "id": "cyberguardian-ccm",
+          "title": "CyberGuardian / RegScale"
+        },
+        {
+          "id": "centraleyes-ccm",
+          "title": "Centraleyes"
+        },
+        {
+          "id": "risk-cloud-logicgate",
+          "title": "LogicGate Risk Cloud"
+        },
+        {
+          "id": "archer-rsa",
+          "title": "RSA Archer"
+        },
+        {
+          "id": "metricstream-grc",
+          "title": "MetricStream GRC"
         }
       ]
     }
@@ -13058,6 +16064,86 @@ export const GENERATED_TAXONOMY = {
           "title": "Data Classification & DSPM"
         }
       ]
+    },
+    {
+      "id": "siem-platforms",
+      "title": "SIEM Platforms",
+      "leaves": [
+        {
+          "id": "splunk-enterprise-security",
+          "title": "Splunk Enterprise Security"
+        },
+        {
+          "id": "microsoft-sentinel",
+          "title": "Microsoft Sentinel"
+        },
+        {
+          "id": "elastic-siem",
+          "title": "Elastic Security / SIEM"
+        },
+        {
+          "id": "google-chronicle-siem",
+          "title": "Google Chronicle SIEM"
+        },
+        {
+          "id": "panther-siem",
+          "title": "Panther"
+        },
+        {
+          "id": "falcon-logscale",
+          "title": "CrowdStrike Falcon LogScale (Humio)"
+        },
+        {
+          "id": "exabeam-siem",
+          "title": "Exabeam"
+        },
+        {
+          "id": "ibm-qradar",
+          "title": "IBM QRadar"
+        },
+        {
+          "id": "sumo-logic-cse",
+          "title": "Sumo Logic Cloud SIEM"
+        },
+        {
+          "id": "securonix-siem",
+          "title": "Securonix"
+        },
+        {
+          "id": "logrhythm-siem",
+          "title": "LogRhythm"
+        },
+        {
+          "id": "wazuh-siem",
+          "title": "Wazuh (Open Source)"
+        }
+      ]
+    },
+    {
+      "id": "steampipe-ecosystem",
+      "title": "Steampipe Ecosystem (Turbot Pipes)",
+      "leaves": [
+        {
+          "id": "steampipe-core",
+          "title": "Steampipe (Query)"
+        },
+        {
+          "id": "powerpipe",
+          "title": "Powerpipe (Dashboards & Benchmarks)"
+        },
+        {
+          "id": "flowpipe",
+          "title": "Flowpipe (Workflow Engine)"
+        },
+        {
+          "id": "tailpipe",
+          "title": "Tailpipe (Log Analytics)"
+        },
+        {
+          "id": "turbot-guardrails",
+          "title": "Turbot Guardrails"
+        }
+      ]
     }
   ],
   "cncf-landscape": [
@@ -13160,62 +16246,72 @@ export const GENERATED_TAXONOMY = {
           "title": "CNCF Events (KubeCon, CloudNativeCon)"
         }
       ]
-    }
-  ],
-  "cloud-service-models": [
+    },
     {
-      "id": "cloud-service-models--iaas-infrastructure-as-a-service-related-topics",
-      "title": "IaaS (Infrastructure as a Service) & Related Topics",
+      "id": "k8s-multi-tenancy-tools",
+      "title": "Kubernetes Multi-Tenancy Tooling",
       "leaves": [
         {
-          "id": "iaas-overview",
-          "title": "IaaS (Infrastructure as a Service)"
+          "id": "capsule-tenant",
+          "title": "Capsule"
         },
         {
-          "id": "paas-overview",
-          "title": "PaaS (Platform as a Service)"
+          "id": "hierarchical-namespace-controller",
+          "title": "Hierarchical Namespace Controller (HNC)"
         },
         {
-          "id": "saas-overview",
-          "title": "SaaS (Software as a Service)"
+          "id": "vcluster-cross-ref",
+          "title": "vCluster (Cross-Reference)"
         },
         {
-          "id": "faas-overview",
-          "title": "FaaS (Function as a Service)"
+          "id": "loft-platform",
+          "title": "Loft Platform"
         },
         {
-          "id": "caas-overview",
-          "title": "CaaS (Container as a Service)"
+          "id": "kiosk-multi-tenant",
+          "title": "Kiosk"
         },
         {
-          "id": "baas-overview",
-          "title": "BaaS (Backend as a Service)"
+          "id": "kamaji-tenant",
+          "title": "Kamaji"
+        },
+        {
+          "id": "project-multi-tenancy",
+          "title": "Kubernetes Working Group Multi-Tenancy"
         }
       ]
     },
     {
-      "id": "cloud-service-models--dbaas-database-as-a-service-related-topics",
-      "title": "DBaaS (Database as a Service) & Related Topics",
+      "id": "k8s-virtualization",
+      "title": "Virtualization on Kubernetes",
       "leaves": [
         {
-          "id": "dbaas-overview",
-          "title": "DBaaS (Database as a Service)"
+          "id": "kubevirt",
+          "title": "KubeVirt"
         },
         {
-          "id": "monitoring-as-service",
-          "title": "MaaS (Monitoring as a Service)"
+          "id": "virtual-kubelet",
+          "title": "Virtual Kubelet"
         },
         {
-          "id": "shared-responsibility-model",
-          "title": "Shared Responsibility Model"
+          "id": "harvester-suse",
+          "title": "Harvester (SUSE)"
         },
         {
-          "id": "managed-vs-self-hosted",
-          "title": "Managed vs Self-Hosted Trade-offs"
+          "id": "openshift-virtualization",
+          "title": "OpenShift Virtualization"
         },
         {
-          "id": "cloud-deployment-models",
-          "title": "Cloud Deployment Models (Public / Private / Hybrid / Community)"
+          "id": "kata-containers-virt",
+          "title": "Kata Containers (Cross-Reference)"
+        },
+        {
+          "id": "firecracker-microvm",
+          "title": "AWS Firecracker"
+        },
+        {
+          "id": "cloud-hypervisor",
+          "title": "Cloud Hypervisor"
         }
       ]
     }
@@ -13342,6 +16438,52 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "workload-portability-patterns",
           "title": "Workload Portability Patterns"
+        }
+      ]
+    },
+    {
+      "id": "multi-cluster-mgmt-tools",
+      "title": "Multi-Cluster Kubernetes Management",
+      "leaves": [
+        {
+          "id": "karmada-cncf",
+          "title": "Karmada (CNCF)"
+        },
+        {
+          "id": "ocm-open-cluster-mgmt",
+          "title": "Open Cluster Management (OCM)"
+        },
+        {
+          "id": "rancher-fleet",
+          "title": "Rancher Fleet"
+        },
+        {
+          "id": "clusternet-multi",
+          "title": "Clusternet"
+        },
+        {
+          "id": "argo-cd-applicationsets-cross",
+          "title": "Argo CD ApplicationSets (Cross-Reference)"
+        },
+        {
+          "id": "cilium-cluster-mesh",
+          "title": "Cilium Cluster Mesh"
+        },
+        {
+          "id": "skupper-multi-cluster",
+          "title": "Skupper"
+        },
+        {
+          "id": "submariner-cross-ref",
+          "title": "Submariner (Cross-Reference)"
+        },
+        {
+          "id": "liqo-cross-ref",
+          "title": "Liqo (Cross-Reference)"
+        },
+        {
+          "id": "kubestellar",
+          "title": "KubeStellar"
         }
       ]
     }
@@ -14288,60 +17430,6 @@ export const GENERATED_TAXONOMY = {
       ]
     }
   ],
-  "kubernetes-cost-management": [
-    {
-      "id": "kubernetes-cost-management--kubecost-related-topics",
-      "title": "Kubecost & Related Topics",
-      "leaves": [
-        {
-          "id": "kubecost",
-          "title": "Kubecost"
-        },
-        {
-          "id": "opencost-cncf",
-          "title": "OpenCost (CNCF)"
-        },
-        {
-          "id": "cast-ai-k8s",
-          "title": "CAST AI for Kubernetes"
-        },
-        {
-          "id": "stormforge",
-          "title": "StormForge / Optimize Live"
-        },
-        {
-          "id": "pixie-cost",
-          "title": "Pixie (Cost Visibility)"
-        },
-        {
-          "id": "kubernetes-resource-quotas",
-          "title": "Resource Quotas & LimitRanges"
-        }
-      ]
-    },
-    {
-      "id": "kubernetes-cost-management--namespace-level-chargeback-related-topics",
-      "title": "Namespace-Level Chargeback & Related Topics",
-      "leaves": [
-        {
-          "id": "namespace-chargeback",
-          "title": "Namespace-Level Chargeback"
-        },
-        {
-          "id": "goldilocks-vpa",
-          "title": "Goldilocks & VPA Recommendations"
-        },
-        {
-          "id": "karpenter-cost",
-          "title": "Karpenter (Cost-Aware Autoscaling)"
-        },
-        {
-          "id": "k8s-cost-best-practices",
-          "title": "Kubernetes Cost Best Practices"
-        }
-      ]
-    }
-  ],
   "database-lifecycle": [
     {
       "id": "database-lifecycle--database-provisioning-related-topics",
@@ -14498,6 +17586,198 @@ export const GENERATED_TAXONOMY = {
           "title": "Database Capacity Planning"
         }
       ]
+    },
+    {
+      "id": "database-proxies",
+      "title": "Database Proxies & Connection Pooling",
+      "leaves": [
+        {
+          "id": "pgbouncer",
+          "title": "PgBouncer (Postgres)"
+        },
+        {
+          "id": "pgpool-ii",
+          "title": "Pgpool-II (Postgres)"
+        },
+        {
+          "id": "proxysql",
+          "title": "ProxySQL (MySQL)"
+        },
+        {
+          "id": "aws-rds-proxy",
+          "title": "AWS RDS Proxy"
+        },
+        {
+          "id": "mysql-router",
+          "title": "MySQL Router"
+        },
+        {
+          "id": "haproxy-for-databases",
+          "title": "HAProxy for Databases"
+        },
+        {
+          "id": "maxscale-mariadb",
+          "title": "MariaDB MaxScale"
+        },
+        {
+          "id": "pgcat",
+          "title": "PgCat"
+        },
+        {
+          "id": "pgagroal",
+          "title": "pgagroal"
+        },
+        {
+          "id": "odyssey-pg-proxy",
+          "title": "Yandex Odyssey"
+        }
+      ]
+    },
+    {
+      "id": "database-observability",
+      "title": "Database Observability & Performance",
+      "leaves": [
+        {
+          "id": "pganalyze",
+          "title": "pganalyze"
+        },
+        {
+          "id": "datadog-database-monitoring",
+          "title": "Datadog Database Monitoring (DBM)"
+        },
+        {
+          "id": "percona-pmm",
+          "title": "Percona Monitoring & Management (PMM)"
+        },
+        {
+          "id": "solarwinds-dpa",
+          "title": "SolarWinds Database Performance Analyzer"
+        },
+        {
+          "id": "aws-rds-performance-insights",
+          "title": "AWS RDS Performance Insights"
+        },
+        {
+          "id": "azure-sql-insights",
+          "title": "Azure SQL Insights"
+        },
+        {
+          "id": "gcp-cloud-sql-insights",
+          "title": "GCP Cloud SQL Insights"
+        },
+        {
+          "id": "vivid-cortex-splunk",
+          "title": "VividCortex (Splunk DB)"
+        },
+        {
+          "id": "ottertune",
+          "title": "OtterTune"
+        },
+        {
+          "id": "releem",
+          "title": "Releem"
+        },
+        {
+          "id": "mongodb-ops-manager",
+          "title": "MongoDB Ops Manager / Cloud Manager"
+        },
+        {
+          "id": "redis-insight",
+          "title": "Redis Insight"
+        }
+      ]
+    },
+    {
+      "id": "test-data-management",
+      "title": "Test Data Management & Synthetic Data",
+      "leaves": [
+        {
+          "id": "tonic-ai",
+          "title": "Tonic.ai"
+        },
+        {
+          "id": "gretel-ai",
+          "title": "Gretel.ai"
+        },
+        {
+          "id": "synthesized-tdm",
+          "title": "Synthesized"
+        },
+        {
+          "id": "mostly-ai",
+          "title": "MOSTLY AI"
+        },
+        {
+          "id": "delphix-platform",
+          "title": "Delphix Continuous Data Platform"
+        },
+        {
+          "id": "redgate-sql-provision",
+          "title": "Redgate SQL Provision / Test Data Manager"
+        },
+        {
+          "id": "k2view-tdm",
+          "title": "K2View Test Data Management"
+        },
+        {
+          "id": "curiosity-test-modeller",
+          "title": "Curiosity Test Modeller"
+        },
+        {
+          "id": "datprof-tdm",
+          "title": "DATPROF"
+        },
+        {
+          "id": "neosync",
+          "title": "Neosync (Open Source)"
+        }
+      ]
+    },
+    {
+      "id": "managed-migration-services",
+      "title": "Managed Database Migration Services",
+      "leaves": [
+        {
+          "id": "aws-dms",
+          "title": "AWS Database Migration Service"
+        },
+        {
+          "id": "azure-database-migration-service",
+          "title": "Azure Database Migration Service"
+        },
+        {
+          "id": "gcp-database-migration-service",
+          "title": "GCP Database Migration Service"
+        },
+        {
+          "id": "striim-platform",
+          "title": "Striim"
+        },
+        {
+          "id": "qlik-replicate",
+          "title": "Qlik Replicate (Attunity)"
+        },
+        {
+          "id": "oracle-goldengate",
+          "title": "Oracle GoldenGate"
+        },
+        {
+          "id": "fivetran-cross-ref",
+          "title": "Fivetran (Cross-Reference)"
+        },
+        {
+          "id": "airbyte-cross-ref",
+          "title": "Airbyte (Cross-Reference)"
+        },
+        {
+          "id": "matillion-data-loader",
+          "title": "Matillion Data Loader"
+        },
+        {
+          "id": "arcion-replication",
+          "title": "Databricks Arcion"
+        }
+      ]
     }
   ],
   "schema-migrations": [
@@ -14606,52 +17886,6 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "migration-testing",
           "title": "Migration Testing"
-        }
-      ]
-    }
-  ],
-  "database-cicd": [
-    {
-      "id": "database-cicd--database-ci-cd-fundamentals-related-topics",
-      "title": "Database CI/CD Fundamentals & Related Topics",
-      "leaves": [
-        {
-          "id": "db-cicd-fundamentals",
-          "title": "Database CI/CD Fundamentals"
-        },
-        {
-          "id": "db-pipeline-stages",
-          "title": "DB Pipeline Stages"
-        },
-        {
-          "id": "db-environments-strategy",
-          "title": "DB Environments Strategy"
-        },
-        {
-          "id": "db-pre-deploy-checks",
-          "title": "Pre-Deploy Checks"
-        },
-        {
-          "id": "db-data-seeding",
-          "title": "Data Seeding & Fixtures"
-        },
-        {
-          "id": "db-blue-green-data",
-          "title": "Blue/Green for Databases"
-        }
-      ]
-    },
-    {
-      "id": "database-cicd--branching-release-workflows",
-      "title": "Branching & Release Workflows",
-      "leaves": [
-        {
-          "id": "db-feature-flags",
-          "title": "Feature Flags for Schema Changes"
-        },
-        {
-          "id": "db-change-approval",
-          "title": "Change Approval & Review Workflows"
         }
       ]
     }
@@ -15882,68 +19116,6 @@ export const GENERATED_TAXONOMY = {
       ]
     }
   ],
-  "ai-coding-agents-devops": [
-    {
-      "id": "background-coding-agents",
-      "title": "Background Coding Agents",
-      "leaves": [
-        {
-          "id": "cursor-background-agents",
-          "title": "Cursor Background Agents"
-        },
-        {
-          "id": "devin-cognition",
-          "title": "Devin (Cognition)"
-        },
-        {
-          "id": "github-copilot-coding-agent",
-          "title": "GitHub Copilot Coding Agent"
-        },
-        {
-          "id": "replit-agent",
-          "title": "Replit Agent"
-        },
-        {
-          "id": "sweep-ai",
-          "title": "Sweep AI"
-        },
-        {
-          "id": "opendevin-openhands",
-          "title": "OpenHands (OpenDevin)"
-        },
-        {
-          "id": "codegen-agent",
-          "title": "Codegen"
-        }
-      ]
-    },
-    {
-      "id": "ai-coding-agents-devops--autonomous-pr-bots-related-topics",
-      "title": "Autonomous PR Bots & Related Topics",
-      "leaves": [
-        {
-          "id": "autonomous-pr-bots",
-          "title": "Autonomous PR Bots"
-        },
-        {
-          "id": "auto-dependency-bots",
-          "title": "AI Dependency Update Bots"
-        },
-        {
-          "id": "agent-security-considerations",
-          "title": "Agent Security Considerations"
-        },
-        {
-          "id": "agent-cicd-integration",
-          "title": "Agent Integration with CI/CD"
-        },
-        {
-          "id": "agent-rate-cost-limits",
-          "title": "Agent Rate Limits & Cost Controls"
-        }
-      ]
-    }
-  ],
   "ebpf-for-devops": [
     {
       "id": "ebpf-for-devops--concepts-history-comparisons",
@@ -16490,270 +19662,6 @@ export const GENERATED_TAXONOMY = {
         {
           "id": "finops-certifications-cross",
           "title": "FinOps Certifications (FOCP)"
-        }
-      ]
-    }
-  ],
-  "continuous-learning": [
-    {
-      "id": "conferences-devops",
-      "title": "Conferences",
-      "leaves": [
-        {
-          "id": "kubecon-cloudnativecon",
-          "title": "KubeCon + CloudNativeCon"
-        },
-        {
-          "id": "devops-days",
-          "title": "DevOpsDays"
-        },
-        {
-          "id": "devops-enterprise-summit",
-          "title": "DevOps Enterprise Summit"
-        },
-        {
-          "id": "srecon-usenix",
-          "title": "SREcon (USENIX)"
-        },
-        {
-          "id": "devopsworld",
-          "title": "DevOps World"
-        },
-        {
-          "id": "hashiconf",
-          "title": "HashiConf"
-        },
-        {
-          "id": "platformcon",
-          "title": "PlatformCon"
-        },
-        {
-          "id": "gitops-con",
-          "title": "GitOpsCon"
-        },
-        {
-          "id": "observabilitycon",
-          "title": "ObservabilityCON"
-        },
-        {
-          "id": "re-invent-devops",
-          "title": "AWS re:Invent / re:Inforce"
-        },
-        {
-          "id": "google-cloud-next",
-          "title": "Google Cloud Next"
-        },
-        {
-          "id": "microsoft-build-ignite",
-          "title": "Microsoft Build / Ignite"
-        }
-      ]
-    },
-    {
-      "id": "devops-blogs-newsletters",
-      "title": "Blogs & Newsletters",
-      "leaves": [
-        {
-          "id": "cncf-blog",
-          "title": "CNCF Blog"
-        },
-        {
-          "id": "sre-weekly",
-          "title": "SRE Weekly"
-        },
-        {
-          "id": "devops-weekly",
-          "title": "DevOps Weekly"
-        },
-        {
-          "id": "kubernetes-blog",
-          "title": "Kubernetes Blog"
-        },
-        {
-          "id": "platform-weekly",
-          "title": "Platform Weekly"
-        },
-        {
-          "id": "last-week-in-aws",
-          "title": "Last Week in AWS"
-        },
-        {
-          "id": "cloud-native-now",
-          "title": "Cloud Native Now"
-        },
-        {
-          "id": "devops-com",
-          "title": "DevOps.com"
-        },
-        {
-          "id": "gradient-flow",
-          "title": "Gradient Flow (MLOps)"
-        }
-      ]
-    },
-    {
-      "id": "devops-podcasts",
-      "title": "Podcasts",
-      "leaves": [
-        {
-          "id": "kubernetes-podcast",
-          "title": "Kubernetes Podcast (Google)"
-        },
-        {
-          "id": "the-cloudcast",
-          "title": "The Cloudcast"
-        },
-        {
-          "id": "arrested-devops",
-          "title": "Arrested DevOps"
-        },
-        {
-          "id": "devops-cafe",
-          "title": "DevOps Cafe"
-        },
-        {
-          "id": "sre-prodcast",
-          "title": "Google SRE Prodcast"
-        },
-        {
-          "id": "platform-engineering-podcast",
-          "title": "Platform Engineering Podcast"
-        },
-        {
-          "id": "gradient-dissent",
-          "title": "Gradient Dissent (MLOps)"
-        }
-      ]
-    },
-    {
-      "id": "devops-books",
-      "title": "Foundational Books",
-      "leaves": [
-        {
-          "id": "phoenix-project-book",
-          "title": "The Phoenix Project"
-        },
-        {
-          "id": "unicorn-project-book",
-          "title": "The Unicorn Project"
-        },
-        {
-          "id": "devops-handbook-book",
-          "title": "The DevOps Handbook"
-        },
-        {
-          "id": "accelerate-book",
-          "title": "Accelerate (Forsgren, Humble, Kim)"
-        },
-        {
-          "id": "sre-book",
-          "title": "Site Reliability Engineering (Google)"
-        },
-        {
-          "id": "sre-workbook-book",
-          "title": "The SRE Workbook"
-        },
-        {
-          "id": "seeking-sre-book",
-          "title": "Seeking SRE"
-        },
-        {
-          "id": "team-topologies-book",
-          "title": "Team Topologies"
-        },
-        {
-          "id": "continuous-delivery-book",
-          "title": "Continuous Delivery (Humble & Farley)"
-        },
-        {
-          "id": "release-it-book",
-          "title": "Release It! (Michael Nygard)"
-        },
-        {
-          "id": "platform-engineering-book",
-          "title": "Platform Engineering on Kubernetes"
-        },
-        {
-          "id": "designing-data-intensive-apps",
-          "title": "Designing Data-Intensive Applications"
-        },
-        {
-          "id": "kim-mark-the-goal",
-          "title": "The Goal (Goldratt)"
-        }
-      ]
-    },
-    {
-      "id": "continuous-learning--open-source-contributions-related-topics",
-      "title": "Open Source Contributions & Related Topics",
-      "leaves": [
-        {
-          "id": "open-source-contribution",
-          "title": "Open Source Contributions"
-        },
-        {
-          "id": "mentoring-being-mentored",
-          "title": "Mentoring / Being Mentored"
-        },
-        {
-          "id": "learning-roadmaps",
-          "title": "Online Learning Roadmaps (roadmap.sh, etc.)"
-        }
-      ]
-    },
-    {
-      "id": "devops-mooc-platforms",
-      "title": "MOOC & Hands-On Platforms",
-      "leaves": [
-        {
-          "id": "kodekloud",
-          "title": "KodeKloud"
-        },
-        {
-          "id": "a-cloud-guru",
-          "title": "A Cloud Guru / Pluralsight"
-        },
-        {
-          "id": "linux-foundation-training",
-          "title": "Linux Foundation Training"
-        },
-        {
-          "id": "killercoda",
-          "title": "Killercoda"
-        },
-        {
-          "id": "instruqt",
-          "title": "Instruqt"
-        },
-        {
-          "id": "iximiuz-labs",
-          "title": "iximiuz Labs"
-        },
-        {
-          "id": "play-with-k8s-docker",
-          "title": "Play with Kubernetes / Docker"
-        },
-        {
-          "id": "qwiklabs-skill-boost",
-          "title": "Google Cloud Skills Boost (Qwiklabs)"
-        },
-        {
-          "id": "acg-microsoft-learn",
-          "title": "Microsoft Learn"
-        },
-        {
-          "id": "aws-skill-builder",
-          "title": "AWS Skill Builder"
-        }
-      ]
-    },
-    {
-      "id": "continuous-learning--communities-cncf-slack-reddit-discord",
-      "title": "Communities (CNCF Slack, Reddit, Discord)",
-      "leaves": [
-        {
-          "id": "communities-slack-discord",
-          "title": "Communities (CNCF Slack, Reddit, Discord)"
         }
       ]
     }
