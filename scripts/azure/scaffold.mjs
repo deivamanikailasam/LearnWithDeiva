@@ -16,6 +16,8 @@
  *     mirrors the roadmap node order within its stage.
  *
  * Usage: node scripts/azure/scaffold.mjs
+ * After scaffolding, run `node scripts/azure/rebuild-tree.mjs` to enforce the
+ * 3-level hierarchy and merge granular what/why/benefits leaves.
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -41,12 +43,12 @@ const STAGES = [
         children: [
           {
             id: 'what-is-cloud-computing',
-            title: 'What is Cloud Computing?',
+            title: 'Cloud Computing Fundamentals',
             children: [
-              { id: 'definition-of-cloud', title: 'Definition of the Cloud' },
-              { id: 'on-premises-vs-cloud', title: 'On-Premises vs Cloud' },
-              { id: 'cloud-vs-traditional-it', title: 'Cloud vs Traditional IT' },
-              { id: 'history-of-cloud', title: 'History & Evolution of Cloud' },
+              {
+                id: 'cloud-computing-fundamentals',
+                title: 'Cloud Computing Fundamentals',
+              },
             ],
           },
           {
@@ -73,17 +75,20 @@ const STAGES = [
           },
           {
             id: 'benefits-of-cloud',
-            title: 'Benefits of Cloud Computing',
+            title: 'Cloud Value Pillars',
             children: [
-              { id: 'high-availability', title: 'High Availability' },
-              { id: 'scalability', title: 'Scalability' },
-              { id: 'elasticity', title: 'Elasticity' },
-              { id: 'agility', title: 'Agility' },
-              { id: 'reliability', title: 'Reliability' },
-              { id: 'predictability', title: 'Predictability' },
-              { id: 'security', title: 'Security' },
-              { id: 'governance', title: 'Governance' },
-              { id: 'manageability', title: 'Manageability' },
+              {
+                id: 'availability-scalability-elasticity',
+                title: 'Availability, Scalability & Elasticity',
+              },
+              {
+                id: 'agility-reliability-predictability',
+                title: 'Agility, Reliability & Predictability',
+              },
+              {
+                id: 'security-governance-manageability',
+                title: 'Security, Governance & Manageability',
+              },
             ],
           },
           {
@@ -119,7 +124,6 @@ const STAGES = [
             id: 'availability-zones',
             title: 'Availability Zones',
             children: [
-              { id: 'what-are-availability-zones', title: 'What are Availability Zones?' },
               { id: 'zonal-services', title: 'Zonal Services' },
               { id: 'zone-redundant-services', title: 'Zone-Redundant Services' },
               { id: 'zonal-vs-zone-redundant', title: 'Zonal vs Zone-Redundant' },
@@ -4271,10 +4275,12 @@ const STAGES = [
             id: 'waf-overview',
             title: 'WAF Overview',
             children: [
-              { id: 'what-is-waf', title: 'What is the Well-Architected Framework?' },
+              {
+                id: 'well-architected-framework',
+                title: 'Azure Well-Architected Framework',
+              },
               { id: 'waf-pillars-overview', title: 'The Five Pillars' },
               { id: 'design-principles', title: 'Design Principles' },
-              { id: 'tradeoffs', title: 'Tradeoffs' },
             ],
           },
           {

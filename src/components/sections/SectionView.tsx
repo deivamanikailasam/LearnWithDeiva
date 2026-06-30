@@ -1,5 +1,5 @@
 import type { Block, DocumentData, DocumentEmbedBlock, RichText } from '../../types/rich-document'
-import { CodeBlock } from '../CodeBlock'
+import { LazyCodeBlock } from '../LazyCodeBlock'
 import { DocumentEmbed } from './DocumentEmbed'
 
 const EMBED_BLOCK_TYPES = new Set<DocumentEmbedBlock['type']>([
@@ -96,7 +96,7 @@ function renderBlock(block: Block, index: number, quizIndex?: number) {
     case 'code_block':
       return (
         <div key={index} className="my-4">
-          <CodeBlock code={block.code} language={block.language ?? 'text'} />
+          <LazyCodeBlock code={block.code} language={block.language ?? 'text'} />
         </div>
       )
 

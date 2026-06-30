@@ -1,11 +1,10 @@
-import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
+import { useMemo, useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { Container } from '../components/Container'
 import { Breadcrumb } from '../components/Breadcrumb'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionView } from '../components/sections/SectionView'
-import { TopicDocumentEditor } from '../components/editor/TopicDocumentEditor'
 import { EditableTopicHeader } from '../components/editor/EditableTopicHeader'
 import { TopicTree } from '../components/TopicTree'
 import {
@@ -29,6 +28,20 @@ import { useAsync } from '../lib/useAsync'
 import { useScrollSpy } from '../lib/useScrollSpy'
 import { useProgress } from '../lib/progressContext'
 import { useEditMode } from '../lib/editModeContext'
+
+const TopicDocumentEditor = lazy(() =>
+  import('../components/editor/TopicDocumentEditor').then((m) => ({
+    default: m.TopicDocumentEditor,
+  })),
+)
+
+function TopicDocumentFallback() {
+  return (
+    <div className="flex min-h-[30vh] items-center justify-center">
+      <div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-300 border-t-brand-500" />
+    </div>
+  )
+}
 
 /** Count every descendant of a topic (used for the "N total" subtopics label). */
 function countDescendants(topic: { subtopics: { subtopics: unknown[] }[] }): number {
@@ -208,13 +221,15 @@ export function TopicPage() {
 
     if (tiptapDocument) {
       return (
-        <TopicDocumentEditor
-          key={`${subject.id}:${topic.id}`}
-          subjectId={subject.id}
-          topicId={topic.id}
-          topicDocument={tiptapDocument}
-          onDocumentSaved={handleDocumentSaved}
-        />
+        <Suspense fallback={<TopicDocumentFallback />}>
+          <TopicDocumentEditor
+            key={`${subject.id}:${topic.id}`}
+            subjectId={subject.id}
+            topicId={topic.id}
+            topicDocument={tiptapDocument}
+            onDocumentSaved={handleDocumentSaved}
+          />
+        </Suspense>
       )
     }
 
@@ -238,13 +253,15 @@ export function TopicPage() {
 
     if (canShowDevEditor && !resolvedTopicBody) {
       return (
-        <TopicDocumentEditor
-          key={`${subject.id}:${topic.id}`}
-          subjectId={subject.id}
-          topicId={topic.id}
-          topicDocument={emptyTopicDocument()}
-          onDocumentSaved={handleDocumentSaved}
-        />
+        <Suspense fallback={<TopicDocumentFallback />}>
+          <TopicDocumentEditor
+            key={`${subject.id}:${topic.id}`}
+            subjectId={subject.id}
+            topicId={topic.id}
+            topicDocument={emptyTopicDocument()}
+            onDocumentSaved={handleDocumentSaved}
+          />
+        </Suspense>
       )
     }
 

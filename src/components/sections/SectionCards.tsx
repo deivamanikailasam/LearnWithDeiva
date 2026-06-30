@@ -11,7 +11,7 @@ import type {
   SynonymItem,
 } from '../../types/content'
 import { Markdown } from '../Markdown'
-import { CodeBlock } from '../CodeBlock'
+import { LazyCodeBlock } from '../LazyCodeBlock'
 import { Collapsible } from './Collapsible'
 
 const difficultyStyles: Record<Difficulty, string> = {
@@ -193,7 +193,7 @@ export function CheatSheetGroupCard({ group }: { group: CheatSheetGroup }) {
             <p className="text-sm font-medium">{e.label}</p>
             {e.code && (
               <div className="mt-1">
-                <CodeBlock code={e.code} language={e.language ?? 'text'} />
+                <LazyCodeBlock code={e.code} language={e.language ?? 'text'} />
               </div>
             )}
             {e.note && <p className="mt-1 text-xs text-slate-500">{e.note}</p>}

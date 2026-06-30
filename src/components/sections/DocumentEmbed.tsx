@@ -21,7 +21,10 @@ import {
   ResourceCard,
   ScenarioCard,
 } from './SectionCards'
-import { QuizItem } from './QuizItem'
+
+const LazyQuizItem = lazy(() =>
+  import('./QuizItem').then((m) => ({ default: m.QuizItem })),
+)
 
 const Mermaid = lazy(() => import('../Mermaid'))
 
@@ -60,7 +63,15 @@ export function DocumentEmbed({
     case 'project':
       return <ProjectCard item={block.item as ProjectItem} />
     case 'quiz':
-      return <QuizItem item={block.item as ExamQuestion} index={quizIndex} />
+      return (
+        <Suspense
+          fallback={
+            <div className="card h-24 animate-pulse p-5" aria-hidden="true" />
+          }
+        >
+          <LazyQuizItem item={block.item as ExamQuestion} index={quizIndex} />
+        </Suspense>
+      )
     case 'resource':
       return <ResourceCard item={block.item as ResourceItem} />
     case 'pitfall':
