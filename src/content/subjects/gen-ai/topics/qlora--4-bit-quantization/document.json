@@ -1,0 +1,1714 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Memory Problem with Full Fine-Tuning"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Fine-tuning a 7-billion-parameter model in bfloat16 needs about 14 GB just to hold the weights. Add gradients (another 14 GB), optimizer states for Adam (56 GB for float32 momentum and variance), and activation checkpoints, and you need a multi-GPU cluster. QLoRA collapses this to a single consumer GPU by combining three ideas: 4-bit weight storage using a carefully designed data type (NF4), LoRA adapters to limit trainable parameters, and paged optimizer states to absorb memory spikes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why NF4, Not INT4?"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Standard 4-bit integer quantization divides the weight range into 16 equally spaced bins. That uniform spacing is optimal for uniformly distributed values, but pre-trained model weights follow an approximately normal distribution centred near zero. Most weights cluster in a narrow band around zero; very few reach the extremes. Uniform bins waste most of the 4 available bits on the sparsely populated tails."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Normal Float 4 (NF4), introduced in the QLoRA paper (Dettmers et al., 2023), solves this by placing the 16 quantisation levels at the theoretical quantiles of the standard normal distribution. Each bin captures an equal fraction of the weight mass, maximising information per bit for normally distributed data. The quantile positions are computed once from the inverse normal CDF and stored as a fixed lookup table — there is no per-layer learning involved."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNTAwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjUwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjUwMCIgZmlsbD0iI2ZhZmFmYSIgcng9IjgiLz4KCiAgPCEtLSBUaXRsZSAtLT4KICA8dGV4dCB4PSI0MzAiIHk9IjIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFhMWEyZSI+UUxvUkEgNC1iaXQgUXVhbnRpemF0aW9uOiBORjQgdnMgSU5UNDwvdGV4dD4KCiAgPCEtLSA9PT09PSBMRUZUOiBJTlQ0IHVuaWZvcm0gcXVhbnRpemF0aW9uID09PT09IC0tPgogIDx0ZXh0IHg9IjE3NSIgeT0iNDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWExYTJlIj5JTlQ0IChVbmlmb3JtKSDigJQgbmFpdmUgNC1iaXQ8L3RleHQ+CgogIDwhLS0gTnVtYmVyIGxpbmUgLS0+CiAgPGxpbmUgeDE9IjMwIiB5MT0iMTMwIiB4Mj0iMzIwIiB5Mj0iMTMwIiBzdHJva2U9IiM5OTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPCEtLSB0aWNrcyBhdCAxNiBldmVubHkgc3BhY2VkIHBvc2l0aW9ucyAwLTE1IC0tPgogIDwhLS0gcmFuZ2UgLTEgdG8gKzEsIDE4LjEyNXB4IHBlciB1bml0Li4uIGxldCdzIGRvIC0xIHRvICsxIGFjcm9zcyAyOTBweCAtLT4KICA8IS0tIHRpY2sgc3BhY2luZyA9IDI5MC8xNSDiiYggMTkuMzNweCAtLT4KICA8IS0tIHRpY2sgcG9zaXRpb25zOiAzMCArIGkqMTkuMzMgZm9yIGk9MC4uMTUgLS0+CiAgPHRleHQgeD0iMzAiICB5PSIxNDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNy41IiBmaWxsPSIjNTU1Ij4tMS4wPC90ZXh0PgogIDx0ZXh0IHg9IjE3NSIgeT0iMTQ4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjcuNSIgZmlsbD0iIzU1NSI+MDwvdGV4dD4KICA8dGV4dCB4PSIzMjAiIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3LjUiIGZpbGw9IiM1NTUiPisxLjA8L3RleHQ+CgogIDwhLS0gMTYgSU5UNCB0aWNrcyAtLT4KICA8bGluZSB4MT0iMzAiICB5MT0iMTI0IiB4Mj0iMzAiICB5Mj0iMTM0IiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjQ5IiAgeTE9IjEyNCIgeDI9IjQ5IiAgeTI9IjEzNCIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI2OCIgIHkxPSIxMjQiIHgyPSI2OCIgIHkyPSIxMzQiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iODgiICB5MT0iMTI0IiB4Mj0iODgiICB5Mj0iMTM0IiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjEwNyIgeTE9IjEyNCIgeDI9IjEwNyIgeTI9IjEzNCIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSIxMjYiIHkxPSIxMjQiIHgyPSIxMjYiIHkyPSIxMzQiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iMTQ2IiB5MT0iMTI0IiB4Mj0iMTQ2IiB5Mj0iMTM0IiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjE2NSIgeTE9IjEyNCIgeDI9IjE2NSIgeTI9IjEzNCIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSIxODQiIHkxPSIxMjQiIHgyPSIxODQiIHkyPSIxMzQiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iMjA0IiB5MT0iMTI0IiB4Mj0iMjA0IiB5Mj0iMTM0IiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjIyMyIgeTE9IjEyNCIgeDI9IjIyMyIgeTI9IjEzNCIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSIyNDIiIHkxPSIxMjQiIHgyPSIyNDIiIHkyPSIxMzQiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iMjYyIiB5MT0iMTI0IiB4Mj0iMjYyIiB5Mj0iMTM0IiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjI4MSIgeTE9IjEyNCIgeDI9IjI4MSIgeTI9IjEzNCIgc3Ryb2tlPSIjZTkxZTYzIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSIzMDAiIHkxPSIxMjQiIHgyPSIzMDAiIHkyPSIxMzQiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iMzIwIiB5MT0iMTI0IiB4Mj0iMzIwIiB5Mj0iMTM0IiBzdHJva2U9IiNlOTFlNjMiIHN0cm9rZS13aWR0aD0iMS41Ii8+CgogIDwhLS0gTm9ybWFsIGRpc3RyaWJ1dGlvbiBjdXJ2ZSBhYm92ZSBJTlQ0IGxpbmUgLS0+CiAgPCEtLSBCZWxsIGN1cnZlIGNlbnRlcmVkIGF0IDE3NSwgz4PiiYg1MHB4LCBwbG90dGVkIGZyb20geD0zMCB0byB4PTMyMCAtLT4KICA8cGF0aCBkPSJNMzAsMTMwIEM2MCwxMjkgODAsMTI1IDEwMCwxMTAgQzEyMCw5MCAxNDAsNjIgMTY1LDUwIEMxNzUsNDYgMTg1LDQ2IDE5NSw1MCBDMjIwLDYyIDI0MCw5MCAyNjAsMTEwIEMyODAsMTI1IDMwMCwxMjkgMzIwLDEzMCIKICAgIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzIxOTZmMyIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjQsMyIvPgoKICA8IS0tIGFubm90YXRpb246IGxvdHMgb2Ygd2VpZ2h0IG1hc3MgbmVhciB6ZXJvLCBmZXcgbmVhciBleHRyZW1lcyAtLT4KICA8dGV4dCB4PSIxNzUiIHk9IjQ0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjgiIGZpbGw9IiMxNTY1YzAiPndlaWdodCBkZW5zaXR5PC90ZXh0PgogIDx0ZXh0IHg9IjE3NSIgeT0iNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzE1NjVjMCI+KG5vcm1hbCBkaXN0Lik8L3RleHQ+CgogIDwhLS0gaGlnaGxpZ2h0OiBkZW5zZSB0aWNrcyBuZWFyIGNlbnRlciBnZXQgd2FzdGVkIG9uIHNwYXJzZSBleHRyZW1lcyAtLT4KICA8cmVjdCB4PSIzMCIgeT0iMTU1IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjE2IiByeD0iMiIgZmlsbD0iI2ZjZTRlYyIvPgogIDx0ZXh0IHg9Ijk1IiB5PSIxNjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzg4MGU0ZiI+ZmV3IHdlaWdodHMgaGVyZSAod2FzdGVkIHByZWNpc2lvbik8L3RleHQ+CiAgPHJlY3QgeD0iMjAwIiB5PSIxNTUiIHdpZHRoPSIxMjAiIGhlaWdodD0iMTYiIHJ4PSIyIiBmaWxsPSIjZmNlNGVjIi8+CiAgPHRleHQgeD0iMjYwIiB5PSIxNjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzg4MGU0ZiI+ZmV3IHdlaWdodHMgaGVyZSAod2FzdGVkIHByZWNpc2lvbik8L3RleHQ+CgogIDwhLS0gPT09PT0gUklHSFQ6IE5GNCBub24tdW5pZm9ybSBxdWFudGl6YXRpb24gPT09PT0gLS0+CiAgPHRleHQgeD0iNjEwIiB5PSI0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPk5GNCAoTm9ybWFsIEZsb2F0KSDigJQgcXVhbnRpbGUtYmFzZWQ8L3RleHQ+CgogIDwhLS0gTnVtYmVyIGxpbmUgLS0+CiAgPGxpbmUgeDE9IjQ0NSIgeTE9IjEzMCIgeDI9Ijc3MCIgeTI9IjEzMCIgc3Ryb2tlPSIjOTk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ0NSIgeT0iMTQ4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjcuNSIgZmlsbD0iIzU1NSI+LTEuMDwvdGV4dD4KICA8dGV4dCB4PSI2MDciIHk9IjE0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI3LjUiIGZpbGw9IiM1NTUiPjA8L3RleHQ+CiAgPHRleHQgeD0iNzcwIiB5PSIxNDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iNy41IiBmaWxsPSIjNTU1Ij4rMS4wPC90ZXh0PgoKICA8IS0tIE5GNCB0aWNrczogY2x1c3RlcmVkIG5lYXIgemVybyAocXVhbnRpbGUgcG9zaXRpb25zIGZvciBOKDAsMSkpIC0tPgogIDwhLS0gMTYgcXVhbnRpbGUgdmFsdWVzIHNjYWxlZCB0byBbLTEsKzFdOiAtLT4KICA8IS0tIFEgPSBbLTEuMCwgLTAuNjksIC0wLjUyLCAtMC4zOSwgLTAuMjgsIC0wLjE4LCAtMC4wOSwgMC4wLCAwLjA5LCAwLjE4LCAwLjI4LCAwLjM5LCAwLjUyLCAwLjY5LCAxLjBdIC0tPgogIDwhLS0gd2l0aCBleHRyYSAwLjAgc3BsaXQgdG8gZ2V0IDE2IGxldmVscyAtLT4KICA8IS0tIHBvc2l0aW9ucyBvbiAzMjVweCByYW5nZSBjZW50ZXJlZCBhdCA2MDcgLS0+CiAgPCEtLSB4ID0gNjA3ICsgdmFsICogMTYyLjUgLS0+CiAgPGxpbmUgeDE9IjQ0NSIgeTE9IjEyNCIgeDI9IjQ0NSIgeTI9IjEzNCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI0OTUiIHkxPSIxMjQiIHgyPSI0OTUiIHkyPSIxMzQiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iNTIzIiB5MT0iMTI0IiB4Mj0iNTIzIiB5Mj0iMTM0IiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjU0NCIgeTE9IjEyNCIgeDI9IjU0NCIgeTI9IjEzNCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI1NjIiIHkxPSIxMjQiIHgyPSI1NjIiIHkyPSIxMzQiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iNTc4IiB5MT0iMTI0IiB4Mj0iNTc4IiB5Mj0iMTM0IiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjU5MiIgeTE9IjEyNCIgeDI9IjU5MiIgeTI9IjEzNCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI2MDQiIHkxPSIxMjQiIHgyPSI2MDQiIHkyPSIxMzQiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iNjE0IiB5MT0iMTI0IiB4Mj0iNjE0IiB5Mj0iMTM0IiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjYyOSIgeTE9IjEyNCIgeDI9IjYyOSIgeTI9IjEzNCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI2NDIiIHkxPSIxMjQiIHgyPSI2NDIiIHkyPSIxMzQiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iNjU4IiB5MT0iMTI0IiB4Mj0iNjU4IiB5Mj0iMTM0IiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9IjY3NyIgeTE9IjEyNCIgeDI9IjY3NyIgeTI9IjEzNCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI2OTgiIHkxPSIxMjQiIHgyPSI2OTgiIHkyPSIxMzQiIHN0cm9rZT0iIzRjYWY1MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iNzI4IiB5MT0iMTI0IiB4Mj0iNzI4IiB5Mj0iMTM0IiBzdHJva2U9IiM0Y2FmNTAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPGxpbmUgeDE9Ijc3MCIgeTE9IjEyNCIgeDI9Ijc3MCIgeTI9IjEzNCIgc3Ryb2tlPSIjNGNhZjUwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgoKICA8IS0tIFNhbWUgYmVsbCBjdXJ2ZSBhYm92ZSBORjQgLS0+CiAgPHBhdGggZD0iTTQ0NSwxMzAgQzQ3NSwxMjkgNDk1LDEyNSA1MTUsMTEwIEM1MzUsOTAgNTU1LDYyIDU4MCw1MCBDNTkwLDQ2IDYwMCw0NiA2MTUsNTAgQzYzOCw2MiA2NjAsOTAgNjgwLDExMCBDNzAwLDEyNSA3MjAsMTI5IDc3MCwxMzAiCiAgICBmaWxsPSJub25lIiBzdHJva2U9IiMyMTk2ZjMiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI0LDMiLz4KICA8dGV4dCB4PSI2MDciIHk9IjQ0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjgiIGZpbGw9IiMxNTY1YzAiPndlaWdodCBkZW5zaXR5PC90ZXh0PgogIDx0ZXh0IHg9IjYwNyIgeT0iNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzE1NjVjMCI+KG5vcm1hbCBkaXN0Lik8L3RleHQ+CgogIDwhLS0gaGlnaGxpZ2h0OiB0aWNrcyBjbHVzdGVyZWQgbmVhciB6ZXJvIHdoZXJlIHdlaWdodHMgYWN0dWFsbHkgbGl2ZSAtLT4KICA8cmVjdCB4PSI1NTUiIHk9IjE1NSIgd2lkdGg9IjEwOCIgaGVpZ2h0PSIxNiIgcng9IjIiIGZpbGw9IiNlOGY1ZTkiLz4KICA8dGV4dCB4PSI2MDkiIHk9IjE2NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4IiBmaWxsPSIjMmU3ZDMyIj5kZW5zZSB0aWNrcyB3aGVyZSB3ZWlnaHRzIGxpdmU8L3RleHQ+CgogIDwhLS0gPT09PT0gRElWSURFUiA9PT09PSAtLT4KICA8bGluZSB4MT0iMTAiIHkxPSIxODUiIHgyPSI4NTAiIHkyPSIxODUiIHN0cm9rZT0iI2RkZCIgc3Ryb2tlLXdpZHRoPSIxIi8+CgogIDwhLS0gPT09PT0gTUlERExFOiBNZW1vcnkgc2F2aW5ncyBjb21wYXJpc29uID09PT09IC0tPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjA0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFhMWEyZSI+TWVtb3J5IFNhdmluZ3M6IFByZWNpc2lvbiB2cyBTaXplIHBlciBCaWxsaW9uIFBhcmFtZXRlcnM8L3RleHQ+CgogIDwhLS0gQmFyIGNoYXJ0IC0tPgogIDwhLS0gWTogMjIwIChib3R0b20pIHRvIDQwMCBpcyBzcGFjZS4uLiB3YWl0IGxldCBtZSBkbyBob3Jpem9udGFsIGJhcnMgLS0+CiAgPCEtLSA0IGJhcnM6IGZsb2F0MzIsIGJmbG9hdDE2LCBJTlQ4LCBORjQgLS0+CiAgPCEtLSBtb2RlbCBzaXplIGF0IDFCIHBhcmFtczogZmxvYXQzMj00R0IsIGJmMTY9MkdCLCBpbnQ4PTFHQiwgbmY0PTAuNUdCIC0tPgogIDwhLS0gaG9yaXpvbnRhbCBiYXIsIG1heCA0R0IgPSA0MDBweCB3aWR0aCAtLT4KCiAgPCEtLSBMYWJlbHMgYW5kIGJhcnMgLS0+CiAgPHRleHQgeD0iMTIwIiB5PSIyMjgiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzMzMyI+ZmxvYXQzMjwvdGV4dD4KICA8cmVjdCB4PSIxMjUiIHk9IjIxOCIgd2lkdGg9IjQwMCIgaGVpZ2h0PSIxNiIgcng9IjMiIGZpbGw9IiNlOTFlNjMiLz4KICA8dGV4dCB4PSI1MzAiIHk9IjIzMCIgZm9udC1zaXplPSI5IiBmaWxsPSIjODgwZTRmIj40LjAgR0IgLyBCIHBhcmFtczwvdGV4dD4KCiAgPHRleHQgeD0iMTIwIiB5PSIyNTgiIHRleHQtYW5jaG9yPSJlbmQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzMzMyI+YmZsb2F0MTY8L3RleHQ+CiAgPHJlY3QgeD0iMTI1IiB5PSIyNDgiIHdpZHRoPSIyMDAiIGhlaWdodD0iMTYiIHJ4PSIzIiBmaWxsPSIjZmY5ODAwIi8+CiAgPHRleHQgeD0iMzMwIiB5PSIyNjAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2U2NTEwMCI+Mi4wIEdCIC8gQiBwYXJhbXM8L3RleHQ+CgogIDx0ZXh0IHg9IjEyMCIgeT0iMjg4IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjkiIGZpbGw9IiMzMzMiPklOVDg8L3RleHQ+CiAgPHJlY3QgeD0iMTI1IiB5PSIyNzgiIHdpZHRoPSIxMDAiIGhlaWdodD0iMTYiIHJ4PSIzIiBmaWxsPSIjMjE5NmYzIi8+CiAgPHRleHQgeD0iMjMwIiB5PSIyOTAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzE1NjVjMCI+MS4wIEdCIC8gQiBwYXJhbXM8L3RleHQ+CgogIDx0ZXh0IHg9IjEyMCIgeT0iMzE4IiB0ZXh0LWFuY2hvcj0iZW5kIiBmb250LXNpemU9IjkiIGZpbGw9IiMzMzMiPk5GNDwvdGV4dD4KICA8cmVjdCB4PSIxMjUiIHk9IjMwOCIgd2lkdGg9IjUwIiBoZWlnaHQ9IjE2IiByeD0iMyIgZmlsbD0iIzRjYWY1MCIvPgogIDx0ZXh0IHg9IjE4MCIgeT0iMzIwIiBmb250LXNpemU9IjkiIGZpbGw9IiMyZTdkMzIiPjAuNSBHQiAvIEIgcGFyYW1zICAoOMOXIHZzIGZsb2F0MzIpPC90ZXh0PgoKICA8IS0tIGF4aXMgLS0+CiAgPGxpbmUgeDE9IjEyNSIgeTE9IjMzMCIgeDI9IjU0MCIgeTI9IjMzMCIgc3Ryb2tlPSIjYmJiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxMjUiIHk9IjM0MiIgZm9udC1zaXplPSI4IiBmaWxsPSIjODg4Ij4wIEdCPC90ZXh0PgogIDx0ZXh0IHg9IjIyNSIgeT0iMzQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjgiIGZpbGw9IiM4ODgiPjEgR0I8L3RleHQ+CiAgPHRleHQgeD0iMzI1IiB5PSIzNDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOCIgZmlsbD0iIzg4OCI+MiBHQjwvdGV4dD4KICA8dGV4dCB4PSI0MjUiIHk9IjM0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4IiBmaWxsPSIjODg4Ij4zIEdCPC90ZXh0PgogIDx0ZXh0IHg9IjUyNSIgeT0iMzQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjgiIGZpbGw9IiM4ODgiPjQgR0I8L3RleHQ+CgogIDwhLS0gcHJhY3RpY2FsIGV4YW1wbGUgYm94IC0tPgogIDxyZWN0IHg9IjU5MCIgeT0iMjEwIiB3aWR0aD0iMjU0IiBoZWlnaHQ9IjEzOCIgcng9IjUiIGZpbGw9IiNmZmYzZTAiIHN0cm9rZT0iI2ZmOTgwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI3MTciIHk9IjIyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5LjUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTY1MTAwIj5MbGFtYSAzIDhCIG1vZGVsIHNpemU8L3RleHQ+CiAgPHRleHQgeD0iNzE3IiB5PSIyNDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij5mbG9hdDMyICAg4oaSIDMyIEdCIFZSQU08L3RleHQ+CiAgPHRleHQgeD0iNzE3IiB5PSIyNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij5iZmxvYXQxNiAg4oaSIDE2IEdCIFZSQU08L3RleHQ+CiAgPHRleHQgeD0iNzE3IiB5PSIyNzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmaWxsPSIjNTU1Ij5JTlQ4ICAgICAg4oaSICA4IEdCIFZSQU08L3RleHQ+CiAgPHRleHQgeD0iNzE3IiB5PSIyODciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOC41IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzJlN2QzMiI+TkY0IChRTG9SQSkg4oaSICA0IEdCIFZSQU08L3RleHQ+CiAgPGxpbmUgeDE9IjYwMCIgeTE9IjI5NiIgeDI9IjgzNCIgeTI9IjI5NiIgc3Ryb2tlPSIjZWVlIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI3MTciIHk9IjMxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPitvcHRpbWl6ZXIgc3RhdGVzICg4LWJpdCBBZGFtKTwvdGV4dD4KICA8dGV4dCB4PSI3MTciIHk9IjMyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPisgZ3JhZGllbnRzIH49IDEwIEdCIHRvdGFsPC90ZXh0PgogIDx0ZXh0IHg9IjcxNyIgeT0iMzQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxNTY1YzAiPuKGkiBmaXRzIG9uIHNpbmdsZSAxMiBHQiBHUFU8L3RleHQ+CgogIDwhLS0gPT09PT0gQk9UVE9NOiBEb3VibGUgcXVhbnRpemF0aW9uIGFuZCBwYWdlZCBvcHRpbWl6ZXJzID09PT09IC0tPgogIDxsaW5lIHgxPSIxMCIgeTE9IjM1OCIgeDI9Ijg1MCIgeTI9IjM1OCIgc3Ryb2tlPSIjZGRkIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjM3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPkRvdWJsZSBRdWFudGl6YXRpb24gYW5kIFBhZ2VkIE9wdGltaXplcnM8L3RleHQ+CgogIDwhLS0gRG91YmxlIHF1YW50IGJveCAtLT4KICA8cmVjdCB4PSIxNCIgeT0iMzg2IiB3aWR0aD0iNDAwIiBoZWlnaHQ9IjEwMiIgcng9IjUiIGZpbGw9IiNlOGY0ZmQiIHN0cm9rZT0iIzIxOTZmMyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyMTQiIHk9IjQwMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxNTY1YzAiPkRvdWJsZSBRdWFudGl6YXRpb24gKHNhdmVzIH4wLjUgR0Igb24gN0IgbW9kZWwpPC90ZXh0PgogIDx0ZXh0IHg9IjIxNCIgeT0iNDIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+RWFjaCA2NC13ZWlnaHQgYmxvY2sgaGFzIGEgZmxvYXQzMiBxdWFudGl6YXRpb24gY29uc3RhbnQgY+KCgTwvdGV4dD4KICA8dGV4dCB4PSIyMTQiIHk9IjQzNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPmPigoEgaXRzZWxmIGlzIHF1YW50aXplZCB0byA4LWJpdCDihpIgY+KCgiAodGhlIGNvbnN0YW50J3MgY29uc3RhbnQpPC90ZXh0PgogIDx0ZXh0IHg9IjIxNCIgeT0iNDQ4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+U3RvcmFnZTogNC1iaXQgd2VpZ2h0cyArIDgtYml0IGPigoEgKyAzMi1iaXQgY+KCgiBwZXIgNjQtd2VpZ2h0IGJsb2NrPC90ZXh0PgogIDx0ZXh0IHg9IjIxNCIgeT0iNDYyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+U2F2aW5nczogMzJi4oaSOGIgZm9yIGPigoEgPSAwLjM3NSBiaXRzL3BhcmFtIMOXIEIgcGFyYW1zPC90ZXh0PgogIDx0ZXh0IHg9IjIxNCIgeT0iNDc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+RWZmZWN0aXZlIGJpdHMgcGVyIHBhcmFtIOKJiCA0LjUgYml0cyAodnMgNCArIDAuNSBvdmVyaGVhZCB3aXRob3V0IERRKTwvdGV4dD4KCiAgPCEtLSBQYWdlZCBvcHRpbWl6ZXJzIGJveCAtLT4KICA8cmVjdCB4PSI0MzAiIHk9IjM4NiIgd2lkdGg9IjQxNiIgaGVpZ2h0PSIxMDIiIHJ4PSI1IiBmaWxsPSIjZjNlNWY1IiBzdHJva2U9IiM5YzI3YjAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjM4IiB5PSI0MDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjNmExYjlhIj5QYWdlZCBPcHRpbWl6ZXJzIChoYW5kbGUgR1BVIG1lbW9yeSBzcGlrZXMpPC90ZXh0PgogIDx0ZXh0IHg9IjYzOCIgeT0iNDIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjguNSIgZmlsbD0iIzU1NSI+TlZJRElBIHVuaWZpZWQgbWVtb3J5OiBvcHRpbWl6ZXIgc3RhdGUgY2FuIHBhZ2UgdG8gQ1BVIFJBTTwvdGV4dD4KICA8dGV4dCB4PSI2MzgiIHk9IjQzNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPkR1cmluZyBmb3J3YXJkOiBtb2RlbCBpbiBHUFUgTkY0IOKGkiBkZXF1YW50IHRvIGJmMTYgb24tdGhlLWZseTwvdGV4dD4KICA8dGV4dCB4PSI2MzgiIHk9IjQ0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPkR1cmluZyBiYWNrd2FyZDogZ3JhZGllbnRzIGluIGJmMTYg4oaSIG9wdGltaXplciBpbiA4LWJpdCAoYml0c2FuZGJ5dGVzKTwvdGV4dD4KICA8dGV4dCB4PSI2MzgiIHk9IjQ2MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPk1lbW9yeSBzcGlrZXMgZHVyaW5nIGxvbmcgc2VxdWVuY2VzIOKGkiBwYWdlIHRvIENQVSwgbm90IE9PTTwvdGV4dD4KICA8dGV4dCB4PSI2MzgiIHk9IjQ3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI4LjUiIGZpbGw9IiM1NTUiPk5vIHNwZWVkIHBlbmFsdHkgdW5sZXNzIENQVSBwYWdlIGFjdHVhbGx5IG5lZWRlZCAoJmx0OzUlIG9mIHN0ZXBzKTwvdGV4dD4KCiAgPCEtLSBkZWZzOiBhcnJvd2hlYWQgLS0+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM1NTUiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+Cg==",
+          "alt": "NF4 vs INT4 quantization levels on a normal distribution, memory savings comparison, and double quantization / paged optimizer diagrams"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "NF4 Lookup Table"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The 16 NF4 quantile values (normalised so the smallest and largest are ±1) are:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport scipy.stats as stats\n\ndef compute_nf4_levels(n_bits: int = 4) -> list[float]:\n    \"\"\"\n    Compute the NF4 quantile levels for a normal distribution.\n    For 4-bit NF4 these are the 16 quantiles of N(0, 1)\n    mapped symmetrically to [-1, +1].\n    \"\"\"\n    n_levels = 2 ** n_bits  # 16 for 4-bit\n    # Evenly spaced quantile fractions from 1/n to (n-1)/n, then add ±1 endpoints\n    probs = [(i + 0.5) / n_levels for i in range(n_levels)]\n    quantiles = [stats.norm.ppf(p) for p in probs]\n    # Normalise so max absolute value = 1\n    absmax = max(abs(q) for q in quantiles)\n    return [q / absmax for q in quantiles]\n\nnf4_table = compute_nf4_levels()\nprint(nf4_table)\n# [-1.0, -0.6962, -0.5251, -0.3949, -0.2844, -0.1847, -0.0915,\n#   0.0,  0.0915,  0.1847,  0.2844,  0.3949,  0.5251,  0.6962,  1.0, ...]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At quantisation time, each weight is mapped to its nearest NF4 level and stored as a 4-bit index (0–15). At dequantisation time the index is looked up in the table and the result is scaled by the block's maximum absolute value. Critically, the stored value is an index, not a float — the float is only reconstructed just before the matrix multiplication."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Block-wise Quantisation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single maximum-absolute-value scaler per weight tensor would be dominated by outliers. QLoRA uses "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "block-wise quantisation"
+          },
+          {
+            "type": "text",
+            "text": ": the weight tensor is split into non-overlapping blocks of 64 values, and each block gets its own scaling constant "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "c₁ = max(|block|)"
+          },
+          {
+            "type": "text",
+            "text": ". Weights within each block are normalised by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "c₁"
+          },
+          {
+            "type": "text",
+            "text": " before the NF4 lookup. This localises the impact of outliers to a 64-element window rather than the entire matrix."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\hat{W}^{(b)}_i = \\text{NF4}\\!\\left(\\frac{W^{(b)}_i}{c_1^{(b)}}\\right), \\quad c_1^{(b)} = \\max_i \\left|W^{(b)}_i\\right|"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Double Quantisation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Storing one float32 constant per 64 weights adds 0.5 bits per parameter — small but non-negligible at 7B scale. Double quantisation reduces this overhead by quantising the block constants themselves. The per-block float32 scalers "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "c₁"
+          },
+          {
+            "type": "text",
+            "text": " are grouped into blocks of 256, normalised by a second scaler "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "c₂"
+          },
+          {
+            "type": "text",
+            "text": ", and stored in 8-bit rather than 32-bit."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "What is stored"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bits used"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Per-weight cost"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Weights (NF4 indices)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4-bit"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4.000 bits"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Block scalers c₁ without DQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "float32 per 64 weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "+0.500 bits"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Block scalers c₁ with DQ (8-bit)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "int8 per 64 weights"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "+0.125 bits"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Second-level scalers c₂"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "float32 per 256 c₁ values"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.001 bits (negligible)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Total with double quant"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": ""
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "≈ 4.127 bits/param"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Paged Optimizers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even with NF4 model weights, gradient spikes during long sequences can cause out-of-memory errors on a single GPU. QLoRA introduces "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "paged optimizers"
+          },
+          {
+            "type": "text",
+            "text": " via NVIDIA's unified memory: when GPU VRAM is exhausted, optimizer states can transparently page to CPU RAM and page back to GPU when needed. Combined with 8-bit Adam (bitsandbytes), optimizer state storage drops from 8 bytes per parameter (float32 × 2 for momentum and variance) to 2 bytes per parameter."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice, paging to CPU RAM rarely triggers under normal fine-tuning conditions. Its purpose is to eliminate out-of-memory crashes on unusually long sequences, not to speed up average training."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using QLoRA in Practice (bitsandbytes + PEFT)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The bitsandbytes library implements NF4 and double quantisation, and PEFT's "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "prepare_model_for_kbit_training()"
+          },
+          {
+            "type": "text",
+            "text": " wires them together with gradient checkpointing."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "bash"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "pip install bitsandbytes>=0.41.0 peft>=0.6.0 transformers>=4.35.0"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nfrom transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig\nfrom peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training\n\n# 1. Configure 4-bit NF4 quantisation with double quantisation\nbnb_config = BitsAndBytesConfig(\n    load_in_4bit=True,\n    bnb_4bit_quant_type=\"nf4\",          # NF4 data type (not int4)\n    bnb_4bit_use_double_quant=True,      # double quantisation for ~0.4 bits/param savings\n    bnb_4bit_compute_dtype=torch.bfloat16,  # dequant to bf16 for matrix multiplications\n)\n\n# 2. Load the base model quantised to NF4\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Meta-Llama-3-8B\",\n    quantization_config=bnb_config,\n    device_map=\"auto\",\n)\ntokenizer = AutoTokenizer.from_pretrained(\"meta-llama/Meta-Llama-3-8B\")\n\n# 3. Prepare for k-bit training:\n#    - disables quantisation on modules that receive gradients\n#    - enables gradient checkpointing\n#    - upcasts layer norms and the embedding layer to float32\nmodel = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)\n\n# 4. Attach LoRA adapters — only these parameters are trained\nlora_config = LoraConfig(\n    r=16,\n    lora_alpha=16,\n    target_modules=[\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\"],\n    lora_dropout=0.05,\n    bias=\"none\",\n    task_type=\"CAUSAL_LM\",\n)\nmodel = get_peft_model(model, lora_config)\n\n# Report trainable vs frozen parameters\ntrainable = sum(p.numel() for p in model.parameters() if p.requires_grad)\ntotal     = sum(p.numel() for p in model.parameters())\nprint(f\"Trainable: {trainable:,}  ({100*trainable/total:.2f}% of {total:,})\")\n# Trainable: 20,971,520  (0.26% of 8,030,261,248)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Training with Paged Adam"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq\nfrom datasets import load_dataset\n\n# Use 8-bit paged Adam to minimise optimizer memory\ntraining_args = TrainingArguments(\n    output_dir=\"./qlora-llama3-8b\",\n    num_train_epochs=3,\n    per_device_train_batch_size=2,\n    gradient_accumulation_steps=8,     # effective batch size = 16\n    learning_rate=2e-4,\n    bf16=True,\n    optim=\"paged_adamw_8bit\",           # paged 8-bit Adam\n    lr_scheduler_type=\"cosine\",\n    warmup_ratio=0.05,\n    logging_steps=10,\n    save_steps=200,\n    gradient_checkpointing=True,        # saves activation memory at cost of 30% speed\n)\n\ndataset = load_dataset(\"json\", data_files={\"train\": \"train.jsonl\"}, split=\"train\")\n\ntrainer = Trainer(\n    model=model,\n    args=training_args,\n    train_dataset=dataset,\n    data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8),\n)\n\ntrainer.train()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Dequantisation at Compute Time"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During the forward pass, NF4 weights are "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "not"
+          },
+          {
+            "type": "text",
+            "text": " converted back to float16 and stored — that would use the same memory as float16. Instead, each 4-bit block is dequantised on-the-fly, immediately before the matrix multiplication that consumes it, and the temporary float buffer is freed afterwards. The GPU kernel for this lives in bitsandbytes and is fused with the matrix multiply to avoid unnecessary data movement."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{output} = X \\cdot \\text{dequant}_{\\text{NF4}}(\\hat{W}, c_1, c_2) + \\frac{\\alpha}{r} \\cdot X B A"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The LoRA adapter path ("
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "XBA"
+          },
+          {
+            "type": "text",
+            "text": ") operates in bf16 throughout — only the base model weights are quantised. Gradients flow back through the dequantised path to update "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "A"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "B"
+          },
+          {
+            "type": "text",
+            "text": "; the NF4 base weights themselves receive no gradient and are never updated."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory Budget for Llama 3 8B"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Component"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Size"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Notes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Base model (NF4 + DQ)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4.1 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "4.127 bits/param × 8B params"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LoRA trainable params (r=16)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.04 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~21M params in bf16"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Gradients (adapter only)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.04 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "bf16 gradients for A and B only"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "8-bit paged Adam states"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~0.04 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "2 bytes × 21M params"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Activations (grad checkpoint, seq=2048)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4–6 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Varies with batch size and sequence length"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Total (approx.)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "~9–12 GB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fits on a 12 GB GPU (RTX 3080 / 4080)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Quality Impact of 4-bit Quantisation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The QLoRA paper benchmarked NF4-trained models against full bf16 baselines on Vicuna and MMLU and found performance within 1 percentage point for instruction-following and reasoning tasks. NF4 consistently outperforms INT4 and INT8-quantised baselines with the same compute budget, because the quantile-aligned bins lose less information for normally distributed weights."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The quality gap relative to bf16 QLoRA is approximately:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "NF4 vs bf16 base:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " <1% on most benchmarks when rank is ≥16 and enough data is available."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "NF4 vs INT4:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " NF4 is approximately 2–4% better on average across benchmarks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Inference overhead:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " Dequantisation adds roughly 15–25% latency compared to bf16 inference. This is the cost of the memory savings at inference time — use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "merge_and_unload()"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and then re-quantise with a production framework (AWQ, GPTQ) if serving throughput is critical."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Issues and Fixes"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Problem"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cause"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fix"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CUDA OOM on first batch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Activations too large"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Reduce batch size; reduce max_length; increase gradient_accumulation_steps"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Loss does not decrease"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "prepare_model_for_kbit_training() not called"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Always call this before get_peft_model()"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NaN loss early in training"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LR too high or fp16 overflow"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Use bf16=True not fp16=True; lower LR to 1e-4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slow training (>30% slower)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Grad checkpointing + small batch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Increase per_device_train_batch_size; reduce gradient_accumulation_steps"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cannot save_pretrained the quantised model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "NF4 tensors are non-serialisable by default"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Save only the adapter with model.save_pretrained(); merge + re-quantise for deployment"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Accelerating QLoRA with Flash Attention 2" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Flash Attention 2 (Dao, 2023) fuses the attention softmax and matmuls into a single GPU kernel with tiled computation, reducing the memory footprint of attention activations from O(n²) to O(n). This is orthogonal to QLoRA — you can combine both to push sequence lengths further while keeping the 4-bit base model. Enabling it in transformers requires a supported model architecture and " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "flash_attn>=2.0" },
+          { "type": "text", "text": "." }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "pip install flash-attn --no-build-isolation"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoModelForCausalLM, BitsAndBytesConfig\nimport torch\n\nbnb_config = BitsAndBytesConfig(\n    load_in_4bit=True,\n    bnb_4bit_quant_type=\"nf4\",\n    bnb_4bit_use_double_quant=True,\n    bnb_4bit_compute_dtype=torch.bfloat16,\n)\n\n# Add attn_implementation to use Flash Attention 2 with QLoRA\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Meta-Llama-3-8B\",\n    quantization_config=bnb_config,\n    device_map=\"auto\",\n    attn_implementation=\"flash_attention_2\",  # <-- enables FA2\n)\n# Flash Attention 2 requires bfloat16 compute dtype (already set above)\n# Throughput improvement: typically 20–40% faster for long sequences"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Verifying Quantisation Quality" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Before committing to a long training run, verify that the quantised model generates sensible outputs and that perplexity degradation from NF4 is acceptable. A quick perplexity check on a small validation set compares the bf16 and NF4 baselines:" }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import torch\nimport math\nfrom transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig\nfrom datasets import load_dataset\n\ndef compute_perplexity(\n    model_name: str,\n    use_4bit: bool = False,\n    n_samples: int = 50,\n    max_length: int = 512,\n) -> float:\n    bnb = None\n    if use_4bit:\n        bnb = BitsAndBytesConfig(\n            load_in_4bit=True,\n            bnb_4bit_quant_type=\"nf4\",\n            bnb_4bit_use_double_quant=True,\n            bnb_4bit_compute_dtype=torch.bfloat16,\n        )\n\n    model = AutoModelForCausalLM.from_pretrained(\n        model_name, quantization_config=bnb, device_map=\"auto\", torch_dtype=torch.bfloat16\n    )\n    model.eval()\n    tok = AutoTokenizer.from_pretrained(model_name)\n\n    ds = load_dataset(\"wikitext\", \"wikitext-2-raw-v1\", split=\"validation\")\n    texts = [row[\"text\"] for row in ds if len(row[\"text\"]) > 100][:n_samples]\n\n    total_nll, total_tokens = 0.0, 0\n    with torch.no_grad():\n        for text in texts:\n            ids = tok(text, return_tensors=\"pt\", truncation=True,\n                      max_length=max_length).input_ids.to(model.device)\n            out = model(ids, labels=ids)\n            total_nll   += out.loss.item() * (ids.size(1) - 1)\n            total_tokens += ids.size(1) - 1\n\n    return math.exp(total_nll / total_tokens)\n\n\nbf16_ppl = compute_perplexity(\"meta-llama/Meta-Llama-3-8B\", use_4bit=False)\nnf4_ppl  = compute_perplexity(\"meta-llama/Meta-Llama-3-8B\", use_4bit=True)\nprint(f\"bf16  perplexity: {bf16_ppl:.2f}\")\nprint(f\"NF4   perplexity: {nf4_ppl:.2f}\")\nprint(f\"Degradation:      {100*(nf4_ppl/bf16_ppl - 1):.1f}%\")\n# Typical output for Llama 3 8B:\n# bf16  perplexity: 7.14\n# NF4   perplexity: 7.31\n# Degradation:      2.4%"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "A degradation under 5% is generally acceptable for fine-tuning purposes. If degradation is higher, check that you are using NF4 (not INT4) and double quantisation. Models with unusual weight distributions — heavily quantised post-training or very small (<1B) — may suffer more from 4-bit quantisation." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Choosing the Block Size" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The default block size of 64 in bitsandbytes is a deliberate trade-off. Smaller blocks give each group its own, more accurate scaler but increase the scaler storage overhead:" }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": { "latex": "\\text{overhead\\_bits/param} = \\frac{32}{\\text{block\\_size}}" }
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Block size" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Scaler overhead (bits/param)" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quality" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Notes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "32" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1.0" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Total ~5 bits/param; more overhead" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "64" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "0.5" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Good" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "marks": [{ "type": "bold" }], "text": "Default; ~4.5 bits/param" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "128" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "0.25" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Slightly worse" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "~4.25 bits/param; outlier sensitivity" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "256" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "0.125" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Worse" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "~4.125 bits/param; not recommended" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The bitsandbytes " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "BitsAndBytesConfig" },
+          { "type": "text", "text": " does not currently expose the block size directly — it is fixed at 64. If you need a different block size, the " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "bitsandbytes" },
+          { "type": "text", "text": " Python API " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "bnb.nn.Linear4bit" },
+          { "type": "text", "text": " accepts a " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "blocksize" },
+          { "type": "text", "text": " parameter." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "QLoRA vs GPTQ vs AWQ for Inference" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "QLoRA's NF4 quantisation is designed for " },
+          { "type": "text", "marks": [{ "type": "bold" }], "text": "training" },
+          { "type": "text", "text": ". For production inference, GPTQ and AWQ are generally preferred because they target throughput rather than fine-tuning memory reduction." }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Method" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Primary use" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quantisation approach" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Inference throughput" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "NF4 (QLoRA)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fine-tuning on single GPU" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quantile-based, per-block scalers" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "~15–25% slower than bf16" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "GPTQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Inference serving" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Layer-by-layer second-order optimisation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Near bf16 with fused kernels" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "AWQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Inference serving" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Per-channel activation-aware scaling" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Near bf16; better on outlier-heavy models" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The typical production workflow is: train with QLoRA → merge the adapter with " },
+          { "type": "text", "marks": [{ "type": "code" }], "text": "merge_and_unload()" },
+          { "type": "text", "text": " to get a bf16 model → re-quantise with GPTQ or AWQ for deployment. This gives you the training efficiency of QLoRA and the inference throughput of a production quantisation method." }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "# After training: merge and convert to GPTQ for deployment\nfrom peft import PeftModel\nfrom transformers import AutoModelForCausalLM\n\n# 1. Load the trained adapter on top of the bf16 base model\nbase = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Meta-Llama-3-8B\",\n    torch_dtype=\"auto\",\n    device_map=\"auto\",\n)\npeft_model = PeftModel.from_pretrained(base, \"./qlora-llama3-8b/checkpoint-final\")\n\n# 2. Merge LoRA into base weights → plain bf16 model\nmerged = peft_model.merge_and_unload()\nmerged.save_pretrained(\"./merged-bf16\")\n\n# 3. Re-quantise to GPTQ for deployment\n# (uses the auto-gptq or optimum library)\n# pip install auto-gptq optimum\nfrom auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig\n\nquantize_config = BaseQuantizeConfig(bits=4, group_size=128, desc_act=False)\ngptq_model = AutoGPTQForCausalLM.from_pretrained(\"./merged-bf16\", quantize_config)\ngptq_model.quantize(calibration_dataset)  # small sample of representative prompts\ngptq_model.save_quantized(\"./gptq-4bit-deployment\")"
+          }
+        ]
+      }
+    ]
+  }
+}
