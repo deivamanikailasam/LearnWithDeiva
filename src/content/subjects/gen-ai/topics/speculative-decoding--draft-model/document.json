@@ -1,0 +1,1943 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Speculative decoding is a technique for accelerating autoregressive LLM inference without changing the model's output distribution. The key component is the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "draft model"
+          },
+          {
+            "type": "text",
+            "text": ": a small, fast language model that proposes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " candidate tokens in "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " autoregressive steps. The large target model then scores all "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " tokens simultaneously in a single parallel forward pass. Tokens that the target model agrees with are accepted; those it disagrees with are rejected and resampled from the target's distribution. The result is a decode step that produces more than one token while preserving the exact distribution of the target model."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What the Draft Model Is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In speculative decoding the pipeline uses two models simultaneously. The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "draft model"
+          },
+          {
+            "type": "text",
+            "text": " (also called the approximation model or proposal model) is a smaller language model — typically 10–100× fewer parameters than the main model — with identical vocabulary and tokenizer. It runs autoregressively to generate a short sequence of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " candidate tokens. The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "target model"
+          },
+          {
+            "type": "text",
+            "text": " is the full-size model whose output distribution we want to preserve. Because the target model processes all "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " draft tokens in one forward pass — reading each position's logits in parallel — it completes that pass in roughly the same time as generating a single token on its own."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The draft model is not merely a heuristic shortcut: the acceptance step uses a rejection-sampling criterion that mathematically guarantees that accepted tokens are drawn from "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ],
+            "text": "exactly"
+          },
+          {
+            "type": "text",
+            "text": " the target model's distribution. This means speculative decoding is a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "lossless"
+          },
+          {
+            "type": "text",
+            "text": " inference acceleration technique — unlike quantization or pruning, it never degrades output quality."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why the Draft Model Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LLM decode is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "memory-bandwidth-bound"
+          },
+          {
+            "type": "text",
+            "text": " at batch size 1. Each autoregressive step generates exactly one token but must load every weight of the model from GPU HBM — a multi-GB transfer that takes roughly the same time regardless of whether one sequence or a full batch is being processed. The problem is that a single forward pass processes so little useful work per byte transferred that GPU arithmetic units sit idle most of the time."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The draft model exploits this wasted arithmetic capacity. While the target model is bandwidth-bound at batch 1, running it at batch "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " costs nearly the same wall-clock time as batch 1 — because weight transfers dominate, not compute. So if the draft model proposes 4 tokens and the target model verifies them all in one pass, and on average 3 of those tokens are accepted, the effective decode speed triples without any change to the target model's outputs."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works: The Rejection Sampling Protocol"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Let "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "q(x | ctx)"
+          },
+          {
+            "type": "text",
+            "text": " be the draft model's distribution over the next token given context "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ctx"
+          },
+          {
+            "type": "text",
+            "text": ", and let "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "p(x | ctx)"
+          },
+          {
+            "type": "text",
+            "text": " be the target model's distribution. For each draft token "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "d_i"
+          },
+          {
+            "type": "text",
+            "text": " proposed by the draft model, the acceptance probability is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\alpha_i = \\min\\!\\left(1,\\; \\frac{p(d_i \\mid \\text{ctx})}{q(d_i \\mid \\text{ctx})}\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A uniform draw "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "u ~ U(0, 1)"
+          },
+          {
+            "type": "text",
+            "text": " is compared against "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α_i"
+          },
+          {
+            "type": "text",
+            "text": ". If "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "u ≤ α_i"
+          },
+          {
+            "type": "text",
+            "text": ", the token is accepted. Otherwise it is rejected and replaced by a sample from the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "residual distribution"
+          },
+          {
+            "type": "text",
+            "text": ":"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p'(x) = \\text{normalize}\\!\\left(\\max\\!\\left(0,\\; p(x) - q(x)\\right)\\right)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Critically, no further draft tokens are used after the first rejection: the step terminates, having produced at least one verified token. The mathematics guarantee that the marginal distribution of every accepted token is identical to the target model's — a property proven by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ],
+            "text": "Leviathan et al., 2023"
+          },
+          {
+            "type": "text",
+            "text": " in the original speculative decoding paper."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Expected Tokens per Step"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the acceptance probability for each position is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α"
+          },
+          {
+            "type": "text",
+            "text": " (treated as independent and uniform for a rough model), the expected number of accepted tokens in one speculative step is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathbb{E}[\\text{accepted}] = \\frac{1 - \\alpha^{k+1}}{1 - \\alpha}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α = 0.9"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k = 4"
+          },
+          {
+            "type": "text",
+            "text": ", expected accepted tokens ≈ 3.5. At "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "α = 0.7"
+          },
+          {
+            "type": "text",
+            "text": ", it drops to ≈ 2.3. The speedup is roughly proportional to the acceptance rate, so the draft model quality directly determines how much acceleration you get."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture: The Draft-Verify Loop"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDAwIiB2aWV3Qm94PSIwIDAgODYwIDQwMCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEzIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQwMCIgZmlsbD0iI2Y4ZjlmYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPlNwZWN1bGF0aXZlIERlY29kaW5nOiBEcmFmdC1WZXJpZnkgTG9vcDwvdGV4dD4KICA8cmVjdCB4PSIyMCIgeT0iNTUiIHdpZHRoPSIxMzAiIGhlaWdodD0iNDAiIGZpbGw9IiM0YTllYzQiIHJ4PSI2Ii8+CiAgPHRleHQgeD0iODUiIHk9Ijc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiPkNvbnRleHQ8L3RleHQ+CiAgPHRleHQgeD0iODUiIHk9Ijg5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMSI+KHByb21wdCArIHByZXYgdG9rZW5zKTwvdGV4dD4KICA8bGluZSB4MT0iMTUwIiB5MT0iNzUiIHgyPSIxODUiIHkyPSI3NSIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPHJlY3QgeD0iMTg1IiB5PSI0OCIgd2lkdGg9IjE1NSIgaGVpZ2h0PSI1NCIgZmlsbD0iI2U4ZjRmOCIgcng9IjgiIHN0cm9rZT0iIzRhOWVjNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyNjIiIHk9IjcxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFhNmI5NCIgZm9udC1zaXplPSIxMyI+RHJhZnQgTW9kZWw8L3RleHQ+CiAgPHRleHQgeD0iMjYyIiB5PSI4OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+c21hbGwsIGZhc3QgKH43QiBwYXJhbXMpPC90ZXh0PgogIDx0ZXh0IHg9IjI2MiIgeT0iMTAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNTU1IiBmb250LXNpemU9IjExIj5rIGF1dG9yZWdyZXNzaXZlIHN0ZXBzPC90ZXh0PgogIDxsaW5lIHgxPSIzNDAiIHkxPSI3NSIgeDI9IjM3NSIgeTI9Ijc1IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8cmVjdCB4PSIzNzUiIHk9IjU1IiB3aWR0aD0iMTc1IiBoZWlnaHQ9IjQwIiBmaWxsPSIjZmZmM2NkIiByeD0iNiIgc3Ryb2tlPSIjZTZhYzAwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ2MiIgeT0iNzEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ZDVjMDAiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5EcmFmdCB0b2tlbnM8L3RleHQ+CiAgPHRleHQgeD0iNDYyIiB5PSI4NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkNWMwMCIgZm9udC1zaXplPSIxMSI+ZDEsIGQyLCBkMywgZDQgIChrID0gNCk8L3RleHQ+CiAgPGxpbmUgeDE9IjQ2MiIgeTE9Ijk1IiB4Mj0iNDYyIiB5Mj0iMTM4IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSI1NjAiIHk9IjEyMCIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+dmVyaWZ5IGluIG9uZTwvdGV4dD4KICA8dGV4dCB4PSI1NjAiIHk9IjEzNCIgZmlsbD0iIzU1NSIgZm9udC1zaXplPSIxMSI+cGFyYWxsZWwgcGFzczwvdGV4dD4KICA8cmVjdCB4PSIyODAiIHk9IjEzOCIgd2lkdGg9IjM2MCIgaGVpZ2h0PSI1OCIgZmlsbD0iI2U4ZjhlOCIgcng9IjgiIHN0cm9rZT0iIzI3YWU2MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0NjAiIHk9IjE2MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTdhM2EiIGZvbnQtc2l6ZT0iMTMiPlRhcmdldCBNb2RlbCAobGFyZ2UsIGF1dGhvcml0YXRpdmUpPC90ZXh0PgogIDx0ZXh0IHg9IjQ2MCIgeT0iMTgwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNTU1IiBmb250LXNpemU9IjExIj5jb21wdXRlcyBQX3RhcmdldChkMS4uLmQ0KSBpbiBvbmUgZm9yd2FyZCBwYXNzPC90ZXh0PgogIDxsaW5lIHgxPSI0NjAiIHkxPSIxOTYiIHgyPSI0NjAiIHkyPSIyMzMiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxyZWN0IHg9IjI2MCIgeT0iMjMzIiB3aWR0aD0iNDAwIiBoZWlnaHQ9IjUyIiBmaWxsPSIjZjBlNmZmIiByeD0iOCIgc3Ryb2tlPSIjOGU0NGFkIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ2MCIgeT0iMjU1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzVhMWY4YSIgZm9udC1zaXplPSIxMiI+UmVqZWN0aW9uIFNhbXBsaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjQ2MCIgeT0iMjcxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNWExZjhhIiBmb250LXNpemU9IjExIj5BY2NlcHQgZGkgaWYgdSB+IFUoMCwxKSAmbHQ7PSBQX3RhcmdldChkaSkgLyBRX2RyYWZ0KGRpKTwvdGV4dD4KICA8dGV4dCB4PSI0NjAiIHk9IjI4NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzVhMWY4YSIgZm9udC1zaXplPSIxMSI+ZWxzZTogcmVzYW1wbGUgZnJvbSBjb3JyZWN0ZWQgZGlzdHJpYnV0aW9uPC90ZXh0PgogIDxsaW5lIHgxPSI0NjAiIHkxPSIyODUiIHgyPSI0NjAiIHkyPSIzMjAiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxyZWN0IHg9IjMxMCIgeT0iMzIwIiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMjdhZTYwIiByeD0iNiIvPgogIDx0ZXh0IHg9IjQ2MCIgeT0iMzQ0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiPkFjY2VwdGVkIHRva2VucyBhcHBlbmRlZCB0byBvdXRwdXQ8L3RleHQ+CiAgPHBhdGggZD0iTTYxMCAzNDAgUTc2MCAzNDAgNzYwIDc1IFE3NjAgNTUgNjQwIDU1IiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMS41IiBmaWxsPSJub25lIiBtYXJrZXItZW5kPSJ1cmwoI2FycjIpIiBzdHJva2UtZGFzaGFycmF5PSI2LDMiLz4KICA8dGV4dCB4PSI3OTAiIHk9IjI0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg4OCIgZm9udC1zaXplPSIxMSIgd3JpdGluZy1tb2RlPSJ0YiI+bmV4dCBkcmFmdCBpdGVyYXRpb248L3RleHQ+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM1NTUiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyMiIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzg4OCIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgo8L3N2Zz4=",
+          "alt": "Speculative decoding draft-verify loop: draft model proposes k tokens, target model verifies in one parallel pass, rejection sampling determines which tokens to accept"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each speculative step begins with the draft model generating "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " tokens autoregressively from the current context. These are fed into the target model as a single batched input; the target model produces logits for all "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " positions simultaneously. The rejection sampler compares target and draft probabilities at each position, accepting or resampling one token at a time from left to right. All accepted tokens are appended to the output and become the new context for the next draft iteration."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Requirements for a Valid Draft Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Not every small model can serve as a draft model. Three constraints must hold:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Shared vocabulary and tokenizer. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The draft and target models must produce logits over the same token set, indexed identically. If the tokenizers differ even by a single added or removed token, the acceptance probability computation is undefined. In practice this means using models from the same family with the same tokenizer checkpoint."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Distribution alignment with the target. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The closer the draft model's distribution is to the target's, the higher the acceptance rate and the greater the speedup. A draft model trained on a different corpus or fine-tuned for a different task can have low acceptance on the target workload, yielding little benefit. Models from the same pretraining run (e.g., Llama-3.1 8B drafting for Llama-3.1 70B) generally achieve acceptance rates of 0.75–0.92 on natural text."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Substantially lower latency than the target. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The draft model must be fast enough that running it "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "k"
+                  },
+                  {
+                    "type": "text",
+                    "text": " times costs less than one target model pass. If both models take similar time, the overhead of draft generation wipes out any gain from the parallel verification. A 10× size difference (e.g., 7B vs 70B) with the same architecture typically gives enough latency ratio for positive speedup."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Lossless quality. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Outputs are provably identical in distribution to the target model. No accuracy degradation, no prompt sensitivity, no drift over long generations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "1.5–3× decode throughput at batch 1. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "For latency-sensitive single-request serving — the memory-bandwidth-bound regime — speculative decoding is one of the few techniques that genuinely helps, unlike batching which requires concurrent requests."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "No target model modification. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The target model runs unmodified. The draft model is an external component that can be swapped, retrained, or updated independently."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Composable with quantization and batching. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The draft and target models can each be quantized independently. Speculative decoding can also be combined with continuous batching (though at larger batch sizes the benefit diminishes — see trade-offs)."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs and Limitations"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Additional memory. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "The draft model must fit in GPU VRAM alongside the target model. A 7B draft model at bf16 requires ~14 GB, which may not fit alongside a 70B target on a single A100 (80 GB). Typical production deployments use 4-bit quantized draft models (~4 GB) to reclaim headroom."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Benefit vanishes at large batch sizes. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "At batch 32+, the target model is already compute-bound — tensor cores are saturated and memory bandwidth is no longer the bottleneck. In that regime speculative decoding adds overhead without improving throughput. It is most valuable at batch 1 to batch ~8."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Acceptance rate is workload-dependent. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "A draft model that achieves 0.85 acceptance on natural prose may fall to 0.55 on code or structured outputs. The speedup varies substantially by task, and some workloads see little benefit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Complexity overhead. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Operating two models with synchronized KV caches, coordinating draft steps with verification passes, and handling early termination on rejection requires more complex infrastructure than standard decoding."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Types of Draft Models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Several architectures serve as draft models, each with different trade-offs between acceptance rate, memory cost, and implementation complexity:"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "1. Independent Small Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The original approach from Leviathan et al. and Chen et al. (both 2023): use a separately trained smaller model from the same model family. Examples: Llama-3.1 8B drafts for Llama-3.1 70B; Gemma 2B drafts for Gemma 7B. No architectural changes to either model. Acceptance rate typically 0.75–0.90 on natural text because both models trained on the same data distribution with the same tokenizer."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "2. Medusa Heads"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Medusa (Cai et al., 2024) attaches additional prediction heads directly onto the target model's final hidden states. Each head predicts one additional future token in parallel during the target model's forward pass — no separate model run needed. The trade-off: heads require fine-tuning and the acceptance rate depends on how well the heads can predict multiple tokens ahead from a single hidden state. Memory overhead is small (a few hundred MB for the heads) but the target model must be modified."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "3. EAGLE (Extrapolation Algorithm)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "EAGLE (Li et al., 2024) trains a single transformer layer on top of the target model's hidden states rather than raw tokens. By conditioning on the target's representations, EAGLE achieves higher acceptance rates than an independent small model at a fraction of the compute cost. It requires access to the target model's internal activations during draft generation, which complicates deployment but enables 3–4× average speedup on benchmarks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "4. Self-Speculative / Lookahead"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Self-speculative decoding (Zhang et al., 2024) uses the target model itself as the draft model by skipping layers during the draft pass. No separate model is needed; draft tokens are generated with a partial forward pass (e.g., every other layer), reducing draft cost by ~50%. The acceptance rate is typically lower than an independent small model because the draft distribution is a coarser approximation."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Draft type"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Acceptance rate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Extra memory"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Target model changes?"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Independent small model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.75–0.90"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Full draft model VRAM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Production with same-family models"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medusa heads"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.70–0.85"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~200–500 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (fine-tune required)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory-constrained deployments"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "EAGLE"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.85–0.95"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1–2 GB (single layer)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (hidden state access)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Highest acceptance rate goal"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Self-speculative (layer-skipping)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "0.60–0.78"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None (reuses target)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (layer masking)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single-GPU, no separate model"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement: Loading Draft and Target Models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The simplest entry point is the Hugging Face Transformers "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "generate()"
+          },
+          {
+            "type": "text",
+            "text": " API with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "assistant_model"
+          },
+          {
+            "type": "text",
+            "text": ". Pass a small draft model and the library handles the speculation loop internally:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer, AutoModelForCausalLM\nimport torch\n\n# Both models must share the same tokenizer\nTOKENIZER_ID = \"meta-llama/Llama-3.1-8B-Instruct\"\nDRAFT_MODEL_ID = \"meta-llama/Llama-3.1-8B-Instruct\"   # draft = 8B\nTARGET_MODEL_ID = \"meta-llama/Llama-3.1-70B-Instruct\"  # target = 70B\n\ntokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)\n\n# Load draft model on the same device as target (or a separate GPU)\ndraft_model = AutoModelForCausalLM.from_pretrained(\n    DRAFT_MODEL_ID,\n    torch_dtype=torch.bfloat16,\n    device_map=\"cuda:0\",\n)\n\n# Load target model (may need multiple GPUs or a quantized version)\ntarget_model = AutoModelForCausalLM.from_pretrained(\n    TARGET_MODEL_ID,\n    torch_dtype=torch.bfloat16,\n    device_map=\"auto\",  # shard across available GPUs\n)\n\nprompt = \"Explain the difference between TCP and UDP in detail.\"\ninputs = tokenizer(prompt, return_tensors=\"pt\").to(\"cuda:0\")\n\n# Speculative decoding: draft_model proposes, target_model verifies\nwith torch.no_grad():\n    output_ids = target_model.generate(\n        **inputs,\n        assistant_model=draft_model,   # triggers speculative decoding\n        max_new_tokens=256,\n        do_sample=False,               # greedy for reproducibility\n        num_assistant_tokens=4,        # k: draft tokens per step\n    )\n\nprint(tokenizer.decode(output_ids[0], skip_special_tokens=True))\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "num_assistant_tokens"
+          },
+          {
+            "type": "text",
+            "text": " parameter controls "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " — the number of draft tokens generated before each verification pass. Higher values increase throughput when acceptance is high, but each rejected step wastes more draft computation."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Measuring Acceptance Rate and Speedup"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Before committing to a draft model in production, measure its empirical acceptance rate on your specific workload. The acceptance rate is not a universal constant — it varies significantly between task types (natural conversation, code, structured output)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nfrom typing import NamedTuple\n\nclass SpecDecodeStats(NamedTuple):\n    total_tokens: int\n    draft_steps: int\n    total_accepted: int\n    elapsed_seconds: float\n\n    @property\n    def acceptance_rate(self) -> float:\n        # Average accepted tokens per draft step\n        return self.total_accepted / max(self.draft_steps, 1)\n\n    @property\n    def tokens_per_second(self) -> float:\n        return self.total_tokens / self.elapsed_seconds\n\n\ndef benchmark_speculative(\n    target_model,\n    draft_model,\n    tokenizer,\n    prompts: list[str],\n    k: int = 4,\n    max_new_tokens: int = 200,\n) -> SpecDecodeStats:\n    total_tokens = 0\n    draft_steps = 0\n    total_accepted = 0\n\n    t_start = time.perf_counter()\n    for prompt in prompts:\n        inputs = tokenizer(prompt, return_tensors=\"pt\").to(target_model.device)\n        prompt_len = inputs[\"input_ids\"].shape[-1]\n\n        with torch.no_grad():\n            out = target_model.generate(\n                **inputs,\n                assistant_model=draft_model,\n                max_new_tokens=max_new_tokens,\n                do_sample=False,\n                num_assistant_tokens=k,\n                return_dict_in_generate=True,\n            )\n\n        generated = out.sequences.shape[-1] - prompt_len\n        total_tokens += generated\n        # Approximation: each generate() call takes ceil(generated / avg_accepted) steps\n        # For accurate tracking, instrument the model's _speculative_sampling method\n\n    elapsed = time.perf_counter() - t_start\n    return SpecDecodeStats(\n        total_tokens=total_tokens,\n        draft_steps=draft_steps,       # requires instrumentation for exact count\n        total_accepted=total_accepted,\n        elapsed_seconds=elapsed,\n    )\n\n\n# Compare standard vs speculative decode\ndef compare(target_model, draft_model, tokenizer, prompts, k=4, max_new=200):\n    # Standard decode\n    t0 = time.perf_counter()\n    toks_standard = 0\n    for p in prompts:\n        inp = tokenizer(p, return_tensors=\"pt\").to(target_model.device)\n        with torch.no_grad():\n            out = target_model.generate(**inp, max_new_tokens=max_new, do_sample=False)\n        toks_standard += out.shape[-1] - inp[\"input_ids\"].shape[-1]\n    t_standard = time.perf_counter() - t0\n\n    # Speculative decode\n    t1 = time.perf_counter()\n    toks_spec = 0\n    for p in prompts:\n        inp = tokenizer(p, return_tensors=\"pt\").to(target_model.device)\n        with torch.no_grad():\n            out = target_model.generate(\n                **inp, assistant_model=draft_model,\n                max_new_tokens=max_new, do_sample=False, num_assistant_tokens=k,\n            )\n        toks_spec += out.shape[-1] - inp[\"input_ids\"].shape[-1]\n    t_spec = time.perf_counter() - t1\n\n    print(f\"Standard:     {toks_standard/t_standard:.1f} tok/s\")\n    print(f\"Speculative:  {toks_spec/t_spec:.1f} tok/s\")\n    print(f\"Speedup:      {(toks_spec/t_spec) / (toks_standard/t_standard):.2f}x\")\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Production Use: Speculative Decoding in vLLM"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM supports speculative decoding via the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "--speculative-model"
+          },
+          {
+            "type": "text",
+            "text": " flag. It handles draft-verify scheduling, KV cache management for both models, and integrates cleanly with continuous batching and PagedAttention:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "bash"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Launch vLLM server with speculative decoding\n# Draft: Llama-3.1-8B, Target: Llama-3.1-70B, k=5\nvllm serve meta-llama/Llama-3.1-70B-Instruct \\\n  --speculative-model meta-llama/Llama-3.1-8B-Instruct \\\n  --num-speculative-tokens 5 \\\n  --tensor-parallel-size 4 \\\n  --dtype bfloat16\n"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Python API with vLLM offline inference\nfrom vllm import LLM, SamplingParams\n\nllm = LLM(\n    model=\"meta-llama/Llama-3.1-70B-Instruct\",\n    speculative_model=\"meta-llama/Llama-3.1-8B-Instruct\",\n    num_speculative_tokens=5,\n    tensor_parallel_size=4,\n    dtype=\"bfloat16\",\n)\n\nparams = SamplingParams(\n    temperature=0.0,      # greedy — highest acceptance rate\n    max_tokens=512,\n)\n\nprompts = [\n    \"Describe the architecture of a transformer model.\",\n    \"Write a Python function to compute Fibonacci numbers.\",\n    \"What are the key differences between REST and GraphQL?\",\n]\n\noutputs = llm.generate(prompts, params)\nfor out in outputs:\n    print(out.outputs[0].text)\n    # vLLM logs num_accepted_tokens and num_draft_tokens per request\n    # in its metrics — check Prometheus endpoint for acceptance rate\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "vLLM exposes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "vllm:spec_decode_num_accepted_tokens"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "vllm:spec_decode_num_draft_tokens"
+          },
+          {
+            "type": "text",
+            "text": " Prometheus counters. Track their ratio to monitor acceptance rate in production. If the rate falls below 0.6, consider switching workloads away from speculative decoding or retraining the draft model."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use Speculative Decoding"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Use it "
+                  },
+                  {
+                    "type": "text",
+                    "text": "when serving at batch size 1–8, the workload is conversational or document-generation, a same-family smaller model exists, and latency per token (TPOT) is the primary concern."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Skip it "
+                  },
+                  {
+                    "type": "text",
+                    "text": "when GPU memory cannot accommodate both models, you're already running at batch 32+, the workload is highly structured output (JSON/SQL) where the draft model has low acceptance, or you need the simplest possible deployment."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mismatched tokenizers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Using a draft model with even a slightly different vocabulary size or token ordering silently produces wrong acceptance probabilities. Always verify:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from transformers import AutoTokenizer\n\ntarget_tok = AutoTokenizer.from_pretrained(\"meta-llama/Llama-3.1-70B-Instruct\")\ndraft_tok  = AutoTokenizer.from_pretrained(\"meta-llama/Llama-3.1-8B-Instruct\")\n\nassert target_tok.vocab_size == draft_tok.vocab_size, (\n    f\"Vocab mismatch: target={target_tok.vocab_size}, draft={draft_tok.vocab_size}\"\n)\n# Also verify identical special tokens\nassert target_tok.eos_token_id == draft_tok.eos_token_id\nassert target_tok.bos_token_id == draft_tok.bos_token_id\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using k that is too large"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Setting "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k = 16"
+          },
+          {
+            "type": "text",
+            "text": " seems appealing — generate more tokens per verification step — but at acceptance rate 0.8, the expected accepted tokens at k=16 is only ~4.5 vs ~3.5 at k=4, while draft compute increases 4×. The formula for optimal "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "k"
+          },
+          {
+            "type": "text",
+            "text": " balances draft latency against expected acceptance gain. In practice, k=4 to k=8 is optimal for most settings."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enabling speculative decoding at high batch size"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At batch 64, the target model is already compute-bound. Adding draft generation overhead without bandwidth-bound benefit will "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "reduce"
+          },
+          {
+            "type": "text",
+            "text": " throughput. Measure at your actual batch size before deploying."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Quantize the draft model, not the target. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "A 4-bit quantized draft model reduces acceptance rate by only 1–3% while saving ~10 GB VRAM. The target model's full precision is what determines output quality."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Use greedy decoding (temperature=0) for highest acceptance. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "At temperature=0, the draft and target models are deterministic and the acceptance probabilities are 0 or 1 — no resampling overhead. High temperatures reduce acceptance rate significantly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Monitor acceptance rate continuously. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Track the Prometheus metric in production. A drop below 0.65 indicates the workload has drifted from the draft model's distribution — common after prompt engineering changes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Tune k per workload, not per model. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Code generation often benefits from k=6–8 (code is locally predictable), while creative writing benefits from k=3–4 (higher entropy)."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The draft model is the engine of speculative decoding: it generates candidate tokens cheaply so the large target model can verify many at once, exploiting the arithmetic capacity left unused during bandwidth-bound single-token decode. A valid draft model must share the target's tokenizer, have a closely aligned output distribution, and be substantially faster. In practice, same-family smaller models (e.g., 8B drafting for 70B) achieve 1.5–3× decode speedup at batch sizes below 8 with zero loss in output quality. vLLM and Hugging Face Transformers both support speculative decoding with a single configuration flag. The main operational concern is monitoring acceptance rate, which depends on workload type and can vary between 0.6 and 0.92 across tasks."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
