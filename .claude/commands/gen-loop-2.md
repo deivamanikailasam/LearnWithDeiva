@@ -59,17 +59,20 @@ in order. Do not skip validation. Do not stop early on the happy path.
      `{"attrs":{"latex":"..."}}` (KaTeX). Put LaTeX in the `latex` attr — do not
      wrap it in `\[ \]` or `$...$` inside the attr.
    - **Visuals / diagrams / images — REQUIRED in every document:**
-     Every document must include at least one image. Author it yourself; no
-     external image services.
-       - Prefer an **SVG diagram you write by hand** (flowchart, architecture,
-         sequence, comparison table, decision tree). Write the SVG inline in your
-         Python generator, base64-encode it, and embed it directly as a
-         `data:image/svg+xml;base64,...` URI in the image node's `src` attribute.
-         Keep SVGs clean, labelled, theme-neutral (readable on light & dark), and
-         sized ~640–900px wide.
-       - For genuine **data charts**, write a small matplotlib script
-         (`python3`, already available) that saves a PNG to the scratchpad dir,
-         base64-encode it, and embed as `data:image/png;base64,...`.
+     Every document must include at least one image. Images can be generated or
+     sourced from a stable online URL — pick whichever best fits the topic.
+       - **Generated SVG (preferred for diagrams):** write the SVG by hand
+         (flowchart, architecture, sequence, comparison table, decision tree),
+         base64-encode it, and embed as a `data:image/svg+xml;base64,...` URI in
+         the image node's `src`. Keep SVGs clean, labelled, theme-neutral
+         (readable on light & dark), and sized ~640–900px wide.
+       - **Generated PNG (preferred for data charts):** write a small matplotlib
+         script (`python3`, already available) that saves a PNG to the scratchpad
+         dir, base64-encode it, and embed as `data:image/png;base64,...`.
+       - **Online image URL:** set `src` to a direct, publicly accessible URL
+         (e.g. an official diagram, screenshot, or illustration). Verify the URL
+         loads before using it. Prefer HTTPS; avoid hotlinks to pages that
+         redirect or require authentication.
        - Use the project scratchpad dir for temp `.svg`/`.png` files, not the repo.
        - The TipTap validator (step 4b) will hard-fail if no image node is present.
    - Respect the quality bar in `CLAUDE.md`: accuracy over breadth, no filler,
