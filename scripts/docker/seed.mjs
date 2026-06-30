@@ -12,9 +12,12 @@
  *       roots: [{ id, title, summary?, level?, children: [...] }],
  *     }
  *
- * Each root's nested id is `${parent.id}--${child.id}` (depth > 0). Sibling
- * `order` starts at 1; root `order` is taken from a global counter so the
- * ordering remains consistent when stages are added in separate passes.
+ * Hierarchy written to disk:
+ *   Topic (root) → Subtopic (`${root.id}--${sub.id}`) → Sub-subtopic (`${sub.id}--${leaf.id}`)
+ *
+ * Only sub-subtopics are content leaves. Flat root children (no nested
+ * `children`) are wrapped in a `${root.id}--core` subtopic automatically.
+ * Prefer `node scripts/docker/rebuild-tree.mjs` when restructuring an existing stage.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -72,24 +75,60 @@ export function seedStages(stages) {
       }
       if (writeTopic(rootMeta)) written += 1
 
-      const walk = (node, parentId, parentLevel, depth = 0) => {
-        ;(node.children ?? []).forEach((child, idx) => {
-          const childId = `${node.id}--${child.id}`
-          const childLevel = child.level ?? parentLevel
-          const childMeta = {
-            id: childId,
-            title: child.title,
-            ...(depth < 1 ? { summary: child.summary ?? child.title } : {}),
-            order: idx + 1,
-            level: childLevel,
+      const flat = []
+      const nested = []
+      for (const child of root.children ?? []) {
+        if (child.children?.length) nested.push(child)
+        else flat.push(child)
+      }
+
+      const writeSubtopicTree = (sub, order, parentId, parentLevel) => {
+        const subId = `${parentId}--${sub.id}`
+        const subLevel = sub.level ?? parentLevel
+        if (
+          writeTopic({
+            id: subId,
+            title: sub.title,
+            summary: sub.summary ?? sub.title,
+            order,
+            level: subLevel,
             tags: [tag],
-            parentId: node.id,
+            parentId,
+          })
+        ) {
+          written += 1
+        }
+        ;(sub.children ?? []).forEach((leaf, leafIdx) => {
+          const leafId = `${subId}--${leaf.id}`
+          if (
+            writeTopic({
+              id: leafId,
+              title: leaf.title,
+              order: leafIdx + 1,
+              level: leaf.level ?? subLevel,
+              tags: [tag],
+              parentId: subId,
+            })
+          ) {
+            written += 1
           }
-          if (writeTopic(childMeta)) written += 1
-          walk({ id: childId, children: child.children }, childId, childLevel, depth + 1)
         })
       }
-      walk(root, null, rootLevel)
+
+      nested.forEach((sub, idx) => writeSubtopicTree(sub, idx + 1, root.id, rootLevel))
+
+      if (flat.length > 0) {
+        writeSubtopicTree(
+          {
+            id: 'core',
+            title: `${root.title} Core`,
+            children: flat,
+          },
+          nested.length + 1,
+          root.id,
+          rootLevel,
+        )
+      }
     })
   }
 

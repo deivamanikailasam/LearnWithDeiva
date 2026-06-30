@@ -50,6 +50,24 @@ console.log('duplicate ids     :', dupes.length ? dupes : 'none')
 console.log('orphan parentIds  :', orphans.length ? orphans.map((o) => `${o.id} -> ${o.parentId}`) : 'none')
 console.log('nodes w/o root    :', missingRootForNode.length ? missingRootForNode : 'none')
 console.log('roots not in nodes:', rootsNotInRoadmap.length ? rootsNotInRoadmap : 'none')
+
+const byId = new Map(topics.map((t) => [t.id, t]))
+const subs = topics.filter((t) => {
+  if (!t.parentId) return false
+  const p = byId.get(t.parentId)
+  return p && !p.parentId
+})
+const leaves = topics.filter((t) => {
+  if (!t.parentId) return false
+  const p = byId.get(t.parentId)
+  return p?.parentId
+})
+const rootsMissingSubs = roots.filter((r) => !subs.some((s) => s.parentId === r.id))
+const subsMissingLeaves = subs.filter((s) => !leaves.some((l) => l.parentId === s.id))
+console.log('subtopics         :', subs.length)
+console.log('sub-subtopics     :', leaves.length)
+console.log('topics w/o subs   :', rootsMissingSubs.length ? rootsMissingSubs.map((r) => r.id) : 'none')
+console.log('subs w/o leaves   :', subsMissingLeaves.length ? subsMissingLeaves.map((s) => s.id) : 'none')
 console.log('topics by stage   :')
 for (const stage of roadmap.stages) {
   const count = byTag[stage.id] ?? 0
