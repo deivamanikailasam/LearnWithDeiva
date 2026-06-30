@@ -59,17 +59,21 @@ in order. Do not skip validation. Do not stop early on the happy path.
      `{"attrs":{"latex":"..."}}` (KaTeX). Put LaTeX in the `latex` attr — do not
      wrap it in `\[ \]` or `$...$` inside the attr.
    - **Visuals / diagrams / images — REQUIRED in every document:**
-     Every document must include at least one image. Author it yourself; no
-     external image services.
-       - Prefer an **SVG diagram you write by hand** (flowchart, architecture,
-         sequence, comparison table, decision tree). Write the SVG inline in your
-         Python generator, base64-encode it, and embed it directly as a
-         `data:image/svg+xml;base64,...` URI in the image node's `src` attribute.
-         Keep SVGs clean, labelled, theme-neutral (readable on light & dark), and
-         sized ~640–900px wide.
-       - For genuine **data charts**, write a small matplotlib script
-         (`python3`, already available) that saves a PNG to the scratchpad dir,
-         base64-encode it, and embed as `data:image/png;base64,...`.
+     Every document must include at least one image. All images MUST be embedded
+     as inline base64 `data:` URIs — never a bare URL (external URLs rot and
+     break the document silently). Three ways to produce one:
+       - **Generated SVG (preferred for diagrams):** write the SVG by hand
+         (flowchart, architecture, sequence, comparison table, decision tree),
+         base64-encode it, and embed as a `data:image/svg+xml;base64,...` URI in
+         the image node's `src`. Keep SVGs clean, labelled, theme-neutral
+         (readable on light & dark), and sized ~640–900px wide.
+       - **Generated PNG (preferred for data charts):** write a small matplotlib
+         script (`python3`, already available) that saves a PNG to the scratchpad
+         dir, base64-encode it, and embed as `data:image/png;base64,...`.
+       - **Online image fetched to base64:** if a specific online image (official
+         diagram, screenshot, illustration) fits better than a generated one,
+         fetch it with `curl` or Python `requests`, base64-encode the bytes, and
+         embed as `data:image/<type>;base64,...`. Never put the raw URL in `src`.
        - Use the project scratchpad dir for temp `.svg`/`.png` files, not the repo.
        - The TipTap validator (step 4b) will hard-fail if no image node is present.
    - Respect the quality bar in `CLAUDE.md`: accuracy over breadth, no filler,
