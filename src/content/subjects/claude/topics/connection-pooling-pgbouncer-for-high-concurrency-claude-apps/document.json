@@ -1,0 +1,1096 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude API calls are slow — a typical completion takes 1–15 seconds. During that time, your application worker holds a database connection open doing nothing. At 100 concurrent Claude calls, that's 100 idle connections consuming ~500 MB of PostgreSQL RAM, approaching "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_connections"
+          },
+          {
+            "type": "text",
+            "text": ", and leaving no headroom for bursts. PgBouncer sits between your app and PostgreSQL, multiplexing hundreds of client connections onto a small server-side pool. This document explains why it matters for Claude workloads specifically, how to configure it, and what constraints transaction-mode pooling imposes on your SQL code."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODIwIiBoZWlnaHQ9IjM4MCIgdmlld0JveD0iMCAwIDgyMCAzODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIj4KICA8dGV4dCB4PSI0MTAiIHk9IjIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE0IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFlMjkzYiI+UGdCb3VuY2VyIENvbm5lY3Rpb24gUG9vbGluZyBmb3IgQ2xhdWRlIEFwcHM8L3RleHQ+CgogIDwhLS0gQXBwIHdvcmtlcnMgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjQ1IiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjIwMCIgcng9IjYiIGZpbGw9IiNlZmY2ZmYiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIxMDAiIHk9IjY0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFkNGVkOCIgZm9udC1zaXplPSIxMSI+QXBwIFdvcmtlcnM8L3RleHQ+CiAgPHJlY3QgeD0iMzUiIHk9Ijc1IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjI4IiByeD0iNCIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxMDAiIHk9Ijk0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMWQ0ZWQ4Ij5Xb3JrZXIgMSAoaWRsZSDihpIgQ2xhdWRlKTwvdGV4dD4KICA8cmVjdCB4PSIzNSIgeT0iMTEwIiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjI4IiByeD0iNCIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxMDAiIHk9IjEyOSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzFkNGVkOCI+V29ya2VyIDIgKHdhaXRpbmcgTExNKTwvdGV4dD4KICA8cmVjdCB4PSIzNSIgeT0iMTQ1IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjI4IiByeD0iNCIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxMDAiIHk9IjE2NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzFkNGVkOCI+V29ya2VyIDMgKHdhaXRpbmcgTExNKTwvdGV4dD4KICA8cmVjdCB4PSIzNSIgeT0iMTgwIiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjI4IiByeD0iNCIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxMDAiIHk9IjE5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzFkNGVkOCI+V29ya2VyIDQgKHdyaXRpbmcgREIpPC90ZXh0PgogIDx0ZXh0IHg9IjEwMCIgeT0iMjI4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiPjEwMHMgb2Ygd29ya2VyczwvdGV4dD4KICA8dGV4dCB4PSIxMDAiIHk9IjI0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj5lYWNoIG5lZWRzIGEgY29ubjwvdGV4dD4KCiAgPCEtLSBBcnJvdyB0byBQZ0JvdW5jZXIgLS0+CiAgPGxpbmUgeDE9IjE4MCIgeTE9IjE0NSIgeDI9IjI2NSIgeTI9IjE0NSIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8cG9seWdvbiBwb2ludHM9IjI2MSwxNDEgMjY5LDE0NSAyNjEsMTQ5IiBmaWxsPSIjNjQ3NDhiIi8+CiAgPHRleHQgeD0iMjIyIiB5PSIxMzkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiI+MTAwKyBjb25uczwvdGV4dD4KCiAgPCEtLSBQZ0JvdW5jZXIgLS0+CiAgPHJlY3QgeD0iMjcwIiB5PSI2MCIgd2lkdGg9IjE4NSIgaGVpZ2h0PSIxNzUiIHJ4PSI2IiBmaWxsPSIjZjhmYWZjIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMiIvPgogIDxyZWN0IHg9IjI3MCIgeT0iNjAiIHdpZHRoPSIxODUiIGhlaWdodD0iMjgiIHJ4PSI2IiBmaWxsPSIjZjU5ZTBiIi8+CiAgPHRleHQgeD0iMzYyIiB5PSI3OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IndoaXRlIiBmb250LXNpemU9IjEyIj5QZ0JvdW5jZXI8L3RleHQ+CiAgPHRleHQgeD0iMjkwIiB5PSIxMDQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPlBvb2wgbW9kZTogdHJhbnNhY3Rpb248L3RleHQ+CiAgPHRleHQgeD0iMjkwIiB5PSIxMjAiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPlBvb2wgc2l6ZTogMjAgcGVyIGRiL3VzZXI8L3RleHQ+CiAgPHRleHQgeD0iMjkwIiB5PSIxMzYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPk1heCBjbGllbnQgY29ubnM6IDEwMDA8L3RleHQ+CiAgPHJlY3QgeD0iMjg1IiB5PSIxNDgiIHdpZHRoPSIxNTUiIGhlaWdodD0iMzAiIHJ4PSI0IiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjM2MiIgeT0iMTY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTI0MDBlIj5TZXJ2ZXIgcG9vbDogMjAgY29ubnM8L3RleHQ+CiAgPHRleHQgeD0iMjkwIiB5PSIyMDAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiI+UXVldWVzIGV4Y2VzcyBjbGllbnRzPC90ZXh0PgogIDx0ZXh0IHg9IjI5MCIgeT0iMjEzIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiPkJvcnJvd3MgY29ubiBwZXIgdHhuPC90ZXh0PgogIDx0ZXh0IHg9IjI5MCIgeT0iMjI2IiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiPlJldHVybnMgYWZ0ZXIgQ09NTUlUPC90ZXh0PgoKICA8IS0tIEFycm93IHRvIFBvc3RncmVTUUwgLS0+CiAgPGxpbmUgeDE9IjQ1NSIgeTE9IjE0NSIgeDI9IjUyNSIgeTI9IjE0NSIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8cG9seWdvbiBwb2ludHM9IjUyMSwxNDEgNTI5LDE0NSA1MjEsMTQ5IiBmaWxsPSIjNjQ3NDhiIi8+CiAgPHRleHQgeD0iNDkwIiB5PSIxMzkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiI+MjAgY29ubnM8L3RleHQ+CgogIDwhLS0gUG9zdGdyZVNRTCAtLT4KICA8cmVjdCB4PSI1MzAiIHk9IjYwIiB3aWR0aD0iMTc1IiBoZWlnaHQ9IjE3NSIgcng9IjYiIGZpbGw9IiNmOGZhZmMiIHN0cm9rZT0iIzIyYzU1ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSI1MzAiIHk9IjYwIiB3aWR0aD0iMTc1IiBoZWlnaHQ9IjI4IiByeD0iNiIgZmlsbD0iIzIyYzU1ZSIvPgogIDx0ZXh0IHg9IjYxNyIgeT0iNzkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMiI+UG9zdGdyZVNRTDwvdGV4dD4KICA8dGV4dCB4PSI1NTAiIHk9IjEwNCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzMzNDE1NSI+bWF4X2Nvbm5lY3Rpb25zOiAxMDA8L3RleHQ+CiAgPHRleHQgeD0iNTUwIiB5PSIxMjAiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPkVhY2ggY29ubjogfjVNQiBSQU08L3RleHQ+CiAgPHRleHQgeD0iNTUwIiB5PSIxMzYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPjIwIMOXIDVNQiA9IDEwME1CPC90ZXh0PgogIDx0ZXh0IHg9IjU1MCIgeT0iMTU2IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzM0MTU1Ij52cyAxMDAgw5cgNU1CID0gNTAwTUI8L3RleHQ+CiAgPHRleHQgeD0iNTUwIiB5PSIxNzYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMyMjgwM2YiIGZvbnQtd2VpZ2h0PSJib2xkIj53aXRob3V0IHBvb2xlcjwvdGV4dD4KICA8dGV4dCB4PSI1NTAiIHk9IjIwMCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj5BY3R1YWwgcXVlcnkgd29yazwvdGV4dD4KICA8dGV4dCB4PSI1NTAiIHk9IjIxMyIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj5oYXBwZW5zIGhlcmU8L3RleHQ+CgogIDwhLS0gVGhyZWUgcG9vbCBtb2RlIGJveGVzIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIyNzAiIHdpZHRoPSIyMzUiIGhlaWdodD0iOTUiIHJ4PSI1IiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjEzNyIgeT0iMjg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSIgZm9udC1zaXplPSIxMSI+U2Vzc2lvbiBtb2RlPC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIzMDQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPjEgc2VydmVyIGNvbm4gcGVyIGNsaWVudCBzZXNzaW9uPC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIzMTgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPkZ1bGwgU1FMIHN1cHBvcnQgKHByZXBhcmVkIHN0bXRzKTwvdGV4dD4KICA8dGV4dCB4PSI0MCIgeT0iMzMyIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMTU4MDNkIj5Hb29kIGZvciBtaWdyYXRpb24gZnJvbSBubyBwb29sZXI8L3RleHQ+CiAgPHRleHQgeD0iNDAiIHk9IjM0OCIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2RjMjYyNiI+TGVhc3QgYmVuZWZpdCDigJQgc3RpbGwgMToxIG1hcHBpbmc8L3RleHQ+CgogIDxyZWN0IHg9IjI5MyIgeT0iMjcwIiB3aWR0aD0iMjM1IiBoZWlnaHQ9Ijk1IiByeD0iNSIgZmlsbD0iI2RjZmNlNyIgc3Ryb2tlPSIjMjJjNTVlIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iMjg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzE1ODAzZCIgZm9udC1zaXplPSIxMSI+VHJhbnNhY3Rpb24gbW9kZSAocmVjb21tZW5kZWQpPC90ZXh0PgogIDx0ZXh0IHg9IjMxMyIgeT0iMzA0IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzM0MTU1Ij5Cb3Jyb3dzIGNvbm4gb25seSBkdXJpbmcgdHJhbnNhY3Rpb248L3RleHQ+CiAgPHRleHQgeD0iMzEzIiB5PSIzMTgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPk1hbnkgY2xpZW50cyBzaGFyZSBmZXcgc2VydmVyIGNvbm5zPC90ZXh0PgogIDx0ZXh0IHg9IjMxMyIgeT0iMzMyIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZGMyNjI2Ij5ObyBwcmVwYXJlZCBzdG10cyBhY3Jvc3MgdHhuIGJvdW5kYXJ5PC90ZXh0PgogIDx0ZXh0IHg9IjMxMyIgeT0iMzQ4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjZGMyNjI2Ij5ObyBTRVQvc2Vzc2lvbiB2YXJzIHRoYXQgcGVyc2lzdDwvdGV4dD4KCiAgPHJlY3QgeD0iNTY1IiB5PSIyNzAiIHdpZHRoPSIyMzUiIGhlaWdodD0iOTUiIHJ4PSI1IiBmaWxsPSIjZmVlMmUyIiBzdHJva2U9IiNlZjQ0NDQiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjY4MiIgeT0iMjg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzk5MWIxYiIgZm9udC1zaXplPSIxMSI+U3RhdGVtZW50IG1vZGU8L3RleHQ+CiAgPHRleHQgeD0iNTg1IiB5PSIzMDQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPlJldHVybnMgY29ubiBhZnRlciBldmVyeSBzdGF0ZW1lbnQ8L3RleHQ+CiAgPHRleHQgeD0iNTg1IiB5PSIzMTgiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzMzQxNTUiPkhpZ2hlc3QgbXVsdGlwbGV4aW5nIHJhdGlvPC90ZXh0PgogIDx0ZXh0IHg9IjU4NSIgeT0iMzMyIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZGMyNjI2Ij5ObyBtdWx0aS1zdGF0ZW1lbnQgdHJhbnNhY3Rpb25zPC90ZXh0PgogIDx0ZXh0IHg9IjU4NSIgeT0iMzQ4IiBmb250LXNpemU9IjEwIiBmaWxsPSIjZGMyNjI2Ij5SYXJlbHkgdXNlZnVsIGluIHByYWN0aWNlPC90ZXh0Pgo8L3N2Zz4=",
+          "alt": "PgBouncer architecture diagram: 100+ app workers (many waiting on Claude API) connect to PgBouncer, which maintains only 20 server connections to PostgreSQL. Three pool modes shown at the bottom: session mode (1:1, least benefit), transaction mode (recommended — borrows conn only during transaction), and statement mode (returns after every statement, no transactions)."
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Claude Apps Are Particularly Connection-Hungry"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A typical Claude request flow:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Worker checks cache / reads user context from DB ("
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "~5ms"
+                  },
+                  {
+                    "type": "text",
+                    "text": ")"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Worker calls Claude API and waits ("
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "2–15s"
+                  },
+                  {
+                    "type": "text",
+                    "text": ")"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Worker writes response to DB ("
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "~5ms"
+                  },
+                  {
+                    "type": "text",
+                    "text": ")"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Steps 1 and 3 use the database for ~10ms total. Step 2 holds the worker thread (and therefore its connection) for 2–15 seconds. At 100 RPS, your application has ~200–1500 in-flight Claude requests at any moment, each holding an idle connection. Without pooling, PostgreSQL needs 200–1500 connections — each costing ~5 MB of RAM and a kernel process."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ],
+                "text": "The fix:"
+              },
+              {
+                "type": "text",
+                "text": " In transaction-mode pooling, the connection is returned to the pool during the Claude API wait (between step 1 COMMIT and step 3 BEGIN). The pool can serve 20 transactions-per-second with only 20 server connections while 200 clients wait."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Installing and Configuring PgBouncer"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "bash"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Debian/Ubuntu\napt-get install pgbouncer\n\n# macOS\nbrew install pgbouncer\n\n# Docker (for local dev)\ndocker run -d \\\n  -e DATABASE_URL=\"postgresql://user:pass@postgres:5432/mydb\" \\\n  -p 5432:5432 \\\n  bitnami/pgbouncer:latest"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The main configuration file is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "pgbouncer.ini"
+          },
+          {
+            "type": "text",
+            "text": ":"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "ini"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "[databases]\n; Map logical db names to actual PostgreSQL DSNs\nmydb = host=127.0.0.1 port=5432 dbname=mydb\n\n[pgbouncer]\n; Listen address\nlisten_addr = 127.0.0.1\nlisten_port = 5432\n\n; Authentication (md5 or scram-sha-256)\nauth_type = scram-sha-256\nauth_file = /etc/pgbouncer/userlist.txt\n\n; Pool mode — transaction is almost always correct for Claude workloads\npool_mode = transaction\n\n; Server connections per database/user pair\ndefault_pool_size = 20\n\n; Queue depth: clients beyond this get a pool_unavailable error\nmax_client_conn = 1000\n\n; Kill idle server connections after N seconds\nserver_idle_timeout = 600\n\n; Optional: route admin queries to an admin console\nadmin_users = pgbouncer_admin"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "text"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# /etc/pgbouncer/userlist.txt\n# Format: \"username\" \"password-hash\"\n# Generate with: echo -n 'passwordusername' | md5sum  (for md5)\n# Or use SCRAM hashes from pg_shadow:\n#   SELECT usename, passwd FROM pg_shadow WHERE usename = 'myuser';\n\"myuser\" \"SCRAM-SHA-256$...\""
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Connecting Your Python App Through PgBouncer"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Only the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "host"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "port"
+          },
+          {
+            "type": "text",
+            "text": " change — PgBouncer presents itself as a regular PostgreSQL server:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import psycopg2\n\n# Before: directly to PostgreSQL\nconn = psycopg2.connect(\n    host=\"postgres-host\",\n    port=5432,\n    dbname=\"mydb\",\n    user=\"myuser\",\n    password=\"...\",\n)\n\n# After: via PgBouncer (same API)\nconn = psycopg2.connect(\n    host=\"pgbouncer-host\",  # <-- only change\n    port=5432,              # same port\n    dbname=\"mydb\",\n    user=\"myuser\",\n    password=\"...\",\n    # Disable prepared statement caching in psycopg2\n    # because transaction-mode pooling doesn't support them across connections\n    options=\"-c statement_timeout=30000\",\n)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "asyncpg with PgBouncer"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "asyncpg uses prepared statements by default. Disable statement caching when connecting through PgBouncer in transaction mode:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncpg\n\nasync def create_pool() -> asyncpg.Pool:\n    return await asyncpg.create_pool(\n        dsn=\"postgresql://myuser:pass@pgbouncer-host:5432/mydb\",\n        min_size=5,\n        max_size=20,\n        # Disable prepared statement cache for transaction-mode PgBouncer\n        statement_cache_size=0,\n        # Also set command_timeout to slightly less than PgBouncer server_idle_timeout\n        command_timeout=25,\n    )\n\n# For SQLAlchemy async\nfrom sqlalchemy.ext.asyncio import create_async_engine\n\nengine = create_async_engine(\n    \"postgresql+asyncpg://myuser:pass@pgbouncer-host:5432/mydb\",\n    pool_size=5,          # asyncpg manages its own pool\n    max_overflow=10,\n    pool_pre_ping=True,   # detect stale connections\n    connect_args={\n        \"statement_cache_size\": 0,  # required for transaction mode\n    },\n)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Transaction Mode Constraints"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Transaction mode gives the highest connection multiplexing ratio but has two important constraints you must work around in your application:"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "1. No server-side prepared statements across connection boundaries"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each transaction may be routed to a different server connection. A prepared statement created on connection A does not exist on connection B."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# This BREAKS with transaction-mode pooling:\n# The PREPARE is on one server connection,\n# the EXECUTE may land on a different one.\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"PREPARE get_user AS SELECT * FROM users WHERE id = $1\")\n        cur.execute(\"EXECUTE get_user (42)\")\n        # ^ Fails: prepared statement 'get_user' does not exist\n\n# SAFE: use parameterised queries instead\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT * FROM users WHERE id = %s\", (42,))\n        # psycopg2 sends this as a simple query or an anonymous prepared statement\n        # that doesn't need to persist across connections"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "2. Session settings do not persist across transactions"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# BREAKS in transaction mode:\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"SET search_path TO tenant_abc, public\")\n        # Connection returned to pool after COMMIT\n\n# Next transaction may get a different server connection\n# where search_path is still the default:\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT * FROM orders\")  # uses wrong search_path!\n\n# SAFE: set search_path inside each transaction, or use fully-qualified names\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"SET LOCAL search_path TO tenant_abc, public\")\n        cur.execute(\"SELECT * FROM orders\")  # correct schema\n        # SET LOCAL auto-resets at transaction end, which is fine\n\n# ALSO SAFE: always qualify table names\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT * FROM tenant_abc.orders\")"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "3. Advisory locks must be closed within the same transaction"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# SAFE: use transaction-scoped advisory locks (auto-released at COMMIT)\nwith conn:\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT pg_advisory_xact_lock(%s)\", (user_id,))\n        # Do work while holding lock\n        cur.execute(\"UPDATE users SET last_seen = now() WHERE id = %s\", (user_id,))\n    # conn.__exit__ commits; lock released automatically\n\n# AVOID: session-level locks (pg_advisory_lock without _xact_)\n# They require explicit unlock on the same server connection,\n# which can't be guaranteed in transaction mode."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Sizing the Pool"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pool size is not \"more is better\". PostgreSQL degrades under connection count pressure because each connection is an OS process and shared memory segments are contested. The goal is to find the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "smallest pool that keeps PostgreSQL CPUs saturated without queuing at the DB."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "text"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Starting formula (from the HikariCP documentation, applies to all poolers):\n\n    pool_size = (cores * 2) + effective_spindle_count\n\nFor a 4-core PostgreSQL instance with SSDs (effective_spindle_count ≈ 1):\n    pool_size = (4 * 2) + 1 = 9  → round to 10\n\nFor a 16-core RDS instance:\n    pool_size = (16 * 2) + 1 = 33  → round to 35\n\nThen load-test and watch:\n  - pg_stat_activity: active vs idle counts\n  - pgbouncer SHOW POOLS: cl_waiting (clients waiting for a conn)\n  - PostgreSQL: CPU%, lock waits, and checkpointing frequency"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- Connect to PgBouncer's admin console\npsql -h 127.0.0.1 -p 6432 -U pgbouncer_admin pgbouncer\n\n-- Show pool utilisation\nSHOW POOLS;\n-- cl_active: clients with a server connection\n-- cl_waiting: clients queued for a connection (KEY METRIC)\n-- sv_active: server connections in use\n-- sv_idle: server connections available\n\n-- Show per-query statistics\nSHOW STATS;\n\n-- Reload config without restart\nRELOAD;"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Alternatives and When to Use Them"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Option"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Notes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "PgBouncer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Self-hosted PostgreSQL"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Lightweight, mature, supports all three pool modes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "RDS Proxy"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWS RDS / Aurora"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Managed, supports IAM auth, adds ~1ms latency"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Supabase Pooler"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Supabase projects"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PgBouncer + Supavisor; use the pooler URL from dashboard"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "asyncpg pool"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single async process"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Built-in; still need PgBouncer if you have multiple app instances"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Putting It Together: Claude + PgBouncer Pattern"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nimport anthropic\nimport asyncpg\n\nclaude = anthropic.AsyncAnthropic()\n\nasync def handle_request(\n    pool: asyncpg.Pool,\n    user_id: int,\n    user_message: str,\n) -> str:\n    # Step 1: read context (holds DB conn for ~5ms)\n    async with pool.acquire() as conn:\n        row = await conn.fetchrow(\n            \"SELECT system_prompt, context FROM users WHERE id = $1\", user_id\n        )\n    # Connection returned to pool HERE — during Claude call, no conn held\n\n    # Step 2: call Claude (1–15s, zero DB connections consumed)\n    response = await claude.messages.create(\n        model=\"claude-sonnet-4-6\",\n        max_tokens=1024,\n        system=row[\"system_prompt\"],\n        messages=[\n            {\"role\": \"user\", \"content\": user_message},\n        ],\n    )\n    answer = response.content[0].text\n\n    # Step 3: write result (holds DB conn for ~5ms)\n    async with pool.acquire() as conn:\n        await conn.execute(\n            \"\"\"\n            INSERT INTO chat_messages (user_id, role, content)\n            VALUES ($1, 'assistant', $2)\n            \"\"\",\n            user_id, answer,\n        )\n    # Connection returned to pool again\n\n    return answer\n\nasync def main():\n    pool = await asyncpg.create_pool(\n        dsn=\"postgresql://user:pass@pgbouncer:5432/mydb\",\n        min_size=2,\n        max_size=20,\n        statement_cache_size=0,  # required for transaction mode\n    )\n    # Process 100 concurrent requests — only ~20 DB conns needed\n    tasks = [\n        handle_request(pool, user_id=i, user_message=\"Hello\")\n        for i in range(100)\n    ]\n    results = await asyncio.gather(*tasks)\n    print(f\"{len(results)} responses\")\n\nasyncio.run(main())"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With this pattern, 100 concurrent Claude requests require at most 40 database connections (20 for reads, 20 for writes at the same instant) rather than 100. In practice, because the Claude call dominates latency, most connections are idle most of the time and far fewer than 40 are active simultaneously."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Claude apps are connection-hungry"
+                  },
+                  {
+                    "type": "text",
+                    "text": " because workers hold DB connections while waiting on the LLM (1–15s), not while doing DB work (~10ms)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Transaction-mode PgBouncer"
+                  },
+                  {
+                    "type": "text",
+                    "text": " returns connections to the pool between transactions, multiplexing 100+ client connections onto 10–20 server connections."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Disable prepared statement caching"
+                  },
+                  {
+                    "type": "text",
+                    "text": " in asyncpg ("
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "statement_cache_size=0"
+                  },
+                  {
+                    "type": "text",
+                    "text": ") and SQLAlchemy when using transaction mode."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Use SET LOCAL"
+                  },
+                  {
+                    "type": "text",
+                    "text": " instead of SET for session variables; use fully-qualified table names instead of relying on "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "search_path"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Pool size formula:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "(cores * 2) + spindles"
+                  },
+                  {
+                    "type": "text",
+                    "text": " — start small and increase only if "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "cl_waiting"
+                  },
+                  {
+                    "type": "text",
+                    "text": " is non-zero."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Async pattern:"
+                  },
+                  {
+                    "type": "text",
+                    "text": " acquire connection → read → release → call Claude → acquire connection → write → release. This keeps DB connections free during the LLM wait."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
