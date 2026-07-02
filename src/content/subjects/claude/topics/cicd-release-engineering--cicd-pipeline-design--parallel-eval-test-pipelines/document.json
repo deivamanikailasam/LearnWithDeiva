@@ -1,0 +1,1448 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallel Eval and Test Pipeline Design"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A naive CI/CD pipeline runs stages sequentially: lint, then unit tests, then evals. For a Claude application with hundreds of eval cases and a probe library, this adds "
+          },
+          {
+            "type": "text",
+            "text": "10\u201315 minutes of serial wait time",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to every PR. Parallel pipeline design fans out independent jobs so they run concurrently, cutting wall-clock time to the duration of the slowest single job."
+          }
+        ]
+      },
+      {
+        "type": "blockquote",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The goal is not to run fewer checks \u2014 it is to run all checks in parallel so the full safety envelope is enforced without slowing engineers down."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This sub-subtopic covers how to structure a parallel pipeline, handle the fan-in barrier correctly, partition eval suites for efficient batching, manage API concurrency limits, and integrate the result into merge gates."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgODYwIDM2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBmb250LWZhbWlseT0ic3lzdGVtLXVpLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIiPgogIDxyZWN0IHdpZHRoPSI4NjAiIGhlaWdodD0iMzYwIiByeD0iMTAiIGZpbGw9IiNmOGY5ZmEiIHN0cm9rZT0iI2RlZTJlNiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjI4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE1IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzIxMjUyOSI+UGFyYWxsZWwgRXZhbCBhbmQgVGVzdCBQaXBlbGluZSBEZXNpZ248L3RleHQ+CgogIDwhLS0gVHJpZ2dlciAtLT4KICA8cmVjdCB4PSIzMzAiIHk9IjQ1IiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjM4IiByeD0iNyIgZmlsbD0iIzQ5NTA1NyIgc3Ryb2tlPSIjMzQzYTQwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iNjkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjEyIj5QUiAvIFB1c2ggVHJpZ2dlcjwvdGV4dD4KCiAgPCEtLSBGYW4tb3V0IGxpbmVzIC0tPgogIDxsaW5lIHgxPSI0MzAiIHkxPSI4MyIgeDI9IjEyMCIgeTI9IjExNSIgc3Ryb2tlPSIjNmM3NTdkIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcikiLz4KICA8bGluZSB4MT0iNDMwIiB5MT0iODMiIHgyPSIyODAiIHkyPSIxMTUiIHN0cm9rZT0iIzZjNzU3ZCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXIpIi8+CiAgPGxpbmUgeDE9IjQzMCIgeTE9IjgzIiB4Mj0iNDMwIiB5Mj0iMTE1IiBzdHJva2U9IiM2Yzc1N2QiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FyKSIvPgogIDxsaW5lIHgxPSI0MzAiIHkxPSI4MyIgeDI9IjU4MCIgeTI9IjExNSIgc3Ryb2tlPSIjNmM3NTdkIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcikiLz4KICA8bGluZSB4MT0iNDMwIiB5MT0iODMiIHgyPSI3NDAiIHkyPSIxMTUiIHN0cm9rZT0iIzZjNzU3ZCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXIpIi8+CgogIDwhLS0gUGFyYWxsZWwgam9iIGJveGVzIC0tPgogIDxyZWN0IHg9IjQwIiB5PSIxMjAiIHdpZHRoPSIxNTAiIGhlaWdodD0iNTUiIHJ4PSI3IiBmaWxsPSIjZDBlOGZmIiBzdHJva2U9IiMzMzlhZjAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTE1IiB5PSIxNDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMTk3MWMyIiBmb250LXNpemU9IjExIj5MaW50IC8gVHlwZTwvdGV4dD4KICA8dGV4dCB4PSIxMTUiIHk9IjE1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzE5NzFjMiIgZm9udC1zaXplPSIxMCI+cnVmZiArIG15cHk8L3RleHQ+CiAgPHRleHQgeD0iMTE1IiB5PSIxNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxOTcxYzIiIGZvbnQtc2l6ZT0iMTAiPn4zMCBzPC90ZXh0PgoKICA8cmVjdCB4PSIyMDUiIHk9IjEyMCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI1NSIgcng9IjciIGZpbGw9IiNmZmYzY2QiIHN0cm9rZT0iI2Y1OWYwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyODAiIHk9IjE0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNlNjc3MDAiIGZvbnQtc2l6ZT0iMTEiPlVuaXQgVGVzdHM8L3RleHQ+CiAgPHRleHQgeD0iMjgwIiB5PSIxNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlNjc3MDAiIGZvbnQtc2l6ZT0iMTAiPm1vY2tlZCBDbGF1ZGU8L3RleHQ+CiAgPHRleHQgeD0iMjgwIiB5PSIxNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlNjc3MDAiIGZvbnQtc2l6ZT0iMTAiPn4xIG1pbjwvdGV4dD4KCiAgPHJlY3QgeD0iMzU1IiB5PSIxMjAiIHdpZHRoPSIxNTAiIGhlaWdodD0iNTUiIHJ4PSI3IiBmaWxsPSIjZDBmMGMwIiBzdHJva2U9IiM0MGMwNTciIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDMwIiB5PSIxNDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMmY5ZTQ0IiBmb250LXNpemU9IjExIj5Db250cmFjdCBUZXN0czwvdGV4dD4KICA8dGV4dCB4PSI0MzAiIHk9IjE1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzJmOWU0NCIgZm9udC1zaXplPSIxMCI+c2NoZW1hICsgcGFjdDwvdGV4dD4KICA8dGV4dCB4PSI0MzAiIHk9IjE3MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzJmOWU0NCIgZm9udC1zaXplPSIxMCI+fjEgbWluPC90ZXh0PgoKICA8cmVjdCB4PSI1MDUiIHk9IjEyMCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI1NSIgcng9IjciIGZpbGw9IiNmY2U0ZWMiIHN0cm9rZT0iI2U5MWU2MyIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI1ODAiIHk9IjE0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNjMjE4NWIiIGZvbnQtc2l6ZT0iMTEiPkV2YWwgR2F0ZTwvdGV4dD4KICA8dGV4dCB4PSI1ODAiIHk9IjE1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2MyMTg1YiIgZm9udC1zaXplPSIxMCI+cmVhbCBBUEksIGJhdGNoZWQ8L3RleHQ+CiAgPHRleHQgeD0iNTgwIiB5PSIxNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNjMjE4NWIiIGZvbnQtc2l6ZT0iMTAiPn4z4oCTOCBtaW48L3RleHQ+CgogIDxyZWN0IHg9IjY2NSIgeT0iMTIwIiB3aWR0aD0iMTUwIiBoZWlnaHQ9IjU1IiByeD0iNyIgZmlsbD0iI2U4ZDVmNSIgc3Ryb2tlPSIjOWMyN2IwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9Ijc0MCIgeT0iMTQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzdiMWZhMiIgZm9udC1zaXplPSIxMSI+U2VjdXJpdHkgR2F0ZTwvdGV4dD4KICA8dGV4dCB4PSI3NDAiIHk9IjE1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdiMWZhMiIgZm9udC1zaXplPSIxMCI+cHJvYmUgcmVwbGF5PC90ZXh0PgogIDx0ZXh0IHg9Ijc0MCIgeT0iMTcwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2IxZmEyIiBmb250LXNpemU9IjEwIj5+MuKAkzQgbWluPC90ZXh0PgoKICA8IS0tIEZhbi1pbiBsaW5lcyAtLT4KICA8bGluZSB4MT0iMTE1IiB5MT0iMTc1IiB4Mj0iNDMwIiB5Mj0iMjEwIiBzdHJva2U9IiM2Yzc1N2QiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FyKSIvPgogIDxsaW5lIHgxPSIyODAiIHkxPSIxNzUiIHgyPSI0MzAiIHkyPSIyMTAiIHN0cm9rZT0iIzZjNzU3ZCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXIpIi8+CiAgPGxpbmUgeDE9IjQzMCIgeTE9IjE3NSIgeDI9IjQzMCIgeTI9IjIxMCIgc3Ryb2tlPSIjNmM3NTdkIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcikiLz4KICA8bGluZSB4MT0iNTgwIiB5MT0iMTc1IiB4Mj0iNDMwIiB5Mj0iMjEwIiBzdHJva2U9IiM2Yzc1N2QiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FyKSIvPgogIDxsaW5lIHgxPSI3NDAiIHkxPSIxNzUiIHgyPSI0MzAiIHkyPSIyMTAiIHN0cm9rZT0iIzZjNzU3ZCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXIpIi8+CgogIDwhLS0gRmFuLWluIGJhcnJpZXIgLS0+CiAgPHJlY3QgeD0iMjcwIiB5PSIyMTMiIHdpZHRoPSIzMjAiIGhlaWdodD0iMzYiIHJ4PSI3IiBmaWxsPSIjMzQzYTQwIiBzdHJva2U9IiMyMTI1MjkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDMwIiB5PSIyMzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjEyIj5BbGwtcGFzcyBiYXJyaWVyIChuZWVkczogYWxsKTwvdGV4dD4KCiAgPGxpbmUgeDE9IjQzMCIgeTE9IjI0OSIgeDI9IjQzMCIgeTI9IjI3NSIgc3Ryb2tlPSIjNmM3NTdkIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcikiLz4KCiAgPCEtLSBTdGFnaW5nIGRlcGxveSAtLT4KICA8cmVjdCB4PSIyOTAiIHk9IjI3OCIgd2lkdGg9IjI4MCIgaGVpZ2h0PSIzOCIgcng9IjciIGZpbGw9IiNmZmYwZDYiIHN0cm9rZT0iI2ZkN2UxNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjMwMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNkOTQ4MGYiIGZvbnQtc2l6ZT0iMTIiPlN0YWdpbmcgRGVwbG95ICsgRTJFICh+NSBtaW4pPC90ZXh0PgoKICA8bGluZSB4MT0iNDMwIiB5MT0iMzE2IiB4Mj0iNDMwIiB5Mj0iMzMzIiBzdHJva2U9IiM2Yzc1N2QiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FyKSIvPgoKICA8IS0tIE1lcmdlIGdhdGUgLS0+CiAgPHJlY3QgeD0iMzEwIiB5PSIzMzYiIHdpZHRoPSIyNDAiIGhlaWdodD0iMjAiIHJ4PSI1IiBmaWxsPSIjZDBmMGMwIiBzdHJva2U9IiM0MGMwNTciIHN0cm9rZS13aWR0aD0iMS4yIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIzNTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMyZjllNDQiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIj5NZXJnZSBhbGxvd2VkIOKGkiBjYW5hcnkgZGVwbG95PC90ZXh0PgoKICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFyIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjNmM3NTdkIi8+CiAgICA8L21hcmtlcj4KICA8L2RlZnM+Cjwvc3ZnPg==",
+          "alt": "Parallel eval and test pipeline design with fan-out, fan-in, and staging deploy",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Parallelism Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The five gate types in a Claude CI pipeline are mutually independent at the PR stage: lint has no dependency on evals, and contract tests have no dependency on security probes. Running them in parallel reduces total CI time from the sum of all stages to the maximum of any single stage:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Configuration"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Total CI time (typical)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Merge feedback latency"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sequential"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~15 min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Engineer waits 15 min per push"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Parallel (5 jobs)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~8 min (slowest: evals)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Engineer waits 8 min per push"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Parallel + eval sharding"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4 min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Engineer waits 4 min per push"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "GitHub Actions: Fan-Out Pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In GitHub Actions, parallel jobs are defined as separate entries under jobs: with no needs: dependency between them. Each starts immediately when the workflow triggers."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# .github/workflows/ci.yml\nname: CI\non: [push, pull_request]\n\njobs:\n  # \u2500\u2500 Fan-out: all five jobs start simultaneously \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install ruff mypy\n      - run: ruff check . && mypy src/ --strict\n\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install -r requirements-dev.txt\n      - run: pytest tests/unit/ -x --tb=short\n\n  contract-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install -r requirements-dev.txt\n      - run: pytest tests/contract/ --tb=short\n\n  eval-gate:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install anthropic pytest\n      - name: Run eval gate\n        env:\n          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n        run: pytest tests/evals/ --eval-threshold=0.85 --tb=short\n\n  security-gate:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install anthropic pytest\n      - name: Run probe replay\n        env:\n          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n        run: pytest tests/red_team/test_probe_replay.py -v --tb=short\n\n  # \u2500\u2500 Fan-in barrier: staging only runs after ALL five pass \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n  staging-deploy:\n    needs: [lint, unit-tests, contract-tests, eval-gate, security-gate]\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Deploy to staging\n        run: ./scripts/deploy.sh staging\n      - name: Run E2E tests\n        env:\n          STAGING_APP_URL: ${{ secrets.STAGING_APP_URL }}\n          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n        run: pytest tests/e2e/ --tb=short\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Eval Suite Sharding"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The eval gate is typically the slowest job. If your eval suite has more than 50 cases, shard it across multiple runners so the cases run in parallel rather than serially:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# .github/workflows/ci.yml (eval-gate with matrix sharding)\n  eval-gate:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        shard: [1, 2, 3, 4]    # 4 runners process the suite in quarters\n      fail-fast: true           # cancel remaining shards if one fails\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install anthropic pytest\n      - name: Run eval shard ${{ matrix.shard }} of 4\n        env:\n          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n        run: |\n          pytest tests/evals/             --eval-threshold=0.85             --shard=${{ matrix.shard }}             --total-shards=4             --tb=short\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Implementing the Shard Plugin"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# tests/evals/conftest.py (shard-aware collection)\nimport pytest\n\n_results = []\n\ndef pytest_addoption(parser):\n    parser.addoption(\"--eval-threshold\", default=\"0.85\")\n    parser.addoption(\"--shard\", default=\"1\")\n    parser.addoption(\"--total-shards\", default=\"1\")\n\ndef pytest_collection_modifyitems(config, items):\n    \"\"\"Assign each test to exactly one shard using modulo partitioning.\"\"\"\n    shard = int(config.getoption(\"--shard\"))\n    total = int(config.getoption(\"--total-shards\"))\n    if total <= 1:\n        return\n    # Keep items whose index belongs to this shard\n    selected = [item for i, item in enumerate(items) if (i % total) + 1 == shard]\n    items[:] = selected\n\ndef pytest_runtest_logreport(report):\n    if report.when == \"call\":\n        _results.append(report.passed)\n\ndef pytest_sessionfinish(session, exitstatus):\n    threshold = float(session.config.getoption(\"--eval-threshold\"))\n    if not _results:\n        return\n    pass_rate = sum(_results) / len(_results)\n    print(f\"\\nShard pass rate: {pass_rate:.1%} (threshold: {threshold:.1%})\")\n    if pass_rate < threshold:\n        session.exitstatus = 1\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Managing API Concurrency"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallel jobs all share the same API key. Without rate-limit awareness, multiple shards can saturate the per-minute token budget and cause 429 errors that appear as test failures."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# tests/evals/api_client.py\n\"\"\"Rate-limit-aware eval client for use in parallel CI shards.\"\"\"\nimport time, threading, anthropic\nfrom dataclasses import dataclass, field\nfrom typing import Any\n\n@dataclass\nclass RateLimitedClient:\n    \"\"\"Wraps Anthropic client with a simple token-bucket for CI eval runs.\"\"\"\n    requests_per_minute: int = 50    # conservative; raise if tier allows\n    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)\n    _timestamps: list = field(default_factory=list, repr=False)\n    _client: Any = field(default_factory=anthropic.Anthropic, repr=False)\n\n    def create(self, **kwargs):\n        \"\"\"Call messages.create with per-minute rate limiting.\"\"\"\n        with self._lock:\n            now = time.monotonic()\n            # Drop timestamps older than 60 s\n            self._timestamps = [t for t in self._timestamps if now - t < 60]\n            if len(self._timestamps) >= self.requests_per_minute:\n                sleep_s = 60 - (now - self._timestamps[0]) + 0.1\n                time.sleep(max(0, sleep_s))\n            self._timestamps.append(time.monotonic())\n        return self._client.messages.create(**kwargs)\n\n# Use this in eval fixtures instead of the raw client\n_eval_client = RateLimitedClient()\n\ndef eval_create(**kwargs):\n    return _eval_client.create(**kwargs)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Staggering Shard Start Times"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even with rate limiting, four shards starting simultaneously create a burst. Add a small stagger using the shard index:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# tests/evals/conftest.py (add to pytest_configure)\ndef pytest_configure(config):\n    shard = int(config.getoption(\"--shard\", default=\"1\"))\n    total = int(config.getoption(\"--total-shards\", default=\"1\"))\n    if total > 1:\n        import time\n        # Stagger: shard N waits N-1 seconds before first request\n        stagger = (shard - 1) * 2\n        if stagger:\n            time.sleep(stagger)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Caching Dependencies Between Jobs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each parallel job installs Python dependencies from scratch by default. Cache the pip install step so runners reuse the site-packages directory:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Reusable step fragment (add to every job)\n      - name: Cache pip\n        uses: actions/cache@v4\n        with:\n          path: ~/.cache/pip\n          key: ${{ runner.os }}-pip-${{ hashFiles(\"**/requirements*.txt\") }}\n          restore-keys: ${{ runner.os }}-pip-\n\n      - name: Install dependencies\n        run: pip install -r requirements-dev.txt\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For larger projects, consider a shared Docker image with dependencies pre-baked to eliminate install time entirely."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Result Aggregation and Reporting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When shards run in parallel, test results are scattered across multiple runner logs. Collect them into a single report by uploading JUnit XML from each shard and merging them in the fan-in job:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# .github/workflows/ci.yml (eval-gate shard: upload results)\n      - name: Upload shard results\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: eval-results-shard-${{ matrix.shard }}\n          path: reports/eval_results_shard_${{ matrix.shard }}.xml\n\n  # Fan-in: download and merge\n  eval-report:\n    needs: [eval-gate]\n    runs-on: ubuntu-latest\n    if: always()\n    steps:\n      - uses: actions/download-artifact@v4\n        with:\n          pattern: eval-results-shard-*\n          merge-multiple: true\n          path: reports/\n      - name: Merge JUnit reports\n        run: |\n          pip install junitparser\n          python - <<'EOF'\n          from junitparser import JUnitXml\n          import pathlib\n          merged = JUnitXml()\n          for f in pathlib.Path(\"reports\").glob(\"*.xml\"):\n              merged += JUnitXml.fromfile(str(f))\n          merged.write(\"reports/eval_combined.xml\")\n          print(f\"Total tests: {merged.tests}, failures: {merged.failures}\")\n          EOF\n      - name: Publish test summary\n        uses: EnricoMi/publish-unit-test-result-action@v2\n        with:\n          files: reports/eval_combined.xml\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Conditional Stage Execution"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Not every push needs the full eval suite. Use conditional execution to skip expensive API-calling stages for obvious non-changes:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Only run eval-gate and security-gate when relevant files change\n  eval-gate:\n    if: |\n      github.event_name == 'push' ||\n      contains(github.event.pull_request.changed_files, 'prompts/') ||\n      contains(github.event.pull_request.changed_files, 'src/') ||\n      contains(github.event.pull_request.changed_files, 'tests/evals/')\n    # ... rest of job\n"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Change type"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Lint"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unit"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Contract"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Eval"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Security"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "README / docs only"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "App code (src/)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Prompt file (prompts/)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Eval case (tests/evals/)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Probe file (tests/red_team/)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "skip"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "\u2713"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fan out all independent gate jobs (lint, unit, contract, eval, security) in parallel; fan them back in with a needs: barrier before staging deploy"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Shard large eval suites across multiple runners using modulo partitioning; keep per-shard time under 5 minutes to match the slowest non-eval job"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a rate-limited eval client and stagger shard start times to avoid 429 bursts from concurrent runners sharing one API key"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache pip dependencies and consider a pre-baked Docker image to eliminate per-job install overhead"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Upload JUnit XML from each shard and merge in a downstream fan-in job so reports span the full suite"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Conditionally skip API-calling stages for changes that cannot affect model behaviour (docs-only, probe file only, etc.)"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The all-pass barrier (needs: all five jobs) is mandatory \u2014 the staging deploy and merge gate must not run if any parallel job fails"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
