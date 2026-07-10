@@ -9,12 +9,26 @@ import { formatDuration, subtreeMinutes } from '../lib/duration'
 import { isEffectivelyOptional } from '../lib/topic-status'
 import { EditableTopicTree } from './editor/EditableTopicTree'
 import {
+  auditReasonLabel,
   CONTENT_GAP_CARD_CLASS,
   isContentGapHighlighted,
+  type AuditReason,
 } from '../lib/audit-sub-subtopic-content'
 
 function sectionCount(topic: Topic): number {
   return topic.contentSectionCount
+}
+
+/** True when any descendant (not the topic itself) is in the flagged set. */
+function hasFlaggedDescendant(
+  topic: Topic,
+  flagged: ReadonlySet<string> | null | undefined,
+): boolean {
+  if (!flagged || flagged.size === 0) return false
+  for (const sub of topic.subtopics) {
+    if (flagged.has(sub.id) || hasFlaggedDescendant(sub, flagged)) return true
+  }
+  return false
 }
 
 // Above this many top-level topics the root list is windowed so only the rows
@@ -38,6 +52,7 @@ function TopicNode({
   parentOptional = false,
   defaultExpanded,
   contentGapTopicIds,
+  contentGapReasons,
 }: {
   subjectId: string
   topic: Topic
@@ -46,6 +61,7 @@ function TopicNode({
   parentOptional?: boolean
   defaultExpanded: boolean
   contentGapTopicIds?: ReadonlySet<string> | null
+  contentGapReasons?: ReadonlyMap<string, AuditReason[]> | null
 }) {
   const { isComplete, isBookmarked } = useProgress()
   const hasChildren = topic.subtopics.length > 0
@@ -55,7 +71,12 @@ function TopicNode({
   const done = isComplete(subjectId, topic.id)
   const bookmarked = isBookmarked(subjectId, topic.id)
   const sections = sectionCount(topic)
-  const contentGap = depth === 0 && isContentGapHighlighted(contentGapTopicIds, topic.id)
+  const contentGap = isContentGapHighlighted(contentGapTopicIds, topic.id)
+  const reasons = contentGapReasons?.get(topic.id)
+  // Auto-open branches that contain a flagged sub-subtopic so the failing leaf
+  // is visible without hunting through a collapsed tree.
+  const showChildren =
+    hasChildren && (expanded || hasFlaggedDescendant(topic, contentGapTopicIds))
 
   return (
     <li>
@@ -64,14 +85,14 @@ function TopicNode({
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
-            aria-expanded={expanded}
-            aria-label={expanded ? 'Collapse' : 'Expand'}
+            aria-expanded={showChildren}
+            aria-label={showChildren ? 'Collapse' : 'Expand'}
             className="grid w-8 shrink-0 place-items-center rounded-xl border border-slate-200 bg-white text-slate-400 transition hover:border-brand-300 hover:text-brand-600 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-brand-500/40"
           >
             <span
               className={clsx(
                 'transition-transform duration-200',
-                expanded && 'rotate-90',
+                showChildren && 'rotate-90',
               )}
             >
               ▶
@@ -83,6 +104,11 @@ function TopicNode({
 
         <Link
           to={paths.topic(subjectId, topic.id)}
+          title={
+            reasons && reasons.length > 0
+              ? `Audit: ${reasons.map(auditReasonLabel).join(', ')}`
+              : undefined
+          }
           className={clsx(
             'flex min-w-0 flex-1 items-center justify-between gap-2 rounded-xl border p-3 transition hover:shadow-md sm:gap-3 sm:p-3.5',
             isActive
@@ -140,7 +166,7 @@ function TopicNode({
         </Link>
       </div>
 
-      {hasChildren && expanded && (
+      {showChildren && (
         <ul className="ml-2 mt-2 space-y-2 border-l border-slate-200 pl-2 sm:ml-4 sm:pl-4 dark:border-slate-800">
           {topic.subtopics.map((sub) => (
             <TopicNode
@@ -152,6 +178,7 @@ function TopicNode({
               parentOptional={effectivelyOptional}
               defaultExpanded={false}
               contentGapTopicIds={contentGapTopicIds}
+              contentGapReasons={contentGapReasons}
             />
           ))}
         </ul>
@@ -170,6 +197,7 @@ export function TopicTree({
   parentTopicId,
   parentDepth,
   contentGapTopicIds,
+  contentGapReasons,
 }: {
   subjectId: string
   topics: Topic[]
@@ -182,6 +210,7 @@ export function TopicTree({
   parentTopicId?: string
   parentDepth?: number
   contentGapTopicIds?: ReadonlySet<string> | null
+  contentGapReasons?: ReadonlyMap<string, AuditReason[]> | null
 }) {
   if (editable) {
     return (
@@ -207,6 +236,7 @@ export function TopicTree({
       depth={0}
       defaultExpanded={defaultExpanded}
       contentGapTopicIds={contentGapTopicIds}
+      contentGapReasons={contentGapReasons}
     />
   )
 

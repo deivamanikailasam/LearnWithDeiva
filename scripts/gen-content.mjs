@@ -19,6 +19,8 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readGlobalGlossary } from './lib/global-glossary.mjs'
+import { validateTiptapDocument } from './lib/validate-tiptap.mjs'
+import { estimateDurationFromTiptap } from './lib/estimate-duration-from-tiptap.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -219,7 +221,30 @@ async function loadTopic(subjectDir, topicId) {
       : splitDocumentByHeading(explanation).length
     : 0
 
-  return { meta, document, explanation, body, hasContent, contentSectionCount }
+  // Content-quality signals for the dev-only sub-subtopic audit. Only TipTap
+  // `document.json` bodies are gradeable here — legacy `explanation.json`
+  // bodies leave these undefined (not flagged).
+  let tiptapValid
+  let hasSvgImage
+  let contentHours
+  if (document) {
+    const { errors, svgImageCount } = validateTiptapDocument(document)
+    tiptapValid = errors.length === 0
+    hasSvgImage = svgImageCount > 0
+    contentHours = estimateDurationFromTiptap(document.doc, meta.level ?? 'beginner')
+  }
+
+  return {
+    meta,
+    document,
+    explanation,
+    body,
+    hasContent,
+    contentSectionCount,
+    tiptapValid,
+    hasSvgImage,
+    contentHours,
+  }
 }
 
 /** Split explanation.json blocks into navigable sections at each level-1 heading. */
@@ -540,25 +565,30 @@ async function buildOneSubject(subjectId) {
     await mapLimit(topicIds, 64, (id) => loadTopic(subjectDir, id))
   ).filter(Boolean)
 
-  const nodes = loaded.map(({ meta: m, hasContent, contentSectionCount }) => ({
-    id: m.id,
-    title: m.title,
-    summary: m.summary,
-    order: m.order ?? 0,
-    level: m.level ?? 'beginner',
-    tags: m.tags ?? [],
-    parentId: m.parentId,
-    hours: m.hours,
-    hoursSource:
-      m.hoursSource === 'manual' || m.hoursSource === 'computed'
-        ? m.hoursSource
-        : undefined,
-    status: m.status === 'optional' ? 'optional' : undefined,
-    subjectId,
-    hasContent,
-    contentSectionCount,
-    subtopics: [],
-  }))
+  const nodes = loaded.map(
+    ({ meta: m, hasContent, contentSectionCount, tiptapValid, hasSvgImage, contentHours }) => ({
+      id: m.id,
+      title: m.title,
+      summary: m.summary,
+      order: m.order ?? 0,
+      level: m.level ?? 'beginner',
+      tags: m.tags ?? [],
+      parentId: m.parentId,
+      hours: m.hours,
+      hoursSource:
+        m.hoursSource === 'manual' || m.hoursSource === 'computed'
+          ? m.hoursSource
+          : undefined,
+      status: m.status === 'optional' ? 'optional' : undefined,
+      subjectId,
+      hasContent,
+      contentSectionCount,
+      tiptapValid,
+      hasSvgImage,
+      contentHours,
+      subtopics: [],
+    }),
+  )
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const roots = []
   for (const n of nodes) {

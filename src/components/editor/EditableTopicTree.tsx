@@ -84,7 +84,7 @@ function SortableTopicRow({
   const done = isComplete(subjectId, topic.id)
   const bookmarked = isBookmarked(subjectId, topic.id)
   const sections = sectionCount(topic)
-  const contentGap = depth === 0 && isContentGapHighlighted(contentGapTopicIds, topic.id)
+  const contentGap = isContentGapHighlighted(contentGapTopicIds, topic.id)
 
   const {
     attributes,

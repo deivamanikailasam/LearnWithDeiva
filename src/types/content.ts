@@ -455,6 +455,17 @@ export interface Topic extends TopicMeta {
   hasContent: boolean
   /** Number of navigable sections (heading splits + optional intro). */
   contentSectionCount: number
+  /**
+   * Content-quality signals for the dev-only sub-subtopic audit, computed at
+   * build time from a TipTap `document.json`. Undefined for topics without a
+   * TipTap body (no document, or legacy `explanation.json`).
+   */
+  /** Estimated study time derived from the document body, in hours. */
+  contentHours?: number
+  /** True when the document passes TipTap `tiptap/v1` structural validation. */
+  tiptapValid?: boolean
+  /** True when the document contains at least one SVG image node. */
+  hasSvgImage?: boolean
   /** Direct subtopics (topics whose parentId === this.id). */
   subtopics: Topic[]
 }
