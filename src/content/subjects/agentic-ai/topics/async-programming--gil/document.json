@@ -1,6 +1,5 @@
 {
   "format": "tiptap/v1",
-  "updatedAt": "2026-06-22T17:44:00.819Z",
   "doc": {
     "type": "doc",
     "content": [
@@ -9,7 +8,20 @@
         "content": [
           {
             "type": "text",
-            "text": "The Global Interpreter Lock (GIL) is a mutex in CPython that allows only one thread to execute Python bytecode at a time in a process. It shapes how agent developers parallelize work — async and threads excel at I/O concurrency, but CPU-bound Python parallelism requires multiprocessing or native extensions that release the GIL."
+            "text": "Every CPython process contains a single, global mutex called the "
+          },
+          {
+            "type": "text",
+            "text": "Global Interpreter Lock",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (GIL). It enforces that only one thread may execute Python bytecode at any given moment, regardless of how many CPU cores are available. Understanding the GIL is essential for agent developers: it determines when threads provide genuine parallelism, when they do not, and which concurrency primitive — asyncio, threads, or processes — is correct for each type of workload."
           }
         ]
       },
@@ -30,20 +42,25 @@
         "content": [
           {
             "type": "text",
-            "text": "The "
-          },
+            "text": "The GIL is a mutual-exclusion lock (mutex) embedded in the CPython interpreter — the standard Python implementation distributed as python.org binaries and used in virtually all production environments. It is held by whichever thread is currently executing Python bytecode and released periodically so other threads get a turn. The periodic check interval is controlled by sys.getswitchinterval(), which defaults to 5 ms in modern CPython."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
           {
             "type": "text",
-            "text": "GIL",
-            "marks": [
-              {
-                "type": "bold"
-              }
-            ]
-          },
+            "text": "The GIL is not a language feature of Python itself — it is an implementation detail of CPython. Other Python runtimes (Jython, IronPython, GraalPy) have no GIL, but they are rarely used in production AI or agent contexts. PyPy has its own GIL. CPython 3.13 introduced an experimental 'free-threaded' build (--disable-gil) that removes the GIL, but it is not yet the default and carries its own stability and performance caveats. For practical purposes, assume CPython with a GIL unless you have explicitly opted into the experimental build."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
           {
             "type": "text",
-            "text": " protects CPython internals by serializing execution of Python bytecode in a single process. Threads still help when work waits on I/O or runs in C extensions that release the GIL during heavy computation (some numpy/crypto operations)."
+            "text": "At the bytecode level, CPython executes instructions in a tight eval loop. Each iteration the interpreter checks whether the GIL should be released — either because the thread is about to block (I/O call) or because the switch interval has elapsed. The C-level macro Py_BEGIN_ALLOW_THREADS / Py_END_ALLOW_THREADS is how C extension authors release the GIL during native computation and reacquire it before touching Python objects again."
           }
         ]
       },
@@ -64,7 +81,25 @@
         "content": [
           {
             "type": "text",
-            "text": "Expecting 8 threads to speed up pure-Python JSON parsing of 8 large tool outputs 8× will disappoint — GIL serializes bytecode. Expecting asyncio to parallelize CPU embedding without offloading to processes is a category error. Agent architecture must route CPU work to process pools or native libraries."
+            "text": "Many developers expect that adding threads to a Python program will make CPU-intensive work faster in proportion to the number of cores. The GIL breaks this assumption for pure-Python code. Two threads running a tight Python loop on an 8-core machine will not run twice as fast — they will run at roughly the same speed as one thread, because the GIL serializes bytecode execution. Understanding this prevents wasted engineering effort and production performance regressions."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For agent systems the stakes are higher. A typical LLM agent orchestration loop interleaves I/O-bound steps (calling an LLM API, fetching web pages, querying a database) with CPU-bound steps (parsing large JSON tool responses, running local embeddings, tokenising text). The correct concurrency primitive differs by step type, and choosing the wrong one wastes resources or, worse, introduces serialization that turns a theoretically parallel agent into a sequential one."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIL also shapes how agent sandboxes behave: if one thread is spinning on a CPU-heavy task, it may starve I/O threads of scheduling time within the same process. Knowing when to move work to a subprocess keeps the agent loop responsive."
           }
         ]
       },
@@ -81,6 +116,15 @@
         ]
       },
       {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIL exists because it brings significant engineering advantages to the CPython implementation. These are real benefits that have kept CPython fast and reliable for decades:"
+          }
+        ]
+      },
+      {
         "type": "bulletList",
         "content": [
           {
@@ -91,7 +135,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Simpler CPython",
+                    "text": "Simpler memory management",
                     "marks": [
                       {
                         "type": "bold"
@@ -100,7 +144,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — reference counting without fine-grained locking in most objects"
+                    "text": " — CPython uses reference counting for garbage collection. Without the GIL, every increment and decrement of a reference count would require a fine-grained atomic operation or lock, adding overhead to every object access across all threads."
                   }
                 ]
               }
@@ -114,7 +158,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "I/O threads still work",
+                    "text": "Thread-safe C extensions by default",
                     "marks": [
                       {
                         "type": "bold"
@@ -123,7 +167,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — threads release GIL while waiting on network"
+                    "text": " — C extension authors can assume that unless they explicitly release the GIL, no other thread will be modifying Python objects concurrently. This makes it far easier to write correct extensions."
                   }
                 ]
               }
@@ -137,7 +181,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Native extensions",
+                    "text": "I/O concurrency still works",
                     "marks": [
                       {
                         "type": "bold"
@@ -146,7 +190,53 @@
                   },
                   {
                     "type": "text",
-                    "text": " — can release GIL during compute"
+                    "text": " — Threads that block on network reads, disk I/O, or time.sleep() release the GIL during the wait, allowing other threads to run Python bytecode. This means thread pools are genuinely useful for I/O-bound workloads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Native extension parallelism",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — C extensions performing heavy computation (numpy matrix operations, cryptographic hashing, image processing) can release the GIL with Py_BEGIN_ALLOW_THREADS. Code calling into these libraries gets real CPU parallelism for the native portion."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Simpler CPython internals",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Dozens of data structures (lists, dicts, sets) are not thread-safe in detail, but the GIL prevents concurrent mutation. Removing it would require fine-grained locking or lock-free algorithms throughout the interpreter, significantly increasing complexity and risk."
                   }
                 ]
               }
@@ -167,6 +257,15 @@
         ]
       },
       {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIL's costs are well known and frequently misunderstood. The key insight is that the GIL only limits CPU parallelism for pure-Python code — it does not affect I/O concurrency or code running in GIL-releasing C extensions."
+          }
+        ]
+      },
+      {
         "type": "bulletList",
         "content": [
           {
@@ -177,7 +276,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "CPU Python threads",
+                    "text": "No CPU parallelism for pure Python",
                     "marks": [
                       {
                         "type": "bold"
@@ -186,7 +285,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — do not scale across cores for pure Python"
+                    "text": " — Multiple threads running pure-Python loops cannot run simultaneously on different cores. A thread pool doing CPU-heavy Python work may actually be slower than a single thread due to GIL contention overhead and OS thread switching."
                   }
                 ]
               }
@@ -200,7 +299,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Misleading mental model",
+                    "text": "Deceptive speedup illusions",
                     "marks": [
                       {
                         "type": "bold"
@@ -209,7 +308,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — \"more threads = faster\" fails for compute"
+                    "text": " — Adding threads to a CPU-bound Python function often produces no speedup, or even a slowdown, leading developers to believe their code has a different bottleneck (cache, algorithm) when the real cause is the GIL."
                   }
                 ]
               }
@@ -223,7 +322,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Alternative interpreters",
+                    "text": "Contention overhead",
                     "marks": [
                       {
                         "type": "bold"
@@ -232,7 +331,76 @@
                   },
                   {
                     "type": "text",
-                    "text": " — Jython/IronPython differ; most agents use CPython"
+                    "text": " — When many threads are competing for the GIL, the OS spends time context-switching between threads that cannot all make progress. This adds measurable latency even to I/O threads in heavily-threaded programs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Spawning overhead for the workaround",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — The correct workaround — multiprocessing — spawns separate interpreter processes. Process startup on Linux is relatively fast (fork), but on Windows and macOS it uses spawn and can take hundreds of milliseconds. The inter-process communication (IPC) serialisation of arguments and results via pickle adds latency proportional to data size."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Async is not a GIL workaround",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — asyncio uses cooperative multitasking on a single thread. It never runs multiple Python callables simultaneously. It sidesteps the GIL's I/O problem by avoiding threads entirely, but it cannot parallelize CPU work."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Extension portability",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Code that relies on GIL-releasing C extensions (numpy, orjson) is implicitly GIL-aware. Porting to the free-threaded CPython 3.13 build or to a GIL-less runtime can expose data races in extensions not designed for true concurrency."
                   }
                 ]
               }
@@ -260,54 +428,25 @@
         "content": [
           {
             "type": "text",
-            "text": "What releases the GIL"
+            "text": "The eval breaker mechanism"
           }
         ]
       },
       {
-        "type": "bulletList",
+        "type": "paragraph",
         "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "I/O waits (network, disk) in many stdlib calls"
-                  }
-                ]
-              }
-            ]
-          },
+            "type": "text",
+            "text": "CPython's bytecode evaluation loop checks an 'eval breaker' flag after every instruction batch. The flag is set when the switch interval (5 ms by default) expires, when a signal arrives, or when a thread requests the GIL. When the flag is set, the current thread drops the GIL, other threads compete to acquire it, and the winner resumes. This is a cooperative-ish scheme: threads can hold the GIL for up to one switch interval before being preempted."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "time.sleep in threads (not asyncio.sleep on loop)"
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Many C extension compute routines during heavy work"
-                  }
-                ]
-              }
-            ]
+            "type": "text",
+            "text": "The switch interval can be changed at runtime with sys.setswitchinterval(seconds). A lower value (e.g. 0.001) increases context-switch frequency, which can improve I/O responsiveness at the cost of more GIL contention overhead. A higher value reduces overhead but makes threads feel less 'concurrent' to humans."
           }
         ]
       },
@@ -319,66 +458,122 @@
         "content": [
           {
             "type": "text",
-            "text": "What stays GIL-bound"
+            "text": "Releasing the GIL for I/O"
           }
         ]
       },
       {
-        "type": "bulletList",
-        "content": [
-          {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Tight pure-Python loops parsing, transforming large structures"
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Multiple threads crunching Python bytecode simultaneously"
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "type": "heading",
-        "attrs": {
-          "level": 3
-        },
+        "type": "paragraph",
         "content": [
           {
             "type": "text",
-            "text": "Practical agent routing"
+            "text": "When Python calls into the OS for I/O — socket.recv(), file.read(), subprocess.wait() — CPython releases the GIL before the blocking syscall and reacquires it when the call returns. The sequence in C looks like:"
           }
         ]
       },
       {
         "type": "codeBlock",
         "attrs": {
-          "language": "python"
+          "language": "c"
         },
         "content": [
           {
             "type": "text",
-            "text": "# I/O-bound: async — good\nasync def agent_api():\n    await httpx_async_tools()\n\n# CPU-bound pure Python: processes — good\nwith ProcessPoolExecutor() as pool:\n    pool.map(parse_large_doc, docs)\n\n# CPU-bound pure Python: threads — poor speedup\nwith ThreadPoolExecutor() as pool:\n    pool.map(parse_large_doc, docs)  # mostly serialized by GIL"
+            "text": "/* Example C extension pattern */\nPy_BEGIN_ALLOW_THREADS          /* release GIL */\nbytes_read = recv(fd, buf, n, 0); /* blocking syscall — other threads run */\nPy_END_ALLOW_THREADS            /* reacquire GIL before touching Python objects */\n"
           }
         ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is why threading is genuinely useful for I/O-bound code: while one thread waits in a syscall with the GIL released, another thread can be running Python bytecode. asyncio achieves the same result without threads by using non-blocking I/O and an event loop, which is usually more efficient at very high concurrency."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Reference counting and GIL safety"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every Python object has an ob_refcnt field. The GIL makes reference count updates atomic from the perspective of other Python threads — only one thread can be in the eval loop at a time. Without the GIL, Py_INCREF and Py_DECREF would need to be atomic operations (e.g. using C11 _Atomic or compare-and-swap), adding a cost to every object creation, assignment, and deletion. CPython's free-threaded 3.13 build uses immortal objects and biased reference counting to reduce this overhead, but it remains non-trivial."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "GIL check interval in numbers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The default switch interval is "
+          },
+          {
+            "type": "text",
+            "text": "0.005",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " seconds (5 ms). At a typical bytecode throughput of ~10–50 million instructions per second, a thread executes roughly 50,000–250,000 bytecode instructions per GIL slot. For I/O-bound threads the GIL is released far more frequently than the interval because it is released at every blocking call regardless of elapsed time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows how threads interact with the GIL within a single CPython process. Thread A holds the GIL and runs Python bytecode. Thread B is blocked waiting to acquire the GIL — it cannot make progress on CPU work. Thread C is blocked in an I/O syscall with the GIL released, allowing Thread A to run. The process pool alternative at the bottom shows that separate OS processes each have their own GIL and interpreter, enabling true CPU parallelism."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDgwIiB2aWV3Qm94PSIwIDAgODIwIDQ4MCI+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSI0ODAiIGZpbGw9IiMwZjE3MmEiIHJ4PSIxMiIvPgogIDwhLS0gVGl0bGUgLS0+CiAgPHRleHQgeD0iNDEwIiB5PSIzNiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxOCIgZmlsbD0iI2Y4ZmFmYyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiPkNQeXRob24gR0lMIOKAlCBTaW5nbGUtUHJvY2VzcyBUaHJlYWQgRXhlY3V0aW9uPC90ZXh0PgoKICA8IS0tIEdJTCBsb2NrIGJveCBjZW50ZXIgLS0+CiAgPHJlY3QgeD0iMzEwIiB5PSIxODAiIHdpZHRoPSIyMDAiIGhlaWdodD0iODAiIHJ4PSIxMCIgZmlsbD0iIzFlNDBhZiIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjIxNiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxNSIgZmlsbD0iIzkzYzVmZCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiPkdJTCAoTXV0ZXgpPC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iMjM4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEyIiBmaWxsPSIjYmZkYmZlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5vbmUgaG9sZGVyIGF0IGEgdGltZTwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjI1NCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzdkZDNmYyIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Y2hlY2tlZCBldmVyeSB+NW1zPC90ZXh0PgoKICA8IS0tIFRocmVhZCBBIC0gaG9sZHMgR0lMLCBydW5uaW5nIENQVSAtLT4KICA8cmVjdCB4PSIzMCIgeT0iMTYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjEyMCIgcng9IjgiIGZpbGw9IiMxNDUzMmQiIHN0cm9rZT0iIzIyYzU1ZSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iMTMwIiB5PSIxODgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTMiIGZpbGw9IiM4NmVmYWMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIj5UaHJlYWQgQTwvdGV4dD4KICA8dGV4dCB4PSIxMzAiIHk9IjIwOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzRhZGU4MCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+SE9MRFMgR0lMPC90ZXh0PgogIDx0ZXh0IHg9IjEzMCIgeT0iMjI4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjYmJmN2QwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5ydW5uaW5nIFB5dGhvbjwvdGV4dD4KICA8dGV4dCB4PSIxMzAiIHk9IjI0NiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2JiZjdkMCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Ynl0ZWNvZGUgKENQVSk8L3RleHQ+CiAgPHJlY3QgeD0iNTAiIHk9IjI1OCIgd2lkdGg9IjE2MCIgaGVpZ2h0PSIxNCIgcng9IjMiIGZpbGw9IiMxNjY1MzQiLz4KICA8cmVjdCB4PSI1MCIgeT0iMjU4IiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjE0IiByeD0iMyIgZmlsbD0iIzIyYzU1ZSIvPgogIDx0ZXh0IHg9IjEzMCIgeT0iMjcwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiMxNDUzMmQiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmV4ZWN1dGluZzwvdGV4dD4KCiAgPCEtLSBBcnJvdzogVGhyZWFkIEEgaG9sZHMgR0lMIC0tPgogIDxsaW5lIHgxPSIyMzAiIHkxPSIyMjAiIHgyPSIzMTAiIHkyPSIyMjAiIHN0cm9rZT0iIzIyYzU1ZSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtZGFzaGFycmF5PSI2LDMiLz4KICA8cG9seWdvbiBwb2ludHM9IjMwNiwyMTUgMzE4LDIyMCAzMDYsMjI1IiBmaWxsPSIjMjJjNTVlIi8+CiAgPHRleHQgeD0iMjY4IiB5PSIyMTMiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMyMmM1NWUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmhvbGRzPC90ZXh0PgoKICA8IS0tIFRocmVhZCBCIC0gd2FpdGluZyBmb3IgR0lMIC0tPgogIDxyZWN0IHg9IjMwIiB5PSIzMjAiIHdpZHRoPSIyMDAiIGhlaWdodD0iMTAwIiByeD0iOCIgZmlsbD0iIzFjMTkxNyIgc3Ryb2tlPSIjNzg3MTZjIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIxMzAiIHk9IjM0NSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMyIgZmlsbD0iI2E4YTI5ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiPlRocmVhZCBCPC90ZXh0PgogIDx0ZXh0IHg9IjEzMCIgeT0iMzY1IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNzg3MTZjIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5CTE9DS0VEPC90ZXh0PgogIDx0ZXh0IHg9IjEzMCIgeT0iMzgzIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNTc1MzRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj53YWl0aW5nIGZvciBHSUw8L3RleHQ+CiAgPHRleHQgeD0iMTMwIiB5PSI0MDEiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM1NzUzNGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPihDUFUtYm91bmQgd29yayk8L3RleHQ+CgogIDwhLS0gQXJyb3c6IFRocmVhZCBCIHdhaXRpbmcgLS0+CiAgPGxpbmUgeDE9IjIzMCIgeTE9IjM3MCIgeDI9IjMwOCIgeTI9IjI1MCIgc3Ryb2tlPSIjNzg3MTZjIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwzIi8+CiAgPHRleHQgeD0iMjU4IiB5PSIzMzAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM3ODcxNmMiIHRleHQtYW5jaG9yPSJtaWRkbGUiPndhaXRpbmc8L3RleHQ+CgogIDwhLS0gVGhyZWFkIEMgLSBkb2VzIEkvTywgcmVsZWFzZXMgR0lMIC0tPgogIDxyZWN0IHg9IjU5MCIgeT0iMTYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjEzMCIgcng9IjgiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iIzYwYTVmYSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNjkwIiB5PSIxODgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTMiIGZpbGw9IiM5M2M1ZmQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIj5UaHJlYWQgQzwvdGV4dD4KICA8dGV4dCB4PSI2OTAiIHk9IjIwOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzYwYTVmYSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+SS9PIFdBSVQ8L3RleHQ+CiAgPHRleHQgeD0iNjkwIiB5PSIyMjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNiZmRiZmUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkdJTCBSRUxFQVNFRDwvdGV4dD4KICA8dGV4dCB4PSI2OTAiIHk9IjI0OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2JmZGJmZSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+d2FpdGluZyBvbiBuZXR3b3JrIC88L3RleHQ+CiAgPHRleHQgeD0iNjkwIiB5PSIyNjUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNiZmRiZmUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmRpc2sgLyBzbGVlcCgpPC90ZXh0PgogIDx0ZXh0IHg9IjY5MCIgeT0iMjgyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM3ZGQzZmMiIHRleHQtYW5jaG9yPSJtaWRkbGUiPm90aGVyIHRocmVhZHMgY2FuIHJ1bjwvdGV4dD4KCiAgPCEtLSBBcnJvdzogVGhyZWFkIEMgcmVsZWFzZXMgR0lMIC0tPgogIDxsaW5lIHgxPSI1OTAiIHkxPSIyMjAiIHgyPSI1MTIiIHkyPSIyMjAiIHN0cm9rZT0iIzYwYTVmYSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtZGFzaGFycmF5PSI2LDMiLz4KICA8cG9seWdvbiBwb2ludHM9IjUxNiwyMTUgNTA0LDIyMCA1MTYsMjI1IiBmaWxsPSIjNjBhNWZhIi8+CiAgPHRleHQgeD0iNTUwIiB5PSIyMTMiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2MGE1ZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnJlbGVhc2VzPC90ZXh0PgoKICA8IS0tIFByb2Nlc3MgcG9vbCBhbHRlcm5hdGl2ZSAtLT4KICA8cmVjdCB4PSIyNTAiIHk9IjM2MCIgd2lkdGg9IjMyMCIgaGVpZ2h0PSI5MCIgcng9IjgiIGZpbGw9IiMxYTFhMmUiIHN0cm9rZT0iI2E4NTVmNyIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIzODUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTMiIGZpbGw9IiNkOGI0ZmUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIj5tdWx0aXByb2Nlc3NpbmcgLyBQcm9jZXNzUG9vbDwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjQwNSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2M0YjVmZCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+RWFjaCBwcm9jZXNzIGhhcyBpdHMgT1dOIEdJTCArIGludGVycHJldGVyPC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iNDIzIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjYzRiNWZkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5UcnVlIENQVSBwYXJhbGxlbGlzbSBhY3Jvc3MgY29yZXM8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSI0NDEiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNhNzhiZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNvc3Q6IHNwYXduIG92ZXJoZWFkICsgSVBDIHNlcmlhbGlzYXRpb248L3RleHQ+CgogIDwhLS0gTGVnZW5kIC0tPgogIDxyZWN0IHg9IjMwIiB5PSI4MCIgd2lkdGg9Ijc2MCIgaGVpZ2h0PSI1NSIgcng9IjYiIGZpbGw9IiMwZjE3MmEiIHN0cm9rZT0iIzMzNDE1NSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHJlY3QgeD0iNTAiIHk9IjkzIiB3aWR0aD0iMTQiIGhlaWdodD0iMTQiIHJ4PSIyIiBmaWxsPSIjMjJjNTVlIi8+CiAgPHRleHQgeD0iNzIiIHk9IjEwNCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzg2ZWZhYyI+VGhyZWFkIGhvbGRzIEdJTCAoQ1BVKTwvdGV4dD4KICA8cmVjdCB4PSIyMjAiIHk9IjkzIiB3aWR0aD0iMTQiIGhlaWdodD0iMTQiIHJ4PSIyIiBmaWxsPSIjNzg3MTZjIi8+CiAgPHRleHQgeD0iMjQyIiB5PSIxMDQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNhOGEyOWUiPlRocmVhZCBibG9ja2VkLCB3YWl0aW5nIGZvciBHSUw8L3RleHQ+CiAgPHJlY3QgeD0iNDYwIiB5PSI5MyIgd2lkdGg9IjE0IiBoZWlnaHQ9IjE0IiByeD0iMiIgZmlsbD0iIzFlM2E1ZiIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0ODIiIHk9IjEwNCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzkzYzVmZCI+VGhyZWFkIGRvaW5nIEkvTyAoR0lMIHJlbGVhc2VkKTwvdGV4dD4KICA8cmVjdCB4PSI1MCIgeT0iMTE2IiB3aWR0aD0iMTQiIGhlaWdodD0iMTQiIHJ4PSIyIiBmaWxsPSIjMWExYTJlIiBzdHJva2U9IiNhODU1ZjciIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjcyIiB5PSIxMjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNkOGI0ZmUiPlNlcGFyYXRlIHByb2Nlc3MgcG9vbCDigJQgdHJ1ZSBwYXJhbGxlbGlzbSwgbm8gc2hhcmVkIEdJTDwvdGV4dD4KPC9zdmc+",
+          "alt": "CPython GIL architecture: threads competing for the GIL, I/O releasing it, and the multiprocessing alternative"
+        }
       },
       {
         "type": "heading",
@@ -393,6 +588,99 @@
         ]
       },
       {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIL is not a choice — it is always present in CPython. The real decision is which concurrency primitive to use for each type of work. Here is the decision framework:"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Use asyncio for I/O-bound agent orchestration"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "asyncio is the right choice when work consists of many concurrent I/O calls — LLM API calls, web fetches, database queries. It runs on a single thread, so the GIL is irrelevant. Overhead per concurrent task is much lower than spawning threads (a coroutine costs ~1 KB vs ~1 MB for an OS thread stack)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Use thread pools for blocking I/O in sync libraries"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a library does not offer an async API (legacy database drivers, some SDK clients), wrap calls in asyncio.get_event_loop().run_in_executor(thread_pool, fn, *args). The thread releases the GIL during the blocking call, allowing other coroutines to run. The thread pool should be sized to the expected I/O parallelism, not the CPU core count."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Use multiprocessing for CPU-bound Python"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a tool step runs computationally heavy pure-Python code — complex text parsing, rule evaluation over large datasets, custom tokenisation — use ProcessPoolExecutor or multiprocessing.Pool. Each worker process has its own GIL and runs truly in parallel. The cost is data serialisation over IPC (pickle by default) and process spawn time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Use GIL-releasing C extensions for numeric work"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Libraries like numpy, scipy, and Pillow release the GIL during heavy computation. Running them inside threads provides genuine parallelism for the native portion. This is the sweet spot: Python orchestration overhead is serialised by the GIL, but the expensive computation runs in parallel across cores."
+          }
+        ]
+      },
+      {
         "type": "bulletList",
         "content": [
           {
@@ -403,7 +691,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Do not fight the GIL",
+                    "text": "Do NOT use threads for pure-Python CPU loops expecting speedup",
                     "marks": [
                       {
                         "type": "bold"
@@ -412,7 +700,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — match tool execution model to workload type"
+                    "text": " — scaling = 1 regardless of thread count"
                   }
                 ]
               }
@@ -426,7 +714,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Async",
+                    "text": "Do NOT use asyncio.sleep inside a thread",
                     "marks": [
                       {
                         "type": "bold"
@@ -435,7 +723,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " for concurrent LLM/tool I/O"
+                    "text": " — use time.sleep — asyncio.sleep only works in the event loop"
                   }
                 ]
               }
@@ -449,7 +737,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Processes",
+                    "text": "Do NOT create one process per LLM call",
                     "marks": [
                       {
                         "type": "bold"
@@ -458,7 +746,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " for parallel CPU-heavy Python in batch agents"
+                    "text": " — spawn overhead (100–300 ms) exceeds typical API latency difference"
                   }
                 ]
               }
@@ -472,7 +760,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Threads",
+                    "text": "Do NOT ignore the GIL in sandbox design",
                     "marks": [
                       {
                         "type": "bold"
@@ -481,11 +769,239 @@
                   },
                   {
                     "type": "text",
-                    "text": " for blocking sync I/O wrappers only"
+                    "text": " — a CPU-spinning tool in a thread will intermittently starve I/O threads"
                   }
                 ]
               }
             ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The implementation pattern is straightforward: classify each agent step by its bottleneck, then select the matching primitive. Below is a step-by-step walkthrough."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1 — Profile to identify the bottleneck"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import cProfile, pstats, io\n\ndef profile_fn(fn, *args):\n    pr = cProfile.Profile()\n    pr.enable()\n    result = fn(*args)\n    pr.disable()\n    s = io.StringIO()\n    ps = pstats.Stats(pr, stream=s).sort_stats(\"cumulative\")\n    ps.print_stats(15)\n    print(s.getvalue())\n    return result\n\n# Wrap any suspect function:\n# profile_fn(parse_tool_output, raw_json)\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the hot functions are in Python (e.g. json.loads, re.search, dict iteration), the workload is GIL-bound. If they are in C extension frames (numpy, socket, ssl), threads may already be effective."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2 — I/O-bound: use asyncio"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio, httpx\n\nasync def fetch_all(urls: list[str]) -> list[str]:\n    async with httpx.AsyncClient(timeout=30) as client:\n        tasks = [client.get(url) for url in urls]\n        responses = await asyncio.gather(*tasks)\n    return [r.text for r in responses]\n\n# In agent loop:\n# results = await fetch_all(tool_urls)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3 — Blocking sync I/O: offload to thread pool"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nfrom concurrent.futures import ThreadPoolExecutor\nimport legacy_db  # hypothetical sync-only driver\n\n_thread_pool = ThreadPoolExecutor(max_workers=8)\n\nasync def query_db(sql: str) -> list[dict]:\n    loop = asyncio.get_event_loop()\n    # GIL released inside legacy_db.execute during network wait\n    rows = await loop.run_in_executor(_thread_pool, legacy_db.execute, sql)\n    return rows\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 4 — CPU-bound Python: offload to process pool"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nfrom concurrent.futures import ProcessPoolExecutor\n\n_proc_pool = ProcessPoolExecutor(max_workers=4)\n\ndef parse_large_json_sync(raw: str) -> dict:\n    import json\n    # Pure-Python JSON parsing — GIL-bound\n    return json.loads(raw)\n\nasync def parse_large_json(raw: str) -> dict:\n    loop = asyncio.get_event_loop()\n    # Offload to a separate process to bypass GIL\n    return await loop.run_in_executor(_proc_pool, parse_large_json_sync, raw)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 5 — CPU-bound native: threads are fine"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nfrom concurrent.futures import ThreadPoolExecutor\nimport numpy as np\n\n_thread_pool = ThreadPoolExecutor(max_workers=4)\n\ndef embed_batch_sync(texts: list[str]) -> np.ndarray:\n    # numpy vectorisation releases GIL during BLAS operations\n    vectors = np.random.randn(len(texts), 1536).astype(\"float32\")  # placeholder\n    return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)\n\nasync def embed_batch(texts: list[str]) -> np.ndarray:\n    loop = asyncio.get_event_loop()\n    return await loop.run_in_executor(_thread_pool, embed_batch_sync, texts)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example 1 — demonstrating the GIL effect on threads"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This runnable script shows that CPU-bound threads do not speed up pure Python, while I/O-bound threads do provide concurrency:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"\nRun with: python3 gil_demo.py\nShows: CPU threads serialised by GIL; I/O threads run concurrently.\n\"\"\"\nimport threading, time\n\nN = 5_000_000  # iterations for CPU test\n\ndef cpu_work():\n    \"\"\"Pure-Python CPU burn — GIL-bound.\"\"\n    x = 0\n    for i in range(N):\n        x += i\n    return x\n\ndef io_work():\n    \"\"\"Simulated I/O wait — GIL released during sleep.\"\"\n    time.sleep(0.2)\n\n# --- CPU threads: expect ~same time as 1 thread ---\nstart = time.perf_counter()\ncpu_work()\nsingle = time.perf_counter() - start\nprint(f\"Single-thread CPU: {single:.3f}s\")\n\nthreads = [threading.Thread(target=cpu_work) for _ in range(4)]\nstart = time.perf_counter()\nfor t in threads: t.start()\nfor t in threads: t.join()\nfour = time.perf_counter() - start\nprint(f\"4-thread CPU:      {four:.3f}s  (expect ~same or slower than single)\")\n\n# --- I/O threads: expect ~0.2s regardless of count ---\nthreads = [threading.Thread(target=io_work) for _ in range(8)]\nstart = time.perf_counter()\nfor t in threads: t.start()\nfor t in threads: t.join()\nio_parallel = time.perf_counter() - start\nprint(f\"8 I/O threads:     {io_parallel:.3f}s  (expect ~0.2s, not 1.6s)\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example 2 — ProcessPoolExecutor bypassing the GIL for CPU work"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This production-style example shows how to parallelize a CPU-heavy parsing step across multiple processes, achieving near-linear scaling on multi-core machines:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"\nRun with: python3 process_pool_demo.py\nRequires: pip install orjson  (faster C-extension JSON; falls back to json)\n\"\"\"\nimport time, os\nfrom concurrent.futures import ProcessPoolExecutor, as_completed\n\ntry:\n    import orjson as json_lib  # releases GIL during parse\n    def parse(raw: bytes): return json_lib.loads(raw)\nexcept ImportError:\n    import json as json_lib    # GIL-bound fallback\n    def parse(raw: bytes): return json_lib.loads(raw.decode())\n\ndef process_chunk(chunk: bytes) -> int:\n    \"\"\"Simulate CPU-heavy processing: parse + count keys.\"\"\n    data = parse(chunk)\n    if isinstance(data, dict):\n        return len(data)\n    return sum(len(d) if isinstance(d, dict) else 0 for d in data)\n\nif __name__ == \"__main__\":\n    # Generate synthetic tool-call payloads\n    import json\n    payload = json.dumps({f\"key_{i}\": f\"value_{i}\" for i in range(500)}).encode()\n    chunks = [payload] * 200  # 200 identical chunks\n\n    # Sequential baseline\n    start = time.perf_counter()\n    results = [process_chunk(c) for c in chunks]\n    seq_time = time.perf_counter() - start\n    print(f\"Sequential:    {seq_time:.3f}s  ({len(results)} chunks)\")\n\n    # Parallel with processes\n    workers = min(os.cpu_count(), 4)\n    start = time.perf_counter()\n    with ProcessPoolExecutor(max_workers=workers) as pool:\n        futs = {pool.submit(process_chunk, c): i for i, c in enumerate(chunks)}\n        results = [f.result() for f in as_completed(futs)]\n    par_time = time.perf_counter() - start\n    print(f\"ProcessPool x{workers}: {par_time:.3f}s  (speedup ~{seq_time/par_time:.1f}x)\")\n"
           }
         ]
       },
@@ -506,7 +1022,46 @@
         "content": [
           {
             "type": "text",
-            "text": "Agent tool runs numpy dot products (releases GIL) fast in threads; tool runs custom pure-Python validation over megabyte JSON (GIL-bound) — move validation to process pool or optimize with orjson/C extensions."
+            "text": "Consider a document-ingestion agent that receives 50 PDF tool-call responses per batch. Each response is a JSON payload of up to 2 MB containing extracted text, tables, and metadata. The pipeline must parse each JSON, extract named entities with a regex-heavy function, and embed the text using a local sentence-transformer model backed by numpy/PyTorch."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Naive implementation: spawn 50 threads, each running the full pipeline. Observed throughput: barely faster than sequential, with high CPU contention. Root cause: the JSON parsing and regex entity extraction are pure-Python and GIL-bound; all 50 threads serialize at bytecode level."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Optimized implementation: split the pipeline by GIL behaviour."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio, json\nfrom concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor\nfrom sentence_transformers import SentenceTransformer  # numpy/PyTorch — releases GIL\n\nmodel = SentenceTransformer(\"all-MiniLM-L6-v2\")\n\n_proc_pool = ProcessPoolExecutor(max_workers=8)   # parse + regex\n_io_pool   = ThreadPoolExecutor(max_workers=4)    # embed (GIL released by torch)\n\ndef parse_and_extract_sync(raw: str) -> dict:\n    \"\"\"CPU-bound pure Python — runs in process pool.\"\"\n    import re\n    data = json.loads(raw)\n    entities = re.findall(r'\\b[A-Z][a-z]+ [A-Z][a-z]+\\b', data.get(\"text\", \"\"))\n    return {\"text\": data.get(\"text\", \"\"), \"entities\": entities}\n\ndef embed_sync(text: str) -> list:\n    \"\"\"numpy/torch — GIL released; thread pool is fine.\"\"\n    return model.encode(text).tolist()\n\nasync def process_document(raw: str) -> dict:\n    loop = asyncio.get_event_loop()\n    parsed = await loop.run_in_executor(_proc_pool, parse_and_extract_sync, raw)\n    embedding = await loop.run_in_executor(_io_pool, embed_sync, parsed[\"text\"])\n    return {**parsed, \"embedding\": embedding}\n\nasync def ingest_batch(payloads: list[str]) -> list[dict]:\n    return await asyncio.gather(*[process_document(p) for p in payloads])\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "With this split, the parse/regex step achieves near-linear CPU scaling across 8 process workers, and the embedding step runs concurrently in threads (GIL released by PyTorch during matrix operations). End-to-end throughput improved 4–6x on an 8-core machine compared to the naive thread-only approach."
           }
         ]
       },
@@ -523,76 +1078,95 @@
         ]
       },
       {
-        "type": "bulletList",
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
         "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Thread pool for CPU Python",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " expecting linear core scaling"
-                  }
-                ]
-              }
-            ]
-          },
+            "type": "text",
+            "text": "Mistake 1 — thread pool for CPU-bound pure Python"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Blaming async for CPU slowness",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " — async never claimed CPU parallelism"
-                  }
-                ]
-              }
-            ]
-          },
+            "type": "text",
+            "text": "# WRONG: thread pool does not speed up pure-Python CPU work\nfrom concurrent.futures import ThreadPoolExecutor\n\ndef tokenise(text: str) -> list[str]:\n    return text.lower().split()  # pure Python\n\nwith ThreadPoolExecutor(max_workers=8) as pool:\n    results = list(pool.map(tokenise, large_corpus))  # GIL serialises; no speedup\n\n# RIGHT: process pool\nfrom concurrent.futures import ProcessPoolExecutor\n\nwith ProcessPoolExecutor(max_workers=8) as pool:\n    results = list(pool.map(tokenise, large_corpus))  # each process has own GIL\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Ignoring GIL in sandbox design",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " — CPU bombs stall co-located threads"
-                  }
-                ]
-              }
-            ]
+            "type": "text",
+            "text": "Mistake 2 — blocking the event loop with CPU work"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: blocks the asyncio event loop; all other coroutines stall\nasync def summarise_response(text: str) -> str:\n    import re\n    # heavy regex over multi-MB string — can block for 100+ ms\n    sentences = re.split(r'(?<=[.!?]) +', text)\n    return \" \".join(sentences[:5])\n\n# RIGHT: offload to process pool so the event loop stays responsive\nimport asyncio\nfrom concurrent.futures import ProcessPoolExecutor\n\n_pool = ProcessPoolExecutor()\n\ndef _summarise_sync(text: str) -> str:\n    import re\n    sentences = re.split(r'(?<=[.!?]) +', text)\n    return \" \".join(sentences[:5])\n\nasync def summarise_response(text: str) -> str:\n    loop = asyncio.get_event_loop()\n    return await loop.run_in_executor(_pool, _summarise_sync, text)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mistake 3 — pickling unpicklable objects into process pool"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: lambda and closures over local state cannot be pickled for process pool\nimport asyncio\nfrom concurrent.futures import ProcessPoolExecutor\n\npool = ProcessPoolExecutor()\n\nasync def bad_example(data: list) -> list:\n    fn = lambda x: x * 2  # CANNOT be pickled — PicklingError at runtime\n    loop = asyncio.get_event_loop()\n    return await loop.run_in_executor(pool, fn, data)\n\n# RIGHT: use a top-level (module-level) function\ndef double(x):\n    return x * 2\n\nasync def good_example(data: list) -> list:\n    loop = asyncio.get_event_loop()\n    return await loop.run_in_executor(pool, double, data)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mistake 4 — creating a new ProcessPoolExecutor per call"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each ProcessPoolExecutor creation spawns N worker processes (expensive). Always create one pool at module or application startup and reuse it for the lifetime of the service. Tear it down with pool.shutdown(wait=True) in a cleanup handler."
           }
         ]
       },
@@ -619,7 +1193,16 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Classify agent steps: I/O vs CPU vs native"
+                    "text": "Classify every step before choosing a primitive",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — I/O → asyncio or run_in_executor(thread_pool). CPU pure-Python → ProcessPoolExecutor. CPU native → ThreadPoolExecutor (if C extension releases GIL)."
                   }
                 ]
               }
@@ -633,7 +1216,16 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Profile with cProfile; if hot loops are Python, offload or optimize"
+                    "text": "Profile before optimising",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Use cProfile or py-spy to confirm the bottleneck is CPU-bound Python before reaching for multiprocessing. Many perceived CPU bottlenecks are actually slow I/O."
                   }
                 ]
               }
@@ -647,11 +1239,526 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Use orjson, numpy, etc. where they release GIL appropriately"
+                    "text": "Prefer orjson over json for large payloads",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — orjson is a Rust-based C extension that parses JSON significantly faster than stdlib json and releases the GIL during parsing, enabling parallel use in thread pools."
                   }
                 ]
               }
             ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Size pools correctly",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Thread pools: set max_workers to expected I/O parallelism (10–50 is common). Process pools: set max_workers to os.cpu_count() or fewer (process count > cores provides no benefit)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use initializer to warm up process workers",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Pass initializer=load_model, initargs=(model_path,) to ProcessPoolExecutor so each worker loads heavy resources once at startup, not per task."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Keep IPC payloads small",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Process pool arguments and return values are serialised with pickle. Passing multi-MB strings per task adds overhead. If possible, pass file paths or chunk indices and let workers read data directly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set sys.setswitchinterval thoughtfully",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — A lower value (0.001–0.005) can improve I/O thread responsiveness in highly concurrent agent loops. Test before changing; it can increase GIL overhead."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Watch for GIL-holding CPU spikes in async agents",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — A single synchronous CPU-heavy call accidentally left in a coroutine (without run_in_executor) will stall the entire event loop. Use loop.slow_callback_duration and asyncio debug mode to detect these."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIL's performance impact depends almost entirely on what percentage of time is spent in GIL-holding Python bytecode versus GIL-releasing I/O or native code."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "I/O-bound: near-linear scaling with threads or asyncio"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If a task spends 95% of its time waiting for I/O and 5% in Python, the GIL barely matters. Adding N threads or N concurrent coroutines reduces total wall-clock time by approximately N×, up to the I/O bandwidth limit. asyncio is more efficient at very high concurrency (thousands of concurrent connections) because coroutines are lighter weight than OS threads."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "CPU-bound pure Python: threads provide no scaling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For workloads spending 90%+ time in Python bytecode, adding threads provides zero speedup and may cause a slowdown of 10–30% due to GIL contention and OS thread switching overhead. ProcessPoolExecutor provides near-linear scaling up to cpu_count() workers, limited by IPC serialisation overhead."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A rough rule: if the average task processes less than ~100 KB of data and completes in under 10 ms, the pickle round-trip cost may exceed the parallelism benefit. Batch tasks to amortise the per-task overhead."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mixed workloads: pipeline across primitives"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Real agent pipelines are mixed. The optimal strategy is pipelining: parse in a process pool, embed in a thread pool (GIL-releasing torch), write to DB in an async coroutine. Each stage runs at its natural concurrency level simultaneously, maximising throughput without under- or over-provisioning."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "CPython 3.13 free-threaded build"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The experimental --disable-gil CPython 3.13 build enables true CPU parallelism in threads without multiprocessing. Early benchmarks show CPU-bound thread workloads achieving near-linear scaling at the cost of 3–10% single-threaded regression due to atomic reference counting. The build is not yet production-recommended (2025), but it is worth monitoring for future agent runtimes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Profiling and GIL visualisation"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "cProfile / pstats",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Standard library profiler. Identifies hot Python functions. Insufficient to show GIL waiting; combine with threading.settrace for thread-level analysis."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "py-spy",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Sampling profiler that attaches to a running CPython process without code instrumentation. Its top command shows live CPU usage per thread. Its record --native flag includes C extension frames."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "gil-loadavg (gilknocker)",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — A small package that periodically attempts to acquire the GIL from a background thread and measures how long it waits. High wait times indicate GIL contention."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Austin / speedscope",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Austin is a frame-stack sampler; speedscope renders flamegraphs. Together they show where Python time is actually spent across all threads."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Libraries that release the GIL"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "numpy / scipy",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Release the GIL during BLAS/LAPACK operations. Matrix multiplication, FFT, and linear algebra run in parallel when called from multiple threads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "orjson",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Rust-backed JSON parser/serialiser. Releases GIL during parse and serialise. Drop-in replacement for stdlib json with 5–10x throughput improvement."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "cryptography / ssl",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Most cryptographic operations release the GIL. Useful for parallelising TLS handshakes in custom clients."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pillow / OpenCV",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Image encode/decode operations release the GIL. Thread pools are effective for parallel image processing."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "PyTorch / TensorFlow",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Heavy model inference releases the GIL during C++/CUDA computation. Thread pools enable parallel inference across CPU cores or multiple GPU streams."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "asyncio debug mode"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio, logging\n\nlogging.basicConfig(level=logging.DEBUG)\nasyncio.get_event_loop().set_debug(True)\n\n# Now asyncio logs a warning for any callback that takes >100 ms,\n# helping identify synchronous CPU work accidentally left in a coroutine.\n# Threshold is configurable:\n# loop.slow_callback_duration = 0.05  # 50 ms\n"
           }
         ]
       },
@@ -672,7 +1779,635 @@
         "content": [
           {
             "type": "text",
-            "text": "Multiprocessing sidesteps GIL with separate interpreters. Async avoids threads for I/O concurrency without bytecode parallelism. Alternative runtimes (PyPy) differ; CPython 3.13+ continues GIL discussions but agents should assume GIL today."
+            "text": "The table below compares the major concurrency approaches in CPython with respect to GIL interaction, CPU parallelism, overhead, and suitability for agent workloads:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GIL Impact"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU Parallelism"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "I/O Concurrency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Overhead"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best For"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "asyncio"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None (single thread)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Excellent (N× scaling)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Minimal (coroutines ~1 KB)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM API calls, web fetches, DB queries"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ThreadPoolExecutor"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Serialised for pure Python"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No (pure Python)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (GIL released)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (threads ~1 MB stack)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Blocking I/O in sync libs, GIL-releasing C extensions"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ProcessPoolExecutor"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bypassed (own GIL per process)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (near-linear)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (spawn + pickle per task)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU-heavy pure Python, heavy preprocessing"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "concurrent.futures (mixed)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Depends on worker type"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Processes only"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Threads + async"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Moderate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Heterogeneous pipelines"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPython 3.13 free-threaded"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Removed (experimental)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes (native threads)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~5% single-thread regression"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Future — not yet production-ready"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Jython / IronPython"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No GIL"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Slower stdlib, no CPython C-exts"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Legacy JVM/CLR environments"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
           }
         ]
       },
@@ -684,7 +2419,19 @@
         "content": [
           {
             "type": "text",
-            "text": "Mental model"
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "GIL does not guarantee thread safety"
           }
         ]
       },
@@ -693,7 +2440,159 @@
         "content": [
           {
             "type": "text",
-            "text": "The GIL is a single microphone in a Python process — only one thread speaks Python bytecode at a time, but threads can still wait in line for the network while another holds the mic briefly."
+            "text": "A common misconception: the GIL makes Python thread-safe for all operations. This is false. While individual bytecode operations are atomic, compound operations — check-then-act patterns, read-modify-write on a shared dict — are not protected. The GIL can be released between any two bytecodes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import threading\n\ncounter = 0\n\ndef increment():\n    global counter\n    for _ in range(100_000):\n        # NOT atomic: LOAD_GLOBAL + BINARY_ADD + STORE_GLOBAL\n        # GIL can be released between LOAD and STORE\n        counter += 1\n\nthreads = [threading.Thread(target=increment) for _ in range(4)]\nfor t in threads: t.start()\nfor t in threads: t.join()\n\nprint(counter)  # Usually < 400_000 due to race conditions\n# Fix: use threading.Lock() or collections.Counter with atomic ops\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "CPU exhaustion attacks in agent sandboxes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If an agent executes tool code from an untrusted source in a thread within the agent's process, a CPU-spinning tool will hold or repeatedly reacquire the GIL, intermittently starving other threads. The mitigation is to execute untrusted code in a subprocess with resource limits (resource.setrlimit on Linux, ulimit) rather than in a thread."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Process pool reliability"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Worker crashes",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — A worker process crash raises BrokenProcessPool in subsequent submit() calls. Wrap pool.submit() in a try/except and reinitialise the pool if broken."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Memory leaks in workers",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Long-lived worker processes that process many tasks can accumulate memory if tasks have side effects. Set max_tasks_per_child (Python 3.9+) to recycle workers periodically."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Signal handling",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — Worker processes do not inherit signal handlers registered in the parent. Register handlers explicitly in the initializer function."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from concurrent.futures import ProcessPoolExecutor\n\n# Recycle each worker after 100 tasks to prevent memory accumulation\npool = ProcessPoolExecutor(\n    max_workers=4,\n    max_tasks_per_child=100,  # Python 3.9+\n)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pickle safety for IPC"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Arguments and return values passed through ProcessPoolExecutor are serialised with pickle. Untrusted data received from external tool calls must never be unpickled directly — use json, orjson, or msgpack for inter-process data transfer when the source is not fully trusted."
           }
         ]
       },
@@ -720,7 +2619,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "CPython GIL limits parallel Python bytecode in one process"
+                    "text": "The GIL is a mutex in CPython that serialises Python bytecode execution to one thread at a time within a single process — it is an implementation detail of CPython, not of the Python language."
                   }
                 ]
               }
@@ -734,7 +2633,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Async/threads help I/O-bound agents; processes help CPU-bound Python"
+                    "text": "Threads do not speed up CPU-bound pure-Python code; they can actually slow it down due to GIL contention and OS context-switch overhead."
                   }
                 ]
               }
@@ -748,7 +2647,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Route heavy pure-Python tool work to process pools or native libraries"
+                    "text": "Threads are genuinely useful for I/O-bound work because blocking I/O calls release the GIL, allowing other threads to run Python during the wait."
                   }
                 ]
               }
@@ -762,7 +2661,77 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Do not expect thread pools to parallelize CPU-heavy Python parsing"
+                    "text": "asyncio sidesteps the GIL entirely for I/O concurrency by using cooperative multitasking on a single thread — it is not a GIL workaround but an architecture that avoids the problem."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ProcessPoolExecutor provides real CPU parallelism by spawning separate interpreter processes, each with its own GIL; the cost is IPC serialisation (pickle) and process spawn overhead."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "C extensions that call Py_BEGIN_ALLOW_THREADS (numpy, PyTorch, orjson) release the GIL during native computation, enabling genuine thread-level CPU parallelism for those operations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The GIL does not make all Python operations thread-safe — compound read-modify-write patterns on shared state still require explicit locking."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "In agent pipelines, classify each step by its bottleneck (I/O vs CPU pure-Python vs CPU native) and route it to the matching primitive: asyncio, ThreadPoolExecutor, or ProcessPoolExecutor."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CPython 3.13 offers an experimental free-threaded build that removes the GIL; monitor its stabilisation, but design production agents for the GIL today."
                   }
                 ]
               }
