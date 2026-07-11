@@ -1,0 +1,1135 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Most AI agent tasks complete in seconds: a single LLM call, one tool invocation, a quick summary. But a meaningful category of agent workloads cannot finish within the lifetime of a single HTTP request or even a single process run. Research agents that crawl hundreds of pages, code agents that iterate over large codebases, data-pipeline agents that process millions of records, or workflow agents that must wait days for human approval — all of these require an execution model that persists state, tolerates interruptions, and resumes correctly after restarts. This document covers the design principles, implementation patterns, and operational concerns for long-running agents."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "What is a Long-Running Agent?" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A long-running agent is an autonomous process that executes multi-step reasoning and action loops over an extended time horizon — from minutes to hours, days, or longer. Unlike a request-response agent that returns a single answer, a long-running agent maintains a persistent execution context: accumulated memory, tool-call history, intermediate artifacts, and progress state. Each step in the loop — plan, act, observe, checkpoint — builds on the results of prior steps."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The defining characteristic is "
+          },
+          {
+            "type": "text",
+            "text": "durable state",
+            "marks": [{ "type": "bold" }]
+          },
+          {
+            "type": "text",
+            "text": ": the agent's progress is persisted to external storage at regular checkpoints, so that a crash, deployment, or infrastructure preemption does not force the work to restart from scratch. The agent resumes from its last checkpoint, re-executing only the steps that had not yet completed. This is the key distinction between a long-running agent and simply running a Python script for a long time — the latter has no durability guarantee."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Long-running agents typically run as background workers, scheduled jobs, or queue consumers — not as synchronous API handlers. The client that initiated the task receives a job ID immediately and polls or subscribes to status updates while the agent works asynchronously in the background."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why it matters" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The shift from short-lived to long-running agents unlocks an entirely different category of automation. A request-response agent is fundamentally limited by timeout constraints (typically 30–120 seconds for HTTP APIs), token-context limits that prevent accumulating large amounts of history, and the absence of any mechanism to handle human approval steps or external wait conditions."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Consider a due-diligence agent that must: search and read 50 recent filings, extract key financial metrics, cross-reference against a company database, draft a structured report, and route it for human review before sending. This workflow naturally spans 15–40 minutes of LLM computation plus unpredictable human latency. Without a long-running agent pattern, each restart would re-read every filing from scratch, wasting LLM tokens and API quota while introducing inconsistency between iterations."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Long-running agents also enable "
+          },
+          {
+            "type": "text",
+            "text": "human-in-the-loop",
+            "marks": [{ "type": "bold" }]
+          },
+          {
+            "type": "text",
+            "text": " workflows where the agent pauses at a decision gate — awaiting a human approval, a file upload, or an external event — then resumes exactly where it left off. This is impractical without durable state."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Benefits" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Fault tolerance and resumability: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "A crash or deployment mid-task loses only the current step, not the entire run. The agent reloads its checkpoint and continues from where it stopped." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Unbounded task complexity: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Tasks with hundreds of steps, external waits, or cumulative context windows become feasible. The agent is not bound by a single HTTP timeout or a single LLM context window." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Human-in-the-loop integration: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "The agent can pause at approval gates, await feedback, or wait for external events (file upload, payment confirmation) before resuming." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Cost efficiency: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Completed steps are not re-executed after a resume, so LLM tokens, API quota, and compute are not wasted on re-doing already-finished work." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Observability and auditability: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Because each step's inputs, outputs, and state transitions are persisted, you get a full audit trail of what the agent did, when, and why — essential for regulated industries." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Scalable parallelism: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Fan-out to many sub-tasks (each with its own durable state) and fan-in to aggregate results, all coordinated by the orchestrator without a synchronous connection remaining open." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Trade-offs & limitations" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Infrastructure complexity: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Durable state requires an external store (Redis, Postgres, S3, or a purpose-built durable execution engine). Managing this store — backups, migrations, retention — adds operational overhead." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Idempotency demands: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Every step that has side effects (database writes, API calls, emails sent) must be idempotent or guarded by a deduplication key, because the same step may be attempted more than once after a crash and resume." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Debugging difficulty: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "An agent that has been running for hours and is stuck on step 47 is harder to debug than a single function call that returns an error immediately. Distributed tracing and structured logging become essential." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "State schema evolution: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "If the checkpoint schema changes between deployments, in-flight agents may fail to deserialize their saved state. Schema versioning and migration strategies are mandatory." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Resource accumulation: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Long-running agents accumulate context, history, and artifacts. Without explicit pruning or summarization strategies, memory usage grows unboundedly, eventually degrading performance or exceeding LLM token limits." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Latency before first result: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "The client receives no synchronous result — only a job ID. UX patterns must accommodate asynchronous workflows with status polling or push notifications." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How it works" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A long-running agent operates as a "
+          },
+          {
+            "type": "text",
+            "text": "plan-act-observe-checkpoint loop",
+            "marks": [{ "type": "bold" }]
+          },
+          {
+            "type": "text",
+            "text": ". At each iteration, the agent calls an LLM with the accumulated context to decide the next action; executes that action (a tool call, code execution, API request, or wait); observes the result; and then persists its state to an external store before proceeding to the next iteration. The checkpoint write is the critical safety boundary: once it succeeds, the step is considered durably complete."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The loop terminates when one of several conditions is met: the LLM signals task completion, a predefined goal is satisfied, a maximum step count or time budget is exhausted, or an unrecoverable error is encountered. Termination conditions must be explicitly designed — without them, the agent may loop indefinitely."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "On restart after a crash, the agent loads the latest checkpoint and replays only the steps that had not yet checkpointed. This means every step must be "
+          },
+          {
+            "type": "text",
+            "text": "deterministic given the same inputs",
+            "marks": [{ "type": "bold" }]
+          },
+          {
+            "type": "text",
+            "text": " (or the replayed result must be cached from the previous run). Nondeterminism — such as using the current timestamp, random seeds, or reading live data that has since changed — causes the resumed run to diverge from the original, potentially invalidating prior steps."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The checkpoint frequency is a trade-off between durability and overhead. Checkpointing after every step maximizes safety but incurs a write to the state store on each iteration. Checkpointing every N steps reduces I/O but means up to N steps of work are lost on a crash. A common middle ground is to checkpoint after every LLM call, since LLM API latency (several seconds) dominates over the negligible cost of a database write."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Architecture overview" }]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDYwIiB2aWV3Qm94PSIwIDAgODIwIDQ2MCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjQ2MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiPkxvbmctUnVubmluZyBBZ2VudCBBcmNoaXRlY3R1cmU8L3RleHQ+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI3IiBtYXJrZXJIZWlnaHQ9IjciIHJlZlg9IjUiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMNywzIHoiIGZpbGw9IiM2NDc0OGIiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyMiIgbWFya2VyV2lkdGg9IjciIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iNSIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw3LDMgeiIgZmlsbD0iIzM4YmRmOCIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnIzIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjYTc4YmZhIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycjQiIG1hcmtlcldpZHRoPSI3IiBtYXJrZXJIZWlnaHQ9IjciIHJlZlg9IjUiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMNywzIHoiIGZpbGw9IiNmNTllMGIiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyNSIgbWFya2VyV2lkdGg9IjciIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iNSIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw3LDMgeiIgZmlsbD0iIzM0ZDM5OSIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgoKICA8IS0tIENsaWVudCAvIFRyaWdnZXIgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjU1IiB3aWR0aD0iMTMwIiBoZWlnaHQ9Ijc1IiByeD0iOCIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9Ijg1IiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM4YmRmOCIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkNsaWVudCAvIFRyaWdnZXI8L3RleHQ+CiAgPHRleHQgeD0iODUiIHk9IjkyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiPkhUVFAgcmVxdWVzdDwvdGV4dD4KICA8dGV4dCB4PSI4NSIgeT0iMTA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiPnNjaGVkdWxlZCBqb2I8L3RleHQ+CiAgPHRleHQgeD0iODUiIHk9IjEyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5ldmVudCB3ZWJob29rPC90ZXh0PgoKICA8IS0tIEFycm93OiBDbGllbnQgdG8gT3JjaGVzdHJhdG9yIC0tPgogIDxsaW5lIHgxPSIxNTAiIHkxPSI5MiIgeDI9IjE5MiIgeTI9IjkyIiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSIxNzEiIHk9Ijg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNjQ3NDhiIiBmb250LXNpemU9IjciPnN0YXJ0PC90ZXh0PgoKICA8IS0tIEFnZW50IE9yY2hlc3RyYXRvciBib3ggLS0+CiAgPHJlY3QgeD0iMTkyIiB5PSI1NSIgd2lkdGg9IjE5MCIgaGVpZ2h0PSIyOTAiIHJ4PSI4IiBmaWxsPSIjMGMxZjNmIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjI4NyIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzOGJkZjgiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIj5BZ2VudCBPcmNoZXN0cmF0b3I8L3RleHQ+CgogIDwhLS0gUGxhbiBTdGVwIC0tPgogIDxyZWN0IHg9IjIwNyIgeT0iODgiIHdpZHRoPSIxNjAiIGhlaWdodD0iMzgiIHJ4PSI1IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI4NyIgeT0iMTA0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5QbGFuIE5leHQgU3RlcDwvdGV4dD4KICA8dGV4dCB4PSIyODciIHk9IjExOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5MTE0gZGVjaWRlcyBuZXh0IGFjdGlvbjwvdGV4dD4KCiAgPCEtLSBFeGVjdXRlIFRvb2wgLS0+CiAgPHJlY3QgeD0iMjA3IiB5PSIxMzYiIHdpZHRoPSIxNjAiIGhlaWdodD0iMzgiIHJ4PSI1IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI4NyIgeT0iMTUyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5FeGVjdXRlIFRvb2w8L3RleHQ+CiAgPHRleHQgeD0iMjg3IiB5PSIxNjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+QVBJIC8gY29kZSAvIGJyb3dzZXI8L3RleHQ+CgogIDwhLS0gT2JzZXJ2ZSBSZXN1bHQgLS0+CiAgPHJlY3QgeD0iMjA3IiB5PSIxODQiIHdpZHRoPSIxNjAiIGhlaWdodD0iMzgiIHJ4PSI1IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI4NyIgeT0iMjAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5PYnNlcnZlIFJlc3VsdDwvdGV4dD4KICA8dGV4dCB4PSIyODciIHk9IjIxNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5wYXJzZSArIHZhbGlkYXRlIG91dHB1dDwvdGV4dD4KCiAgPCEtLSBDaGVja3BvaW50IC0tPgogIDxyZWN0IHg9IjIwNyIgeT0iMjMyIiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjM4IiByeD0iNSIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIyODciIHk9IjI0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2M0YjVmZCIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+Q2hlY2twb2ludCBTdGF0ZTwvdGV4dD4KICA8dGV4dCB4PSIyODciIHk9IjI2MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5wZXJzaXN0IHByb2dyZXNzIHRvIHN0b3JlPC90ZXh0PgoKICA8IS0tIEdvYWwgQ2hlY2sgLS0+CiAgPHJlY3QgeD0iMjA3IiB5PSIyODAiIHdpZHRoPSIxNjAiIGhlaWdodD0iMzAiIHJ4PSI1IiBmaWxsPSIjMWEzZDJiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI4NyIgeT0iMjk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5Hb2FsIFJlYWNoZWQ/IERvbmU8L3RleHQ+CgogIDwhLS0gSW5uZXIgYXJyb3dzIC0tPgogIDxsaW5lIHgxPSIyODciIHkxPSIxMjYiIHgyPSIyODciIHkyPSIxMzYiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxIiBtYXJrZXItZW5kPSJ1cmwoI2FycjIpIi8+CiAgPGxpbmUgeDE9IjI4NyIgeTE9IjE3NCIgeDI9IjI4NyIgeTI9IjE4NCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiIG1hcmtlci1lbmQ9InVybCgjYXJyMikiLz4KICA8bGluZSB4MT0iMjg3IiB5MT0iMjIyIiB4Mj0iMjg3IiB5Mj0iMjMyIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIgbWFya2VyLWVuZD0idXJsKCNhcnIyKSIvPgogIDxsaW5lIHgxPSIyODciIHkxPSIyNzAiIHgyPSIyODciIHkyPSIyODAiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxIiBtYXJrZXItZW5kPSJ1cmwoI2FycjIpIi8+CgogIDwhLS0gTG9vcCBhcnJvdyBiYWNrIC0tPgogIDxwYXRoIGQ9Ik0zNjcgMjk1IFEzOTUgMjk1IDM5NSAyNjAgUTM5NSAxOTAgMzY3IDE3MCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIgZmlsbD0ibm9uZSIgbWFya2VyLWVuZD0idXJsKCNhcnIyKSIgc3Ryb2tlLWRhc2hhcnJheT0iNSwyIi8+CiAgPHRleHQgeD0iNDA2IiB5PSIyMzUiIGZpbGw9IiMzOGJkZjgiIGZvbnQtc2l6ZT0iOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+bG9vcDwvdGV4dD4KCiAgPCEtLSBTdGF0ZSBTdG9yZSAtLT4KICA8cmVjdCB4PSI0MjAiIHk9IjU1IiB3aWR0aD0iMTc1IiBoZWlnaHQ9IjE5MCIgcng9IjgiIGZpbGw9IiMxYTFhM2EiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI1MDciIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTc4YmZhIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCI+U3RhdGUgU3RvcmU8L3RleHQ+CiAgPHJlY3QgeD0iNDM1IiB5PSI4OCIgd2lkdGg9IjE0NSIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTA3IiB5PSIxMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNjNGI1ZmQiIGZvbnQtc2l6ZT0iOCI+QWdlbnQgY29udGV4dCArIG1lbW9yeTwvdGV4dD4KICA8cmVjdCB4PSI0MzUiIHk9IjEyNCIgd2lkdGg9IjE0NSIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTA3IiB5PSIxNDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNjNGI1ZmQiIGZvbnQtc2l6ZT0iOCI+U3RlcCBoaXN0b3J5ICsgcmVzdWx0czwvdGV4dD4KICA8cmVjdCB4PSI0MzUiIHk9IjE2MCIgd2lkdGg9IjE0NSIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTA3IiB5PSIxNzkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNjNGI1ZmQiIGZvbnQtc2l6ZT0iOCI+VG9vbCBjYWxsIGxvZyArIGFydGlmYWN0czwvdGV4dD4KICA8cmVjdCB4PSI0MzUiIHk9IjE5OCIgd2lkdGg9IjE0NSIgaGVpZ2h0PSIxOCIgcng9IjQiIGZpbGw9IiMwZjE3MmEiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTA3IiB5PSIyMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM2NDc0OGIiIGZvbnQtc2l6ZT0iNyI+UmVkaXMgLyBQb3N0Z3JlcyAvIFMzIC8gRHVyYWJsZTwvdGV4dD4KICA8cmVjdCB4PSI0MzUiIHk9IjIyMCIgd2lkdGg9IjE0NSIgaGVpZ2h0PSIxOCIgcng9IjQiIGZpbGw9IiMwZjE3MmEiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTA3IiB5PSIyMzMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM2NDc0OGIiIGZvbnQtc2l6ZT0iNyI+c3Vydml2ZXMgcHJvY2VzcyByZXN0YXJ0czwvdGV4dD4KCiAgPCEtLSBBcnJvdzogQ2hlY2twb2ludCAtPiBTdGF0ZSBTdG9yZSAtLT4KICA8bGluZSB4MT0iMzgyIiB5MT0iMjQ4IiB4Mj0iNDIwIiB5Mj0iMjAwIiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycjMpIi8+CiAgPHRleHQgeD0iMzk2IiB5PSIyMjgiIGZpbGw9IiNhNzhiZmEiIGZvbnQtc2l6ZT0iNyIgdGV4dC1hbmNob3I9Im1pZGRsZSI+c2F2ZTwvdGV4dD4KCiAgPCEtLSBBcnJvdzogU3RhdGUgU3RvcmUgLT4gUGxhbiAocmVzdW1lKSAtLT4KICA8bGluZSB4MT0iNDIwIiB5MT0iMTE1IiB4Mj0iMzgyIiB5Mj0iMTA1IiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycjMpIiBzdHJva2UtZGFzaGFycmF5PSI0LDIiLz4KICA8dGV4dCB4PSIzOTYiIHk9IjEwNSIgZmlsbD0iI2E3OGJmYSIgZm9udC1zaXplPSI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5yZXN1bWU8L3RleHQ+CgogIDwhLS0gVGFzayBRdWV1ZSAtLT4KICA8cmVjdCB4PSI0MjAiIHk9IjI2MCIgd2lkdGg9IjE3NSIgaGVpZ2h0PSI4NSIgcng9IjgiIGZpbGw9IiMxYTJmMWEiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI1MDciIHk9IjI3OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiPlRhc2sgUXVldWU8L3RleHQ+CiAgPHRleHQgeD0iNTA3IiB5PSIyOTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4NmVmYWMiIGZvbnQtc2l6ZT0iOCI+d29ya2VyIHBvb2wgLyBqb2Igc2NoZWR1bGVyPC90ZXh0PgogIDx0ZXh0IHg9IjUwNyIgeT0iMzExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjODZlZmFjIiBmb250LXNpemU9IjgiPnJldHJ5ICsgYmFja29mZiBwb2xpY3k8L3RleHQ+CiAgPHRleHQgeD0iNTA3IiB5PSIzMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4NmVmYWMiIGZvbnQtc2l6ZT0iOCI+ZGVhZC1sZXR0ZXIgKyB0aW1lb3V0IHRyYWNraW5nPC90ZXh0PgogIDx0ZXh0IHg9IjUwNyIgeT0iMzM5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNjQ3NDhiIiBmb250LXNpemU9IjciPkNlbGVyeSAvIEJ1bGxNUSAvIFRlbXBvcmFsIC8gQVJRPC90ZXh0PgoKICA8IS0tIEFycm93OiBPcmNoZXN0cmF0b3IgLT4gVGFzayBRdWV1ZSAtLT4KICA8bGluZSB4MT0iMzgyIiB5MT0iMjk1IiB4Mj0iNDIwIiB5Mj0iMjk1IiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycjUpIi8+CiAgPHRleHQgeD0iNDAxIiB5PSIyODkiIGZpbGw9IiMzNGQzOTkiIGZvbnQtc2l6ZT0iNyIgdGV4dC1hbmNob3I9Im1pZGRsZSI+ZGlzcGF0Y2g8L3RleHQ+CgogIDwhLS0gRXh0ZXJuYWwgVG9vbHMgLS0+CiAgPHJlY3QgeD0iNjMwIiB5PSI1NSIgd2lkdGg9IjE3MCIgaGVpZ2h0PSIyOTAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNzE1IiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiPkV4dGVybmFsIFRvb2xzPC90ZXh0PgoKICA8cmVjdCB4PSI2NDUiIHk9Ijg4IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjI4IiByeD0iNSIgZmlsbD0iIzI5MjUyNCIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI3MTUiIHk9IjEwNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZiYmYyNCIgZm9udC1zaXplPSI5Ij5MTE0gQVBJIChDbGF1ZGUgLyBHUFQpPC90ZXh0PgoKICA8cmVjdCB4PSI2NDUiIHk9IjEyNCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMyOTI1MjQiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzE1IiB5PSIxNDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmYmJmMjQiIGZvbnQtc2l6ZT0iOSI+V2ViIEJyb3dzZSAvIFNlYXJjaDwvdGV4dD4KCiAgPHJlY3QgeD0iNjQ1IiB5PSIxNjAiIHdpZHRoPSIxNDAiIGhlaWdodD0iMjgiIHJ4PSI1IiBmaWxsPSIjMjkyNTI0IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjcxNSIgeT0iMTc5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmJiZjI0IiBmb250LXNpemU9IjkiPkNvZGUgRXhlYyAvIFNoZWxsPC90ZXh0PgoKICA8cmVjdCB4PSI2NDUiIHk9IjE5NiIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMyOTI1MjQiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzE1IiB5PSIyMTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmYmJmMjQiIGZvbnQtc2l6ZT0iOSI+RmlsZSAvIERhdGFiYXNlIFdyaXRlPC90ZXh0PgoKICA8cmVjdCB4PSI2NDUiIHk9IjIzMiIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMyOTI1MjQiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzE1IiB5PSIyNTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmYmJmMjQiIGZvbnQtc2l6ZT0iOSI+RW1haWwgLyBTbGFjayAvIFdlYmhvb2s8L3RleHQ+CgogIDxyZWN0IHg9IjY0NSIgeT0iMjY4IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjI4IiByeD0iNSIgZmlsbD0iIzFhMWEyZSIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI3MTUiIHk9IjI4NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5IdW1hbiBhcHByb3ZhbCBnYXRlPC90ZXh0PgoKICA8cmVjdCB4PSI2NDUiIHk9IjMwNCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIyOCIgcng9IjUiIGZpbGw9IiMxYTFhMmUiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzE1IiB5PSIzMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+TUNQIC8gdG9vbCByZWdpc3RyeTwvdGV4dD4KCiAgPCEtLSBBcnJvdzogRXhlY3V0ZSBUb29sIC0+IEV4dGVybmFsIFRvb2xzIC0tPgogIDxsaW5lIHgxPSI1OTUiIHkxPSIxNTUiIHgyPSI2MzAiIHkyPSIxNTUiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyNCkiLz4KICA8dGV4dCB4PSI2MTIiIHk9IjE0OCIgZmlsbD0iI2Y1OWUwYiIgZm9udC1zaXplPSI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5jYWxsPC90ZXh0PgoKICA8IS0tIEFycm93OiBFeHRlcm5hbCBUb29scyAtPiBPYnNlcnZlIFJlc3VsdCAtLT4KICA8bGluZSB4MT0iNjMwIiB5MT0iMTg1IiB4Mj0iNTk1IiB5Mj0iMTk2IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycjQpIiBzdHJva2UtZGFzaGFycmF5PSI0LDIiLz4KICA8dGV4dCB4PSI2MTIiIHk9IjIwMCIgZmlsbD0iI2Y1OWUwYiIgZm9udC1zaXplPSI3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5yZXN1bHQ8L3RleHQ+CgogIDwhLS0gRmF1bHQgVG9sZXJhbmNlIHRpbWVsaW5lIGJveCAtLT4KICA8cmVjdCB4PSIyMCIgeT0iMzYwIiB3aWR0aD0iNTkwIiBoZWlnaHQ9IjkwIiByeD0iOCIgZmlsbD0iIzBjMWEyZSIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzMTUiIHk9IjM4MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkZhdWx0IFRvbGVyYW5jZTogQ2hlY2twb2ludCBhbmQgUmVzdW1lPC90ZXh0PgoKICA8bGluZSB4MT0iNDUiIHkxPSI0MTUiIHgyPSI1OTAiIHkyPSI0MTUiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KCiAgPGNpcmNsZSBjeD0iODAiIGN5PSI0MTUiIHI9IjUiIGZpbGw9IiMzNGQzOTkiLz4KICA8dGV4dCB4PSI4MCIgeT0iNDMyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjciPlN0YXJ0PC90ZXh0PgoKICA8Y2lyY2xlIGN4PSIxNzUiIGN5PSI0MTUiIHI9IjUiIGZpbGw9IiNhNzhiZmEiLz4KICA8dGV4dCB4PSIxNzUiIHk9IjQzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2E3OGJmYSIgZm9udC1zaXplPSI3Ij5TdGVwIDMgZG9uZTwvdGV4dD4KCiAgPGNpcmNsZSBjeD0iMjcwIiBjeT0iNDE1IiByPSI1IiBmaWxsPSIjZjU5ZTBiIi8+CiAgPHRleHQgeD0iMjcwIiB5PSI0MzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtc2l6ZT0iNyI+Q1JBU0g8L3RleHQ+CiAgPGxpbmUgeDE9IjI3MCIgeTE9IjQwMCIgeDI9IjI3MCIgeTI9IjQyOCIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iMywyIi8+CgogIDxjaXJjbGUgY3g9IjM2NSIgY3k9IjQxNSIgcj0iNSIgZmlsbD0iIzM4YmRmOCIvPgogIDx0ZXh0IHg9IjM2NSIgeT0iNDMyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzhiZGY4IiBmb250LXNpemU9IjciPlJlc3RhcnQ8L3RleHQ+CgogIDxjaXJjbGUgY3g9IjQ2MCIgY3k9IjQxNSIgcj0iNSIgZmlsbD0iI2E3OGJmYSIvPgogIDx0ZXh0IHg9IjQ2MCIgeT0iNDMyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTc4YmZhIiBmb250LXNpemU9IjciPlJlc3VtZSBTdGVwIDQ8L3RleHQ+CgogIDxjaXJjbGUgY3g9IjU1NSIgY3k9IjQxNSIgcj0iNSIgZmlsbD0iIzM0ZDM5OSIvPgogIDx0ZXh0IHg9IjU1NSIgeT0iNDMyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjciPkNvbXBsZXRlPC90ZXh0PgoKICA8dGV4dCB4PSIzMTUiIHk9IjQ0OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzY0NzQ4YiIgZm9udC1zaXplPSI3Ij5TdGVwcyAxLTMgbm90IHJlLXJ1bi4gQWdlbnQgcmVzdW1lcyBmcm9tIGxhc3QgY2hlY2twb2ludC4gV2FsbC1jbG9jazogaG91cnMgdG8gZGF5cy48L3RleHQ+Cjwvc3ZnPgo=",
+          "alt": "Long-Running Agent Architecture: Client triggers Agent Orchestrator (plan, execute, observe, checkpoint loop) which saves to State Store and dispatches to Task Queue, while calling External Tools. Fault tolerance timeline shows checkpoint-and-resume after crash."
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The architecture separates four concerns: the "
+          },
+          { "type": "text", "text": "orchestrator", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " drives the reasoning loop; the " },
+          { "type": "text", "text": "state store", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " persists durable progress; the " },
+          { "type": "text", "text": "task queue", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " manages worker dispatch and retries; and " },
+          { "type": "text", "text": "external tools", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " provide the capabilities the agent acts on. This separation allows each component to be scaled, replaced, or maintained independently." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "When to use it" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Long-running agent architecture is appropriate when one or more of the following conditions apply:" }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Task duration exceeds 60–120 seconds", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": ", which is the typical maximum for synchronous HTTP handlers or serverless functions." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The task involves dozens or hundreds of steps", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " that accumulate context and artifacts across iterations." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The workflow includes human approval gates", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " or external wait conditions (file upload, payment, external API callback) where the agent must pause indefinitely." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Partial progress has value", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " — if the agent completes 80 out of 100 steps, that partial result is useful and should not be discarded on failure." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The environment is unreliable", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " — cloud spot instances, preemptible VMs, container orchestrators that evict pods, or CI environments with time limits." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Do not use this pattern for tasks that complete reliably in under 10 seconds and have no human-in-the-loop component. The state management overhead and asynchronous UX introduce complexity that is not justified for short-lived agents." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How to implement" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The following steps describe building a long-running agent from scratch using Python, Redis for state storage, and a simple job queue. Later sections show how purpose-built frameworks like Temporal simplify this considerably." }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Define the agent state schema.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Decide what information must be persisted between steps: the current step index, accumulated results, tool call history, and any intermediate artifacts. Use a versioned dataclass or Pydantic model so you can migrate in-flight agents when the schema changes." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Implement the checkpoint save and load functions.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Serialize the state to JSON and write it to an external store (Redis, Postgres, S3). Tag each checkpoint with a schema version number. On resume, deserialize and validate." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Implement the agent loop.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " The loop calls the LLM with the current context, executes the chosen tool, appends the result to state, checkpoints, and checks the termination condition." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Make every tool call idempotent.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Before executing a tool, check the state's tool call log: if this exact call (same tool, same arguments) was already completed in a prior run, return the cached result instead of re-executing." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Wrap the loop in a background worker or queue consumer.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " The agent should run asynchronously as a background job. The client receives a job ID, polls a status endpoint, or subscribes to a webhook for completion." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Add a heartbeat or progress reporting mechanism.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Update a \"last seen\" timestamp in the state store on every checkpoint. A monitoring process can detect stalled agents (no heartbeat for N minutes) and alert or retry." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Implement a context-window management strategy.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " As the agent accumulates step results, the LLM context window fills. Summarize older steps using the LLM itself, keeping only recent history and critical artifacts in the active context." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Examples" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Minimal checkpointing loop" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json\nimport time\nfrom dataclasses import dataclass, field, asdict\nfrom typing import Any\nimport redis\nimport anthropic\n\n# --- State schema ---\n\n@dataclass\nclass AgentState:\n    schema_version: int = 1\n    job_id: str = \"\"\n    goal: str = \"\"\n    step_index: int = 0\n    max_steps: int = 30\n    results: list[dict] = field(default_factory=list)\n    completed: bool = False\n    error: str | None = None\n\n# --- Checkpoint helpers ---\n\ndef save_checkpoint(r: redis.Redis, state: AgentState) -> None:\n    key = f\"agent:{state.job_id}:state\"\n    r.set(key, json.dumps(asdict(state)), ex=86400)  # TTL: 24 hours\n\ndef load_checkpoint(r: redis.Redis, job_id: str) -> AgentState | None:\n    key = f\"agent:{job_id}:state\"\n    data = r.get(key)\n    if data is None:\n        return None\n    return AgentState(**json.loads(data))\n\n# --- Agent loop ---\n\ndef run_agent(job_id: str, goal: str, redis_url: str = \"redis://localhost:6379\") -> str:\n    r = redis.from_url(redis_url)\n    client = anthropic.Anthropic()\n\n    # Resume from checkpoint if available, else start fresh\n    state = load_checkpoint(r, job_id) or AgentState(job_id=job_id, goal=goal)\n\n    while not state.completed and state.step_index < state.max_steps:\n        # Build context from accumulated results\n        context = f\"Goal: {state.goal}\\n\\nProgress so far:\\n\"\n        for r_item in state.results[-10:]:  # Keep last 10 to limit tokens\n            context += f\"Step {r_item['step']}: {r_item['summary']}\\n\"\n\n        response = client.messages.create(\n            model=\"claude-opus-4-5\",\n            max_tokens=512,\n            messages=[\n                {\n                    \"role\": \"user\",\n                    \"content\": (\n                        f\"{context}\\n\\nWhat is the next step to complete the goal? \"\n                        \"If the goal is complete, reply with DONE: followed by a summary.\"\n                    )\n                }\n            ]\n        )\n        reply = response.content[0].text\n\n        if reply.startswith(\"DONE:\"):\n            state.completed = True\n            state.results.append({\"step\": state.step_index, \"summary\": reply[5:].strip()})\n        else:\n            # Simulate tool execution (replace with real tool calls)\n            state.results.append({\"step\": state.step_index, \"summary\": reply[:200]})\n            state.step_index += 1\n\n        # Checkpoint after every step\n        save_checkpoint(r, state)\n        time.sleep(0.5)  # Rate-limit guard\n\n    if not state.completed:\n        state.error = \"Max steps reached without completing goal\"\n        save_checkpoint(r, state)\n\n    return state.results[-1][\"summary\"] if state.results else \"No result\"\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Idempotent tool execution with caching" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import hashlib\nimport json\nfrom typing import Callable, Any\n\ndef make_tool_key(tool_name: str, args: dict) -> str:\n    \"\"\"Create a stable cache key for a tool invocation.\"\"\"\n    payload = json.dumps({\"tool\": tool_name, \"args\": args}, sort_keys=True)\n    return hashlib.sha256(payload.encode()).hexdigest()[:16]\n\ndef execute_tool_idempotent(\n    tool_name: str,\n    args: dict,\n    tool_fn: Callable[..., Any],\n    tool_cache: dict[str, Any],  # persisted as part of agent state\n) -> Any:\n    \"\"\"\n    Execute a tool only if it has not already been run with these exact arguments.\n    Returns the cached result on retry, preventing double-writes or duplicate API calls.\n    \"\"\"\n    key = make_tool_key(tool_name, args)\n    if key in tool_cache:\n        print(f\"[cache hit] {tool_name}({args}) -> returning cached result\")\n        return tool_cache[key]\n\n    result = tool_fn(**args)\n    tool_cache[key] = result  # Cache before returning; state is checkpointed next\n    return result\n\n\n# Usage example\ndef send_email(to: str, subject: str, body: str) -> str:\n    \"\"\"Real email send — must not be called twice for the same step.\"\"\"\n    # ... actual email sending logic ...\n    return f\"Email sent to {to}\"\n\ntool_cache: dict[str, Any] = {}  # Loaded from / saved to checkpoint\n\nresult = execute_tool_idempotent(\n    \"send_email\",\n    {\"to\": \"user@example.com\", \"subject\": \"Report ready\", \"body\": \"Your report is attached.\"},\n    send_email,\n    tool_cache,\n)\n# If the agent crashes immediately after the tool call but before checkpointing,\n# on the next run the same call is a cache hit — the email is not re-sent.\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Context window management via rolling summary" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nMAX_ACTIVE_STEPS = 8  # Keep only the last N steps in context\n\ndef summarize_steps(steps: list[dict], client: anthropic.Anthropic) -> str:\n    \"\"\"\n    Summarize a batch of earlier steps into a compact description.\n    This prevents the context window from filling up on long-running tasks.\n    \"\"\"\n    if not steps:\n        return \"\"\n    steps_text = \"\\n\".join(f\"Step {s['step']}: {s['summary']}\" for s in steps)\n    response = client.messages.create(\n        model=\"claude-haiku-4-5\",\n        max_tokens=300,\n        messages=[\n            {\n                \"role\": \"user\",\n                \"content\": (\n                    f\"Summarize the following completed agent steps in 2-3 sentences, \"\n                    f\"preserving the key facts and outcomes:\\n\\n{steps_text}\"\n                )\n            }\n        ]\n    )\n    return response.content[0].text\n\ndef build_context(results: list[dict], archived_summary: str, client: anthropic.Anthropic) -> tuple[str, str]:\n    \"\"\"\n    Maintain a rolling window of recent steps. Older steps are summarized and archived.\n    Returns (active_context, updated_archive).\n    \"\"\"\n    if len(results) <= MAX_ACTIVE_STEPS:\n        active = results\n        archive = archived_summary\n    else:\n        # Summarize the oldest steps that overflow the window\n        overflow = results[:-MAX_ACTIVE_STEPS]\n        new_summary = summarize_steps(overflow, client)\n        archive = (archived_summary + \"\\n\" + new_summary).strip()\n        active = results[-MAX_ACTIVE_STEPS:]\n\n    context_parts = []\n    if archive:\n        context_parts.append(f\"[Earlier progress summary]\\n{archive}\")\n    context_parts.extend(\n        f\"Step {s['step']}: {s['summary']}\" for s in active\n    )\n    return \"\\n\\n\".join(context_parts), archive\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Real-world example" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Consider a competitive intelligence agent that monitors a list of 30 competitor websites and generates a weekly summary report. The agent must: fetch each competitor's changelog and blog, extract product announcements from the last 7 days using the LLM, deduplicate and cluster related announcements, draft a structured Markdown report, and email it to a distribution list. The full run takes 20–35 minutes for 30 competitors, involves 90–150 LLM calls, and must be restartable if a request times out or a scraping target blocks the IP."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json\nimport time\nfrom dataclasses import dataclass, field, asdict\nfrom datetime import datetime, timedelta\nimport redis\nimport anthropic\nimport httpx\n\n@dataclass\nclass CompIntelState:\n    schema_version: int = 2\n    job_id: str = \"\"\n    competitors: list[str] = field(default_factory=list)\n    processed: list[str] = field(default_factory=list)  # Competitors done\n    announcements: dict[str, list[str]] = field(default_factory=dict)  # competitor -> items\n    report_draft: str = \"\"\n    email_sent: bool = False\n    started_at: str = \"\"\n\nSTATE_TTL = 7 * 86400  # 7-day TTL; job runs weekly\n\ndef save(r: redis.Redis, state: CompIntelState) -> None:\n    r.set(f\"compintel:{state.job_id}\", json.dumps(asdict(state)), ex=STATE_TTL)\n    r.set(f\"compintel:{state.job_id}:heartbeat\", time.time(), ex=300)\n\ndef load(r: redis.Redis, job_id: str) -> CompIntelState | None:\n    data = r.get(f\"compintel:{job_id}\")\n    return CompIntelState(**json.loads(data)) if data else None\n\ndef fetch_competitor_content(url: str) -> str:\n    \"\"\"Fetch and return raw text content from a URL.\"\"\"\n    try:\n        response = httpx.get(url, follow_redirects=True, timeout=15)\n        response.raise_for_status()\n        return response.text[:8000]  # Limit to 8 KB to stay within token budget\n    except Exception as e:\n        return f\"[fetch error: {e}]\"\n\ndef extract_announcements(content: str, competitor: str, client: anthropic.Anthropic) -> list[str]:\n    \"\"\"Use LLM to extract product announcements from raw page content.\"\"\"\n    cutoff = (datetime.utcnow() - timedelta(days=7)).strftime(\"%Y-%m-%d\")\n    response = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=600,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": (\n                f\"Extract product announcements, feature releases, and major updates \"\n                f\"from the following content for {competitor} that were published after {cutoff}. \"\n                f\"Return as a JSON list of strings (empty list if none found).\\n\\n{content}\"\n            )\n        }]\n    )\n    try:\n        return json.loads(response.content[0].text)\n    except json.JSONDecodeError:\n        return []\n\ndef run_compintel_agent(\n    job_id: str,\n    competitors: list[str],\n    recipient_email: str,\n    redis_url: str = \"redis://localhost:6379\"\n) -> str:\n    r = redis.from_url(redis_url)\n    client = anthropic.Anthropic()\n\n    state = load(r, job_id) or CompIntelState(\n        job_id=job_id,\n        competitors=competitors,\n        started_at=datetime.utcnow().isoformat(),\n    )\n\n    # Phase 1: Process each competitor (skip already done)\n    for competitor_url in state.competitors:\n        if competitor_url in state.processed:\n            continue  # Resume: skip already-processed competitors\n\n        content = fetch_competitor_content(competitor_url)\n        items = extract_announcements(content, competitor_url, client)\n        state.announcements[competitor_url] = items\n        state.processed.append(competitor_url)\n        save(r, state)  # Checkpoint after each competitor\n        time.sleep(1)  # Polite crawl delay\n\n    # Phase 2: Draft the report (skip if already drafted)\n    if not state.report_draft:\n        all_items = [\n            f\"{url}: {item}\"\n            for url, items in state.announcements.items()\n            for item in items\n        ]\n        response = client.messages.create(\n            model=\"claude-opus-4-5\",\n            max_tokens=2000,\n            messages=[{\n                \"role\": \"user\",\n                \"content\": (\n                    \"Write a concise competitive intelligence weekly summary as a Markdown report \"\n                    f\"covering the following announcements:\\n\\n\" + \"\\n\".join(all_items)\n                )\n            }]\n        )\n        state.report_draft = response.content[0].text\n        save(r, state)\n\n    # Phase 3: Send email (idempotent — skip if already sent)\n    if not state.email_sent:\n        # send_email(recipient_email, \"Weekly Competitive Intelligence\", state.report_draft)\n        state.email_sent = True\n        save(r, state)\n        print(f\"Report emailed to {recipient_email}\")\n\n    return state.report_draft\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Checkpointing only at the end.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " If the agent runs for 20 minutes and checkpoints only on completion, a crash at minute 19 restarts the entire job. Checkpoint after every step or every LLM call." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Non-idempotent side effects.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " An agent that sends an email or writes to a database on every retry without a deduplication guard will produce duplicate effects. Cache or idempotency-key every side-effecting tool call." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Storing the full context window in the checkpoint.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " After 50 steps, the active context may be 20,000 tokens. Serializing and deserializing this on every checkpoint is slow and produces enormous state payloads. Store only structured step results; reconstruct the LLM messages array from them at resume time." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "No maximum step guard.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " An agent without a step limit or time budget can loop forever if the LLM never converges on a termination signal. Always enforce a hard cap on iterations and elapsed time." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Silent state schema breakage.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Renaming a field in the checkpoint dataclass without migration logic causes deserialization errors on resume. Version the schema explicitly and write a migration function for every breaking change." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "No heartbeat monitoring.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " An agent that crashes after step 3 with no monitoring can sit silently in a \"running\" state for days with no alert. Track a heartbeat timestamp and alert when it goes stale." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use a purpose-built durable execution framework", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " (Temporal, Inngest, Restate) for production agents rather than rolling your own checkpoint logic. These frameworks handle state persistence, retries, timeouts, and versioning correctly and have been battle-tested at scale." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Design checkpoints as append-only logs.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Instead of overwriting a single state blob, append each step's result to an event log. This makes debugging, replay, and audit straightforward, and avoids race conditions on concurrent writes." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Separate planning from execution.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " The LLM call (plan) and the tool invocation (execute) should be distinct, checkpointed steps. If the tool call fails, you can retry it without re-consulting the LLM; if the LLM call fails, you can retry it without re-executing side effects." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Emit structured events for observability.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Log every step as a structured event with job ID, step index, tool name, latency, and outcome. This enables dashboards, latency analysis, and failure-rate tracking without custom instrumentation." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use exponential backoff with jitter for tool retries.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Transient failures (rate limits, network timeouts) are common. Retry with backoff rather than failing the entire job immediately. Log retried attempts for debugging." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Set explicit resource budgets.",  "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Each job should have a maximum token budget, maximum step count, and maximum wall-clock duration. When any limit is reached, checkpoint the partial result and fail gracefully rather than running indefinitely." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Performance & scalability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The primary performance concern for long-running agents is "
+          },
+          { "type": "text", "text": "checkpoint I/O latency", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": ". If checkpointing takes 200ms per step and the agent runs 200 steps, 40 seconds of total runtime is spent on checkpoint writes. Use a fast in-memory store (Redis) for checkpoint writes and a slower durable store (Postgres, S3) for archival copies. Write to Redis synchronously and flush to the durable store asynchronously." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Context window management becomes a scaling bottleneck after roughly 50 steps. Each LLM call grows linearly in cost as the context accumulates. Strategies to control this: (1) summarize old steps with a cheaper model like claude-haiku, keeping only the summary in context; (2) use a retrieval-augmented approach where step results are stored in a vector database and only the top-k relevant results are injected into the current prompt; (3) store artifacts (files, database records) externally and reference them by ID in the context, rather than embedding their full content."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For horizontal scalability, run multiple agent workers in parallel against the same task queue. Each worker picks up an independent job; they do not share state. Parallelism is bounded by the LLM provider's rate limit, not by the agent infrastructure itself. If a single job has parallelizable sub-tasks (e.g., processing 100 documents independently), implement fan-out: the orchestrator spawns 100 child jobs, each with its own durable state, and polls for their completion before merging results."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Tooling & ecosystem" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Tool / Platform" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Category" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Key features" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best for" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Temporal", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Durable execution engine" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Workflow-as-code, automatic replay, signals, child workflows, cron" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Production multi-step agents with complex branching" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Inngest" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Durable step execution" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "step.run(), step.sleep(), built-in retries, serverless-compatible" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Next.js / serverless agents with low infra overhead" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Celery + Redis" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Task queue" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Mature Python ecosystem, retry policies, scheduled tasks" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Python shops needing simple async task execution" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ARQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Async job queue (Python)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "asyncio-native, Redis-backed, lightweight" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Async Python agents needing simple job queues" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Restate" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Durable execution engine" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Journal-based, GRPC-native, low-latency, supports virtual objects" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High-throughput, latency-sensitive agentic services" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Prefect / Dagster" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Data workflow orchestrator" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "DAG-based, rich UI, artifact tracking, data-aware scheduling" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "ETL / data-pipeline agents with structured DAGs" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "LangGraph" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Agent framework" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Graph-based agent state machine, built-in persistence, streaming" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "LangChain users building stateful multi-step agents" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Comparison with alternatives" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Approach" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Durability" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Max duration" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Complexity" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best for" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Long-running agent (checkpointed)", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Full — resumes from last checkpoint" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Days to weeks" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Multi-step, fault-sensitive, human-in-loop tasks" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Synchronous request-response agent" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "None — restarts from scratch" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "30–120 seconds" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Simple, fast, atomic tasks" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Serverless function chain" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Per-function — no cross-function state" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "15 minutes per function" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medium" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Linear pipelines with independent steps" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Batch job (script)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "None without custom logic" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Unbounded (process-level)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Offline, non-interactive data processing" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Durable execution (Temporal/Restate)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Full — framework handles persistence" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Unlimited" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medium" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Production agents requiring minimal operational code" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Security & reliability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Long-running agents introduce security concerns that do not apply to short-lived request handlers. Because the agent runs for extended periods with accumulated context and broad tool permissions, the attack surface is larger and the consequence of a compromise is proportionally greater."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Prompt injection via tool output.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " An agent that reads external content (web pages, emails, documents) and injects it into the LLM context is vulnerable to adversarial content that redirects the agent's actions. Sanitize external content before injecting it into prompts; consider a secondary LLM call that extracts only structured data before feeding it to the orchestrator." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Least-privilege tool access.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Grant the agent only the tool permissions required for the specific task. An agent that must read a database should not have write access. Scope API keys to the minimum necessary endpoints." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Checkpoint encryption at rest.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " State blobs may contain API keys, PII, or sensitive business data accumulated during the run. Encrypt checkpoint data at rest using the storage provider's encryption or an application-layer key." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Job-level authentication and authorization.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Each job should be associated with the identity of the initiating user. When the agent resumes, verify that the job's credentials are still valid (API keys not rotated, user account not deprovisioned) before proceeding." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Rate limiting and cost controls.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " A runaway agent that loops indefinitely can exhaust LLM API quotas or incur unbounded costs. Enforce per-job token budgets and per-job cost ceilings at the infrastructure level, not only in the agent code." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Stale job cleanup.", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": " Jobs that failed without cleanup leave orphaned state in the store. Set TTLs on all checkpoint keys and run a periodic cleanup job that marks stale jobs (no heartbeat for 24 hours) as failed and removes their state after the retention window expires." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "A long-running agent is defined by durable state: progress is checkpointed to external storage after each step so the agent can resume from where it stopped after any failure or restart." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The plan-act-observe-checkpoint loop is the core execution model. The checkpoint write after each iteration is the safety boundary that converts a fragile script into a durable agent." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Every tool call with a side effect must be idempotent or guarded by a deduplication key. On resume, the agent re-attempts only the step that failed — but that step may re-invoke the same tool if it was not cached." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Context window growth is the dominant scaling bottleneck. Use rolling summarization (summarize older steps with a cheaper model) or retrieval-augmented context injection to keep LLM input costs linear rather than quadratic." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Purpose-built durable execution frameworks (Temporal, Inngest, Restate) are strongly preferred over hand-rolled checkpoint logic for production systems. They handle replay, schema evolution, retries, and timing correctly." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Security surface increases with run duration: prompt injection via tool output, stale credentials, accumulated sensitive data in state, and runaway cost are the primary risks to address in long-running agent deployments." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Always enforce hard limits: maximum step count, token budget, and wall-clock timeout. These are safety nets that prevent infinite loops and unbounded API costs regardless of what the LLM decides to do." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
