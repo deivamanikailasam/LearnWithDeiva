@@ -1,6 +1,5 @@
 {
   "format": "tiptap/v1",
-  "updatedAt": "2026-06-22T17:44:00.819Z",
   "doc": {
     "type": "doc",
     "content": [
@@ -9,7 +8,20 @@
         "content": [
           {
             "type": "text",
-            "text": "The event loop is asyncio's scheduler — it runs coroutines, dispatches I/O completion callbacks, and manages timers. Every async agent handler, streaming LLM consumer, and background heartbeat task ultimately runs on an event loop. Misusing the loop blocks every concurrent agent session on that worker."
+            "text": "Concurrent AI agents, streaming LLM responses, parallel tool calls, and background health checks all share a single operating system thread in Python's async runtime. The mechanism that makes this possible — scheduling thousands of concurrent operations without threads or processes — is the "
+          },
+          {
+            "type": "text",
+            "text": "event loop",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". Understanding how the loop works, what blocks it, and how to keep it healthy is the foundation of writing reliable async agent systems."
           }
         ]
       },
@@ -30,7 +42,7 @@
         "content": [
           {
             "type": "text",
-            "text": "The "
+            "text": "An "
           },
           {
             "type": "text",
@@ -43,7 +55,129 @@
           },
           {
             "type": "text",
-            "text": " repeatedly: waits for I/O or timeouts, resumes ready coroutines, runs callbacks until idle. "
+            "text": " is a scheduler that runs inside a single OS thread. It maintains a queue of ready coroutines and a set of pending I/O interests, then iterates in a tight cycle: run all ready callbacks, ask the OS which I/O descriptors are ready (via "
+          },
+          {
+            "type": "text",
+            "text": "select",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "/"
+          },
+          {
+            "type": "text",
+            "text": "epoll",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "/"
+          },
+          {
+            "type": "text",
+            "text": "kqueue",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "), fire the callbacks for those descriptors, advance any expired timers, and repeat. Python's standard implementation lives in the "
+          },
+          {
+            "type": "text",
+            "text": "asyncio",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " module; third-party replacements such as "
+          },
+          {
+            "type": "text",
+            "text": "uvloop",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " swap in a faster libuv-backed loop with the same interface."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every "
+          },
+          {
+            "type": "text",
+            "text": "async def",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " function (a coroutine) yields control back to the loop whenever it hits an "
+          },
+          {
+            "type": "text",
+            "text": "await",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " expression. The loop records where to resume the coroutine once the awaited operation completes and immediately moves on to the next ready task. From the outside, thousands of coroutines appear to run simultaneously; internally, only one runs at a time, interleaved at every "
+          },
+          {
+            "type": "text",
+            "text": "await",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " point."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The loop is not a background thread: it occupies the calling thread completely while running. Scripts create and destroy a loop with "
           },
           {
             "type": "text",
@@ -56,7 +190,7 @@
           },
           {
             "type": "text",
-            "text": " creates a loop for scripts; uvicorn/FastAPI manage a loop for agent servers."
+            "text": ". Long-running servers (FastAPI, aiohttp, Starlette) have their ASGI runner (uvicorn, Hypercorn) own the loop for the lifetime of the process."
           }
         ]
       },
@@ -77,7 +211,38 @@
         "content": [
           {
             "type": "text",
-            "text": "One blocking call on the loop freezes all async agent requests in that process. Long CPU work on the loop delays streaming token delivery. Understanding the loop explains why asyncio.to_thread and process pools exist."
+            "text": "Agent systems spend the overwhelming majority of their wall-clock time waiting: waiting for an LLM API to respond, waiting for a tool's HTTP endpoint, waiting for a database query, waiting for a vector search. Traditional multi-threaded designs handle this by blocking a thread per request — acceptable at tens of concurrent requests but expensive at thousands, because each thread consumes memory and scheduler overhead."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The event loop collapses all that waiting into a single thread. One agent worker can hold open thousands of in-flight LLM requests, process token stream chunks as they arrive, execute tool calls concurrently, and flush telemetry in the background — all with a single thread and near-zero coordination overhead."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The flip side is that any code that runs synchronously on the loop "
+          },
+          {
+            "type": "text",
+            "text": "blocks every other concurrent operation",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " for exactly as long as it runs. A 200 ms synchronous HTTP call, a blocking Redis client, or a slow JSON parse on a large LLM response pauses all other agent sessions on that worker. Understanding the loop is understanding why async discipline matters so much in production agent services."
           }
         ]
       },
@@ -113,7 +278,30 @@
                   },
                   {
                     "type": "text",
-                    "text": " — no locks for shared agent state in one worker"
+                    "text": " — thousands of in-flight operations share one thread, avoiding the memory and scheduling overhead of one thread per request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No lock contention",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — because only one coroutine runs at a time, shared state (agent context, conversation history, metrics counters) is safe to read/write between await points without mutexes."
                   }
                 ]
               }
@@ -136,7 +324,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — epoll/kqueue on Linux/macOS"
+                    "text": " — the OS-level selector (epoll on Linux, kqueue on macOS, IOCP on Windows) is used directly, yielding near-optimal I/O throughput."
                   }
                 ]
               }
@@ -150,7 +338,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Timers and tasks",
+                    "text": "First-class timers",
                     "marks": [
                       {
                         "type": "bold"
@@ -159,7 +347,118 @@
                   },
                   {
                     "type": "text",
-                    "text": " — heartbeats, step timeouts, scheduled retries"
+                    "text": " — "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.sleep()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "text": "call_later()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " integrate directly into the scheduling cycle, making retry back-off, heartbeats, and step timeouts trivial to implement."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Structured concurrency",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.gather()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "text": "TaskGroup",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ", and "
+                  },
+                  {
+                    "type": "text",
+                    "text": "wait_for()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " let coroutines be composed, raced, and cancelled with well-defined semantics."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Deterministic interleaving",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — execution switches between coroutines only at explicit await points, making it much easier to reason about the order of events than with preemptive threads."
                   }
                 ]
               }
@@ -190,7 +489,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "One thread",
+                    "text": "CPU-bound work blocks the loop",
                     "marks": [
                       {
                         "type": "bold"
@@ -199,7 +498,7 @@
                   },
                   {
                     "type": "text",
-                    "text": " — CPU-bound work must be offloaded"
+                    "text": " — computation-heavy steps (embedding large documents, parsing enormous JSON payloads, running a local model inference) hold the thread and freeze every concurrent agent session. Offloading to a thread or process pool adds complexity."
                   }
                 ]
               }
@@ -213,7 +512,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Nested loops",
+                    "text": "Single-core only",
                     "marks": [
                       {
                         "type": "bold"
@@ -222,7 +521,128 @@
                   },
                   {
                     "type": "text",
-                    "text": " — generally one loop per thread; avoid asyncio.run inside async app"
+                    "text": " — one event loop uses one CPU core. Scaling to multiple cores requires multiple processes (e.g. uvicorn with multiple workers or multiprocessing)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "\"Coloured functions\" problem",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — every caller of an async function must also be async (or explicitly bridge via "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.run()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " / "
+                  },
+                  {
+                    "type": "text",
+                    "text": "loop.run_until_complete()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "). Mixing sync and async code at boundaries requires care."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Error propagation complexity",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — unhandled exceptions in detached tasks (created with "
+                  },
+                  {
+                    "type": "text",
+                    "text": "create_task",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " without a reference) are silently dropped unless an exception handler is attached."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Nested loop restriction",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — only one event loop can run per OS thread. Calling "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.run()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " inside a running loop raises a RuntimeError; libraries must use await-compatible APIs throughout."
                   }
                 ]
               }
@@ -250,19 +670,191 @@
         "content": [
           {
             "type": "text",
-            "text": "Loop lifecycle in scripts"
+            "text": "The run-loop iteration"
           }
         ]
       },
       {
-        "type": "codeBlock",
-        "attrs": {
-          "language": "python"
-        },
+        "type": "paragraph",
         "content": [
           {
             "type": "text",
-            "text": "import asyncio\n\nasync def main():\n    await agent.run(\"task\")\n\nif __name__ == \"__main__\":\n    asyncio.run(main())"
+            "text": "Each iteration of the event loop performs the following steps in order:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run all ready callbacks",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — any coroutine that was previously paused at an await point and whose awaitable has now completed is placed in the ready queue. The loop drains this queue completely before moving on."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Poll for I/O",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the loop calls the OS selector ("
+                  },
+                  {
+                    "type": "text",
+                    "text": "select()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " / "
+                  },
+                  {
+                    "type": "text",
+                    "text": "epoll_wait()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ") with a timeout equal to the time until the nearest pending timer fires. The OS returns a list of file descriptors (sockets, pipes) that have data ready."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Dispatch I/O callbacks",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — for each ready descriptor, the loop calls the registered callback, which typically resumes a waiting coroutine."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fire expired timers",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — coroutines awaiting "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.sleep()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " or explicit "
+                  },
+                  {
+                    "type": "text",
+                    "text": "call_later()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " are moved to the ready queue."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Repeat",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the loop continues until it is stopped or until the top-level coroutine completes."
+                  }
+                ]
+              }
+            ]
           }
         ]
       },
@@ -274,19 +866,90 @@
         "content": [
           {
             "type": "text",
-            "text": "Scheduling tasks"
+            "text": "Coroutine suspension and resumption"
           }
         ]
       },
       {
-        "type": "codeBlock",
-        "attrs": {
-          "language": "python"
-        },
+        "type": "paragraph",
         "content": [
           {
             "type": "text",
-            "text": "async def poll_run_status(run_id: str):\n    while True:\n        status = await store.get_status(run_id)\n        if status.done:\n            break\n        await asyncio.sleep(1)\n\nasync def start_run():\n    run_id = await create_run()\n    asyncio.create_task(poll_run_status(run_id))\n    return run_id"
+            "text": "When a coroutine executes "
+          },
+          {
+            "type": "text",
+            "text": "await some_future",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", the Python runtime suspends the coroutine and passes control back to the loop. The loop records the (future, coroutine) pair. When the future's result is set — typically by an I/O callback — the loop schedules the coroutine to resume by placing it in the ready queue. On the next iteration the coroutine picks up exactly where it left off, with the awaited value available."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This mechanism is built on Python generators: "
+          },
+          {
+            "type": "text",
+            "text": "async def",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " functions compile to coroutine objects whose "
+          },
+          {
+            "type": "text",
+            "text": "send()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " method advances execution up to the next "
+          },
+          {
+            "type": "text",
+            "text": "yield",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " point. "
+          },
+          {
+            "type": "text",
+            "text": "asyncio",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " uses this at its core, though the generator layer is hidden from application code."
           }
         ]
       },
@@ -298,19 +961,187 @@
         "content": [
           {
             "type": "text",
-            "text": "Running blocking code safely"
+            "text": "I/O multiplexing under the hood"
           }
         ]
       },
       {
-        "type": "codeBlock",
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The loop wraps a platform-specific selector: "
+          },
+          {
+            "type": "text",
+            "text": "EpollSelector",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " on Linux, "
+          },
+          {
+            "type": "text",
+            "text": "KqueueSelector",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " on macOS, "
+          },
+          {
+            "type": "text",
+            "text": "IocpProactor",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " on Windows. When an async socket send or receive is initiated, the loop registers the socket's file descriptor with the selector and suspends the calling coroutine. The selector efficiently monitors thousands of descriptors simultaneously using a kernel data structure (a red-black tree for epoll), so the wait costs essentially O(1) regardless of the number of monitored sockets."
+          }
+        ]
+      },
+      {
+        "type": "heading",
         "attrs": {
-          "language": "python"
+          "level": 3
         },
         "content": [
           {
             "type": "text",
-            "text": "loop = asyncio.get_running_loop()\nresult = await loop.run_in_executor(None, sync_blocking_tool, arg)"
+            "text": "Task and Future objects"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "asyncio.Task",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " wraps a coroutine in a Future-like object. Scheduling a task with "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.create_task()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " queues it for immediate execution in the current iteration. The task runs until its first "
+          },
+          {
+            "type": "text",
+            "text": "await",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " point, suspends, and the loop moves to the next ready task. "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.gather()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " collects multiple tasks and returns a future that resolves when all of them complete, propagating the first exception unless "
+          },
+          {
+            "type": "text",
+            "text": "return_exceptions=True",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is set."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows the four major sources of work that feed the event loop — the ready queue, the OS I/O poller, the timer heap, and registered callbacks — and how the loop dispatches and re-registers work between each of them. The thread/process executor sits outside the loop thread and posts results back via thread-safe callbacks."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNTIwIiB2aWV3Qm94PSIwIDAgODIwIDUyMCI+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSI1MjAiIGZpbGw9IiMwZjE3MmEiIHJ4PSIxMiIvPgoKICA8IS0tIFRpdGxlIC0tPgogIDx0ZXh0IHg9IjQxMCIgeT0iMzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTUiCiAgICAgICAgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNlMmU4ZjAiPlB5dGhvbiBhc3luY2lvIOKAlCBFdmVudCBMb29wIEFyY2hpdGVjdHVyZTwvdGV4dD4KCiAgPCEtLSDilIDilIAgRXZlbnQgTG9vcCBjZW50cmUgY2lyY2xlIOKUgOKUgCAtLT4KICA8Y2lyY2xlIGN4PSI0MTAiIGN5PSIyNzAiIHI9IjcyIiBmaWxsPSIjMWUzYTVmIiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMi41Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSIyNjMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTMiCiAgICAgICAgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM5M2M1ZmQiPkV2ZW50PC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iMjgxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEzIgogICAgICAgIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjOTNjNWZkIj5Mb29wPC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iMjk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIgogICAgICAgIGZpbGw9IiM2NDc0OGIiPmFzeW5jaW88L3RleHQ+CgogIDwhLS0g4pSA4pSAIFJlYWR5IFF1ZXVlICh0b3AtbGVmdCkg4pSA4pSAIC0tPgogIDxyZWN0IHg9IjYwIiB5PSIxMDAiIHdpZHRoPSIxNzAiIGhlaWdodD0iNzYiIHJ4PSI4IiBmaWxsPSIjMTcyNTU0IiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTQ1IiB5PSIxMjMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiCiAgICAgICAgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM5M2M1ZmQiPlJlYWR5IFF1ZXVlPC90ZXh0PgogIDx0ZXh0IHg9IjE0NSIgeT0iMTQzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIgogICAgICAgIGZpbGw9IiM5NGEzYjgiPkNvcm91dGluZXMgd2hvc2U8L3RleHQ+CiAgPHRleHQgeD0iMTQ1IiB5PSIxNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiCiAgICAgICAgZmlsbD0iIzk0YTNiOCI+YXdhaXQgcmVzb2x2ZWQ8L3RleHQ+CgogIDwhLS0g4pSA4pSAIEkvTyBQb2xsZXIgKGJvdHRvbS1sZWZ0KSDilIDilIAgLS0+CiAgPHJlY3QgeD0iNjAiIHk9IjM2MCIgd2lkdGg9IjE3MCIgaGVpZ2h0PSI3NiIgcng9IjgiIGZpbGw9IiMxNzI1NTQiIHN0cm9rZT0iIzA2YjZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIxNDUiIHk9IjM4MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIKICAgICAgICBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzY3ZThmOSI+SS9PIFBvbGxlcjwvdGV4dD4KICA8dGV4dCB4PSIxNDUiIHk9IjQwMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIKICAgICAgICBmaWxsPSIjOTRhM2I4Ij5lcG9sbCAvIGtxdWV1ZSAvPC90ZXh0PgogIDx0ZXh0IHg9IjE0NSIgeT0iNDE3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIgogICAgICAgIGZpbGw9IiM5NGEzYjgiPklPQ1AgKE9TIGtlcm5lbCk8L3RleHQ+CgogIDwhLS0g4pSA4pSAIFRpbWVyIEhlYXAgKHRvcC1yaWdodCkg4pSA4pSAIC0tPgogIDxyZWN0IHg9IjU5MCIgeT0iMTAwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9Ijc2IiByeD0iOCIgZmlsbD0iIzE3MjU1NCIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjY3NSIgeT0iMTIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEyIgogICAgICAgIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjYzRiNWZkIj5UaW1lciBIZWFwPC90ZXh0PgogIDx0ZXh0IHg9IjY3NSIgeT0iMTQzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIgogICAgICAgIGZpbGw9IiM5NGEzYjgiPmFzeW5jaW8uc2xlZXAoKSAvPC90ZXh0PgogIDx0ZXh0IHg9IjY3NSIgeT0iMTU4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIgogICAgICAgIGZpbGw9IiM5NGEzYjgiPmNhbGxfbGF0ZXIoKTwvdGV4dD4KCiAgPCEtLSDilIDilIAgVGFzayAvIENhbGxiYWNrIFBvb2wgKGJvdHRvbS1yaWdodCkg4pSA4pSAIC0tPgogIDxyZWN0IHg9IjU5MCIgeT0iMzYwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9Ijc2IiByeD0iOCIgZmlsbD0iIzE3MjU1NCIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjY3NSIgeT0iMzgzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEyIgogICAgICAgIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmNkMzRkIj5DYWxsYmFja3M8L3RleHQ+CiAgPHRleHQgeD0iNjc1IiB5PSI0MDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiCiAgICAgICAgZmlsbD0iIzk0YTNiOCI+YWRkX2RvbmVfY2FsbGJhY2sgLzwvdGV4dD4KICA8dGV4dCB4PSI2NzUiIHk9IjQxNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIKICAgICAgICBmaWxsPSIjOTRhM2I4Ij5jYWxsX3Nvb24oKTwvdGV4dD4KCiAgPCEtLSDilIDilIAgRXhlY3V0b3IgKGJvdHRvbS1jZW50cmUpIOKUgOKUgCAtLT4KICA8cmVjdCB4PSIzMTAiIHk9IjQzMCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI1OCIgcng9IjgiIGZpbGw9IiMxYzE5MTciIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjQ1NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIKICAgICAgICBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzZlZTdiNyI+VGhyZWFkL1Byb2Nlc3MgRXhlY3V0b3I8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSI0NzMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiCiAgICAgICAgZmlsbD0iIzk0YTNiOCI+cnVuX2luX2V4ZWN1dG9yIC8gdG9fdGhyZWFkPC90ZXh0PgoKICA8IS0tIOKUgOKUgCBBcnJvd3Mg4pSA4pSAIC0tPgogIDwhLS0gUmVhZHkgUXVldWUg4oaSIExvb3AgKHJ1biBuZXh0IGNvcm8pIC0tPgogIDxsaW5lIHgxPSIyMzAiIHkxPSIxMzgiIHgyPSIzMzgiIHkyPSIyNDUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIxLjgiIG1hcmtlci1lbmQ9InVybCgjYXJyb3ctYmx1ZSkiLz4KICA8dGV4dCB4PSIyNjIiIHk9IjE5NCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjBhNWZhIj5ydW4gbmV4dDwvdGV4dD4KCiAgPCEtLSBMb29wIOKGkiBSZWFkeSBRdWV1ZSAoc2NoZWR1bGUpIC0tPgogIDxsaW5lIHgxPSIzNDAiIHkxPSIyMjAiIHgyPSIyMjUiIHkyPSIxNDgiIHN0cm9rZT0iIzYwYTVmYSIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjQgMyIgbWFya2VyLWVuZD0idXJsKCNhcnJvdy1ibHVlLWQpIi8+CgogIDwhLS0gSS9PIFBvbGxlciDihpIgTG9vcCAoZmQgcmVhZHkpIC0tPgogIDxsaW5lIHgxPSIyMzAiIHkxPSIzODAiIHgyPSIzMzgiIHkyPSIzMDAiIHN0cm9rZT0iIzA2YjZkNCIgc3Ryb2tlLXdpZHRoPSIxLjgiIG1hcmtlci1lbmQ9InVybCgjYXJyb3ctY3lhbikiLz4KICA8dGV4dCB4PSIyMzgiIHk9IjM0MCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjdlOGY5Ij5mZCByZWFkeTwvdGV4dD4KCiAgPCEtLSBMb29wIOKGkiBJL08gUG9sbGVyIChyZWdpc3RlciBmZCkgLS0+CiAgPGxpbmUgeDE9IjMzOCIgeTE9IjMxMCIgeDI9IjIyNSIgeTI9IjM4OCIgc3Ryb2tlPSIjNjdlOGY5IiBzdHJva2Utd2lkdGg9IjEuMiIgc3Ryb2tlLWRhc2hhcnJheT0iNCAzIiBtYXJrZXItZW5kPSJ1cmwoI2Fycm93LWN5YW4tZCkiLz4KICA8dGV4dCB4PSIyNDgiIHk9IjM2NSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjdlOGY5Ij5yZWdpc3RlciBmZDwvdGV4dD4KCiAgPCEtLSBUaW1lciBIZWFwIOKGkiBMb29wICh0aW1lciBmaXJlZCkgLS0+CiAgPGxpbmUgeDE9IjU5MCIgeTE9IjEzOCIgeDI9IjQ4MiIgeTI9IjI0NSIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEuOCIgbWFya2VyLWVuZD0idXJsKCNhcnJvdy1wdXJwbGUpIi8+CiAgPHRleHQgeD0iNTE2IiB5PSIxOTEiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2M0YjVmZCI+dGltZXIgZmlyZWQ8L3RleHQ+CgogIDwhLS0gTG9vcCDihpIgVGltZXIgSGVhcCAtLT4KICA8bGluZSB4MT0iNDgwIiB5MT0iMjIwIiB4Mj0iNTkyIiB5Mj0iMTQ4IiBzdHJva2U9IiNjNGI1ZmQiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSI0IDMiIG1hcmtlci1lbmQ9InVybCgjYXJyb3ctcHVycGxlLWQpIi8+CgogIDwhLS0gQ2FsbGJhY2tzIOKGkiBMb29wIChlbnF1ZXVlIGNiKSAtLT4KICA8bGluZSB4MT0iNTkwIiB5MT0iMzkwIiB4Mj0iNDgyIiB5Mj0iMzA1IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS44IiBtYXJrZXItZW5kPSJ1cmwoI2Fycm93LWFtYmVyKSIvPgogIDx0ZXh0IHg9IjUxNiIgeT0iMzY1IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiNmY2QzNGQiPmVucXVldWUgY2I8L3RleHQ+CgogIDwhLS0gTG9vcCDihpIgQ2FsbGJhY2tzIC0tPgogIDxsaW5lIHgxPSI0ODAiIHkxPSIzMTUiIHgyPSI1OTIiIHkyPSIzODUiIHN0cm9rZT0iI2ZjZDM0ZCIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjQgMyIgbWFya2VyLWVuZD0idXJsKCNhcnJvdy1hbWJlci1kKSIvPgoKICA8IS0tIExvb3Ag4oaSIEV4ZWN1dG9yIChvZmZsb2FkKSAtLT4KICA8bGluZSB4MT0iNDEwIiB5MT0iMzQyIiB4Mj0iNDEwIiB5Mj0iNDMwIiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMS44IiBtYXJrZXItZW5kPSJ1cmwoI2Fycm93LWdyZWVuKSIvPgogIDx0ZXh0IHg9IjQyMCIgeT0iMzkzIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2ZWU3YjciPm9mZmxvYWQ8L3RleHQ+CiAgPCEtLSBFeGVjdXRvciDihpIgTG9vcCAocmVzdWx0KSAtLT4KICA8bGluZSB4MT0iMzk4IiB5MT0iNDMwIiB4Mj0iMzk4IiB5Mj0iMzQyIiBzdHJva2U9IiM2ZWU3YjciIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSI0IDMiIG1hcmtlci1lbmQ9InVybCgjYXJyb3ctZ3JlZW4tZCkiLz4KICA8dGV4dCB4PSIzNTAiIHk9IjQxNSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNmVlN2I3Ij5yZXN1bHQgY2I8L3RleHQ+CgogIDwhLS0gTGVnZW5kIC0tPgogIDxyZWN0IHg9IjU4MCIgeT0iMjQ0IiB3aWR0aD0iMjEwIiBoZWlnaHQ9IjcwIiByeD0iNiIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzM0MTU1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8bGluZSB4MT0iNTkyIiB5MT0iMjYyIiB4Mj0iNjE4IiB5Mj0iMjYyIiBzdHJva2U9IiNlMmU4ZjAiIHN0cm9rZS13aWR0aD0iMS44Ii8+CiAgPHRleHQgeD0iNjI2IiB5PSIyNjYiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2UyZThmMCI+ZGlzcGF0Y2ggLyByZXN1bWU8L3RleHQ+CiAgPGxpbmUgeDE9IjU5MiIgeTE9IjI4MCIgeDI9IjYxOCIgeTI9IjI4MCIgc3Ryb2tlPSIjZTJlOGYwIiBzdHJva2Utd2lkdGg9IjEuMiIgc3Ryb2tlLWRhc2hhcnJheT0iNCAzIi8+CiAgPHRleHQgeD0iNjI2IiB5PSIyODQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2UyZThmMCI+cmVnaXN0ZXIgLyBzY2hlZHVsZTwvdGV4dD4KICA8dGV4dCB4PSI1OTIiIHk9IjMwMyIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj5PbmUgT1MgdGhyZWFkLiBObyBHSUwgaXNzdWVzPC90ZXh0PgogIDx0ZXh0IHg9IjU5MiIgeT0iMzE1IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiPmZvciBwdXJlLWFzeW5jIEkvTy1ib3VuZCB3b3JrLjwvdGV4dD4KCiAgPCEtLSBEZWZzIGZvciBtYXJrZXJzIC0tPgogIDxkZWZzPgogICAgPG1hcmtlciBpZD0iYXJyb3ctYmx1ZSIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzNiODJmNiIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnJvdy1ibHVlLWQiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM2MGE1ZmEiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyb3ctY3lhbiIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzA2YjZkNCIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnJvdy1jeWFuLWQiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM2N2U4ZjkiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyb3ctcHVycGxlIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDgsMyB6IiBmaWxsPSIjYTc4YmZhIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycm93LXB1cnBsZS1kIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDgsMyB6IiBmaWxsPSIjYzRiNWZkIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycm93LWFtYmVyIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDgsMyB6IiBmaWxsPSIjZjU5ZTBiIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycm93LWFtYmVyLWQiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiNmY2QzNGQiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyb3ctZ3JlZW4iIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiMxMGI5ODEiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyb3ctZ3JlZW4tZCIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzZlZTdiNyIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgo8L3N2Zz4K",
+          "alt": "asyncio event loop architecture — ready queue, I/O poller, timer heap, callbacks, and thread executor"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key insight from the diagram: the event loop never waits idly. If all coroutines are suspended on I/O, the loop blocks in "
+          },
+          {
+            "type": "text",
+            "text": "epoll_wait()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (zero CPU) until the OS signals a descriptor ready. Only then does it consume CPU again. This is why async I/O scales so efficiently."
           }
         ]
       },
@@ -327,6 +1158,68 @@
         ]
       },
       {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use an async event loop as the runtime for any component that is primarily I/O-bound: agent orchestrators that fan out multiple LLM or tool API calls, streaming response proxies, WebSocket servers for real-time token delivery, background task queues that poll databases, and any service where request concurrency is more important than raw CPU throughput."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Do not",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " use a single-threaded event loop for CPU-bound workloads such as local model inference, large embedding batch computation, or image/video processing. These tasks should run in a separate thread pool ("
+          },
+          {
+            "type": "text",
+            "text": "asyncio.to_thread",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ") or a "
+          },
+          {
+            "type": "text",
+            "text": "ProcessPoolExecutor",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to avoid stalling the loop."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Decision criteria:"
+          }
+        ]
+      },
+      {
         "type": "bulletList",
         "content": [
           {
@@ -337,16 +1230,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Let the framework",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " manage the loop (uvicorn, FastAPI) in production"
+                    "text": "Use the event loop when operations spend >80% of time waiting for external responses."
                   }
                 ]
               }
@@ -360,16 +1244,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "asyncio.run",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " only at CLI/script entry"
+                    "text": "Offload to executor when a single operation needs >5–10 ms of pure CPU time."
                   }
                 ]
               }
@@ -383,20 +1258,325 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "create_task",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " for fire-and-forget background agent maintenance"
+                    "text": "Use multiple processes (not the loop alone) when you need to utilize multiple CPU cores."
                   }
                 ]
               }
             ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Let the ASGI framework (uvicorn, Hypercorn) own the loop in web services — do not create or close it manually."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1 — Entry point for scripts"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The cleanest entry point for a standalone async agent script is "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.run()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". It creates a new event loop, runs the top-level coroutine to completion, then closes the loop and cancels any lingering tasks."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\n\nasync def run_agent(prompt: str) -> str:\n    # Any async work here (LLM call, tool use, etc.)\n    result = await call_llm(prompt)\n    return result\n\nif __name__ == \"__main__\":\n    answer = asyncio.run(run_agent(\"Summarise the news today\"))\n    print(answer)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2 — Creating concurrent tasks"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.create_task()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to schedule a coroutine to run concurrently with the current one. Use "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.gather()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to fan out and collect results. Both patterns are fundamental to parallel tool calls."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nfrom typing import Any\n\nasync def call_tool(name: str, args: dict) -> Any:\n    # Simulate an async HTTP tool call\n    await asyncio.sleep(0.1)\n    return {\"tool\": name, \"result\": \"ok\"}\n\nasync def run_parallel_tools(tool_calls: list[dict]) -> list[Any]:\n    tasks = [\n        asyncio.create_task(call_tool(tc[\"name\"], tc[\"args\"]))\n        for tc in tool_calls\n    ]\n    # gather preserves order; raises on first exception by default\n    results = await asyncio.gather(*tasks)\n    return list(results)\n\nasync def main():\n    calls = [\n        {\"name\": \"web_search\", \"args\": {\"q\": \"asyncio\"}},\n        {\"name\": \"calculator\", \"args\": {\"expr\": \"2+2\"}},\n        {\"name\": \"read_file\", \"args\": {\"path\": \"/tmp/data.txt\"}},\n    ]\n    results = await run_parallel_tools(calls)\n    print(results)\n\nasyncio.run(main())\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3 — Background tasks with lifecycle management"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Background tasks (heartbeats, metric flushes, run-status pollers) should be created with "
+          },
+          {
+            "type": "text",
+            "text": "create_task",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and stored in a set. Attach a done callback to log exceptions and discard the reference, preventing silent failures and memory leaks."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio, logging\n\n_background_tasks: set[asyncio.Task] = set()\n\ndef spawn(coro):\n    \"\"\"Schedule a fire-and-forget background task with exception logging.\"\"\"\n    task = asyncio.create_task(coro)\n    _background_tasks.add(task)\n    task.add_done_callback(_handle_done)\n\ndef _handle_done(task: asyncio.Task):\n    _background_tasks.discard(task)\n    if not task.cancelled():\n        exc = task.exception()\n        if exc:\n            logging.error(\"Background task failed: %s\", exc, exc_info=exc)\n\nasync def heartbeat(agent_id: str):\n    while True:\n        await asyncio.sleep(30)\n        await post_heartbeat(agent_id)\n\nasync def main():\n    spawn(heartbeat(\"agent-42\"))\n    await run_agent_session()   # main work\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 4 — Offloading blocking work"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Blocking calls must never run directly on the loop thread. Use "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.to_thread()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (Python 3.9+) for simple cases, or a "
+          },
+          {
+            "type": "text",
+            "text": "ProcessPoolExecutor",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " for CPU-bound work that also bypasses the GIL."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nfrom concurrent.futures import ProcessPoolExecutor\nimport json\n\n_process_pool = ProcessPoolExecutor(max_workers=4)\n\ndef _parse_large_payload(raw: bytes) -> dict:\n    \"\"\"Runs in a worker process — safe to block.\"\"\"\n    return json.loads(raw)\n\nasync def parse_llm_response(raw: bytes) -> dict:\n    loop = asyncio.get_running_loop()\n    return await loop.run_in_executor(_process_pool, _parse_large_payload, raw)\n\nasync def slow_sync_tool(path: str) -> str:\n    \"\"\"Offload a blocking filesystem call to a thread pool.\"\"\"\n    return await asyncio.to_thread(open(path).read)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example 1 — Introductory: concurrent LLM calls with timeout"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This example shows the most common async pattern in agent code: launching several coroutines concurrently and collecting results within a wall-clock timeout."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio, random\n\nasync def fake_llm(prompt: str, latency: float) -> str:\n    \"\"\"Simulate an LLM API call that takes `latency` seconds.\"\"\"\n    await asyncio.sleep(latency)\n    return f\"[response to '{prompt}']\"\n\nasync def main():\n    prompts = [\"Translate to French\", \"Summarise\", \"Extract keywords\"]\n    latencies = [random.uniform(0.1, 0.5) for _ in prompts]\n\n    # All three calls run concurrently; total wall time ≈ max(latencies)\n    try:\n        results = await asyncio.wait_for(\n            asyncio.gather(\n                *[fake_llm(p, l) for p, l in zip(prompts, latencies)]\n            ),\n            timeout=2.0,  # overall deadline\n        )\n    except asyncio.TimeoutError:\n        print(\"Parallel LLM calls timed out\")\n        return\n\n    for prompt, result in zip(prompts, results):\n        print(f\"{prompt}: {result}\")\n\nasyncio.run(main())\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example 2 — Realistic: async agent with streaming output and background heartbeat"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A more production-like pattern: the agent streams token chunks to a client while a background task sends keep-alive pings, and a run-status poller notifies on completion. All three coroutines share the same event loop."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nfrom dataclasses import dataclass, field\nfrom typing import AsyncIterator\n\n@dataclass\nclass AgentRun:\n    run_id: str\n    done: asyncio.Event = field(default_factory=asyncio.Event)\n    result: str | None = None\n\nasync def stream_tokens(prompt: str) -> AsyncIterator[str]:\n    \"\"\"Simulate token-by-token streaming from an LLM.\"\"\"\n    words = f\"Response for: {prompt}\".split()\n    for word in words:\n        await asyncio.sleep(0.05)  # network latency between chunks\n        yield word + \" \"\n\nasync def heartbeat_loop(run: AgentRun, interval: float = 5.0):\n    \"\"\"Send keep-alive pings until the run completes.\"\"\"\n    while not run.done.is_set():\n        print(f\"  [heartbeat] run={run.run_id} still active\")\n        try:\n            await asyncio.wait_for(run.done.wait(), timeout=interval)\n        except asyncio.TimeoutError:\n            pass\n\nasync def status_poller(run: AgentRun):\n    \"\"\"Poll for completion every second (simulated).\"\"\"\n    for _ in range(20):\n        await asyncio.sleep(1)\n        if run.done.is_set():\n            print(f\"  [poller] run={run.run_id} finished: {run.result}\")\n            return\n    print(f\"  [poller] timed out waiting for run={run.run_id}\")\n\nasync def execute_run(run: AgentRun, prompt: str):\n    # Stream tokens (simulates sending to client WebSocket)\n    tokens = []\n    async for token in stream_tokens(prompt):\n        tokens.append(token)\n        print(token, end=\"\", flush=True)\n    run.result = \"\".join(tokens).strip()\n    run.done.set()\n\nasync def main():\n    run = AgentRun(run_id=\"run-001\")\n\n    # Three concurrent coroutines on one event loop\n    async with asyncio.TaskGroup() as tg:\n        tg.create_task(execute_run(run, \"explain event loops\"))\n        tg.create_task(heartbeat_loop(run))\n        tg.create_task(status_poller(run))\n\n    print(f\"\\nFinal result: {run.result}\")\n\nasyncio.run(main())\n"
           }
         ]
       },
@@ -417,7 +1597,67 @@
         "content": [
           {
             "type": "text",
-            "text": "Agent worker event loop concurrently: awaits LLM stream chunks, awaits three tool HTTP responses, sleeps for retry backoff, and runs a periodic metrics flush task — all interleaved without threads."
+            "text": "Consider a production agent API built on FastAPI and uvicorn. Each HTTP request triggers an agent run that may span multiple LLM calls (planning, tool use, reflection) and several external tool HTTP calls, while the same process concurrently handles dozens of other active sessions."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# agent_api.py — simplified FastAPI agent endpoint\nfrom fastapi import FastAPI, Request\nfrom fastapi.responses import StreamingResponse\nimport asyncio, httpx\n\napp = FastAPI()\n# Shared async HTTP client — reuses connection pool across all requests\nhttp_client = httpx.AsyncClient(timeout=30.0)\n\nasync def call_tool_api(tool_name: str, payload: dict) -> dict:\n    resp = await http_client.post(f\"https://tools.internal/{tool_name}\", json=payload)\n    resp.raise_for_status()\n    return resp.json()\n\nasync def run_agent_stream(prompt: str):\n    \"\"\"Yield SSE chunks. Runs on the uvicorn event loop.\"\"\"\n    # Step 1: parallel planning + context retrieval\n    plan, context = await asyncio.gather(\n        call_tool_api(\"planner\", {\"prompt\": prompt}),\n        call_tool_api(\"retriever\", {\"query\": prompt, \"k\": 5}),\n    )\n    yield f\"data: {{'step':'planned'}}\\n\\n\"\n\n    # Step 2: stream LLM response\n    async with http_client.stream(\"POST\", \"https://llm.internal/generate\",\n                                   json={\"plan\": plan, \"context\": context}) as r:\n        async for chunk in r.aiter_text():\n            yield f\"data: {chunk}\\n\\n\"\n\n    yield \"data: [DONE]\\n\\n\"\n\n@app.post(\"/agent/run\")\nasync def agent_run(request: Request):\n    body = await request.json()\n    return StreamingResponse(\n        run_agent_stream(body[\"prompt\"]),\n        media_type=\"text/event-stream\",\n    )\n\n# uvicorn agent_api:app --workers 4\n# Each worker has its own event loop; the shared http_client is per-worker.\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In this setup, uvicorn creates the event loop at worker startup. All requests share the same loop and the same "
+          },
+          {
+            "type": "text",
+            "text": "httpx.AsyncClient",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " connection pool. If one request's LLM call takes 8 seconds, all other requests continue unaffected — the loop services their I/O callbacks while the slow one awaits. A synchronous "
+          },
+          {
+            "type": "text",
+            "text": "requests.get()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " in place of "
+          },
+          {
+            "type": "text",
+            "text": "http_client.post()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " would block the loop for the full 8 seconds, stalling every other session."
           }
         ]
       },
@@ -434,76 +1674,98 @@
         ]
       },
       {
-        "type": "bulletList",
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
         "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Blocking the loop",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " — sync requests, time.sleep, heavy JSON parse on huge payloads"
-                  }
-                ]
-              }
-            ]
-          },
+            "type": "text",
+            "text": "Mistake 1 — Blocking the loop with synchronous calls"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "asyncio.run in async handler",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " — nested loop error"
-                  }
-                ]
-              }
-            ]
-          },
+            "type": "text",
+            "text": "# WRONG — blocks the entire event loop for the duration of the HTTP call\nimport requests\n\nasync def fetch_tool_result(url: str) -> dict:\n    resp = requests.get(url)      # sync! blocks the loop thread\n    return resp.json()\n\n# RIGHT — yields control during the network wait\nimport httpx\n\nasync def fetch_tool_result(url: str) -> dict:\n    async with httpx.AsyncClient() as client:\n        resp = await client.get(url)\n    return resp.json()\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
           {
-            "type": "listItem",
-            "content": [
-              {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "text",
-                    "text": "Un-awaited tasks",
-                    "marks": [
-                      {
-                        "type": "bold"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "text",
-                    "text": " — silent failures in background tasks"
-                  }
-                ]
-              }
-            ]
+            "type": "text",
+            "text": "Mistake 2 — Calling asyncio.run() inside a running loop"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG — raises RuntimeError: This event loop is already running\nasync def handler(request):\n    result = asyncio.run(some_coroutine())   # nested run!\n    return result\n\n# RIGHT — just await the coroutine directly\nasync def handler(request):\n    result = await some_coroutine()\n    return result\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mistake 3 — Unrooted tasks (fire-and-forget without error handling)"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG — exception is silently swallowed; task reference is garbage-collected\nasync def main():\n    asyncio.create_task(might_fail())   # no reference stored!\n\n# RIGHT — store the task reference and attach an error handler\n_tasks: set = set()\n\ndef spawn_safe(coro):\n    t = asyncio.create_task(coro)\n    _tasks.add(t)\n    t.add_done_callback(lambda t: (_tasks.discard(t),\n                                    t.exception() and logging.error(t.exception())))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mistake 4 — time.sleep() instead of asyncio.sleep()"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG — time.sleep blocks the OS thread, stalling all coroutines\nasync def retry_with_backoff():\n    import time\n    time.sleep(2)   # kills all concurrency for 2 seconds\n    await do_retry()\n\n# RIGHT\nasync def retry_with_backoff():\n    await asyncio.sleep(2)   # suspends only this coroutine; loop continues\n    await do_retry()\n"
           }
         ]
       },
@@ -530,7 +1792,42 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Monitor event loop lag (slow callback warnings)"
+                    "text": "Never call blocking APIs on the loop thread",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". Use "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.to_thread()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " for thread-safe blocking I/O (file reads, sync DB drivers) and "
+                  },
+                  {
+                    "type": "text",
+                    "text": "ProcessPoolExecutor",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " for CPU-bound work."
                   }
                 ]
               }
@@ -544,7 +1841,16 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Offload CPU/blocking to executor or ProcessPool"
+                    "text": "Let the framework own the loop",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". In uvicorn/FastAPI deployments, never call asyncio.run() or loop.run_until_complete() yourself — the server manages the loop lifecycle."
                   }
                 ]
               }
@@ -558,11 +1864,1469 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Use asyncio.create_task with explicit error logging"
+                    "text": "Store task references",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " and attach done callbacks that log exceptions. Detached tasks whose exceptions go unlogged are debugging nightmares."
                   }
                 ]
               }
             ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use TaskGroup (Python 3.11+) for structured concurrency",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". It cancels all sibling tasks on the first failure, preventing orphaned tasks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set timeouts on every external call",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " via "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.wait_for()",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " or httpx/aiohttp per-request timeouts. An LLM API with no timeout can hold a coroutine slot open indefinitely."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor loop lag",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". Instrument your service to measure the time between scheduling a callback and it actually running. Spikes indicate the loop is being blocked."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enable slow-callback warnings in development",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.get_event_loop().slow_callback_duration = 0.05",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " logs any callback that holds the loop for more than 50 ms."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reuse async clients",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". Creating a new "
+                  },
+                  {
+                    "type": "text",
+                    "text": "httpx.AsyncClient",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " per request wastes TCP connection setup time. Create one per process and share it."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Throughput characteristics"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single asyncio event loop can sustain tens of thousands of concurrent I/O-bound operations with low CPU usage. Benchmarks with httpx show a single Python process handling 5,000–20,000 concurrent outbound HTTP requests limited by OS socket buffers and network bandwidth, not the event loop itself. For agent workloads making 5–20 parallel LLM/tool calls per session, a single uvicorn worker can often sustain hundreds of concurrent sessions."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIL and CPU scaling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Python's Global Interpreter Lock (GIL) means only one thread runs Python bytecode at a time. For I/O-bound async code this is irrelevant — the loop spends most of its time in the C-level selector syscall, which releases the GIL. For CPU-bound work, the GIL prevents true parallelism even across threads. "
+          },
+          {
+            "type": "text",
+            "text": "ProcessPoolExecutor",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " bypasses the GIL by running in separate Python interpreter processes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To scale across CPU cores, run multiple uvicorn workers (one event loop per process) behind an nginx or load balancer. Kubernetes horizontal pod autoscaling based on CPU or request rate is the standard production approach."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "uvloop"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "uvloop",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is a drop-in replacement for asyncio's default event loop, built on libuv (the C library powering Node.js). It typically delivers 2–4x higher throughput for network-heavy workloads by replacing the Python selector layer with a highly optimised C implementation. Install with "
+          },
+          {
+            "type": "text",
+            "text": "pip install uvloop",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and enable with:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import uvloop\nasyncio.set_event_loop_policy(uvloop.EventLoopPolicy())\n# Or, with uvicorn:\n# uvicorn app:app --loop uvloop\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Avoiding head-of-line blocking"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even in async code, large synchronous sections can cause head-of-line blocking. Decompose long chains of awaits with an occasional "
+          },
+          {
+            "type": "text",
+            "text": "await asyncio.sleep(0)",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to voluntarily yield control and let other tasks run, especially in loops that process large batches of items."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def process_batch(items: list) -> list:\n    results = []\n    for i, item in enumerate(items):\n        results.append(process_item(item))   # synchronous per-item work\n        if i % 100 == 0:\n            await asyncio.sleep(0)   # yield every 100 items\n    return results\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "asyncio",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " (stdlib) — the standard event loop, task scheduler, and I/O primitives. Use for all async coordination logic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "uvloop",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — C-backed event loop, 2–4x faster than asyncio's default. Recommended for production agent servers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "httpx",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — async-first HTTP client with connection pooling, streaming, and timeout control. Preferred over aiohttp for new projects."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "aiohttp",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — mature async HTTP client/server; commonly found in existing agent codebases."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "aiobotocore / aiomysql / asyncpg",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — async drivers for AWS, MySQL, and PostgreSQL respectively. Essential for non-blocking database access in agents."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "anyio",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — compatibility shim that runs the same async code on asyncio or Trio. FastAPI and Starlette use anyio internally."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trio",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — alternative async runtime with a stronger structured-concurrency model; simpler task cancellation semantics but smaller ecosystem."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "uvicorn / Hypercorn",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — ASGI servers that manage the event loop for FastAPI / Starlette agent APIs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "asyncio-taskgroup (backport)",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — "
+                  },
+                  {
+                    "type": "text",
+                    "text": "asyncio.TaskGroup",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " backported to Python 3.10 for structured concurrency on older runtimes."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Monitoring the event loop in production:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Detect slow callbacks: log any that hold the loop >50 ms\nimport asyncio, logging\n\nloop = asyncio.get_event_loop()\nloop.slow_callback_duration = 0.05   # seconds\nloop.set_debug(True)   # enable all asyncio debug warnings\n\n# Prometheus / OpenTelemetry — measure event loop lag\nimport time\n\nasync def measure_loop_lag(histogram):\n    while True:\n        t0 = time.monotonic()\n        await asyncio.sleep(0)   # yield and immediately reschedule\n        lag = time.monotonic() - t0 - 0.0\n        histogram.observe(lag)\n        await asyncio.sleep(1)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The table below compares the asyncio event loop with other Python concurrency models relevant to building agent systems."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Concurrency model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Blocking call cost"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Complexity"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "asyncio event loop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cooperative (coroutines)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "I/O-bound: LLM APIs, tool calls, streaming"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1 core / loop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Stalls all tasks"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "threading.Thread"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Preemptive (OS threads)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Blocking libs without async API"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1 core (GIL)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Stalls 1 thread"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium-High"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "multiprocessing"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "True parallelism"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU-bound: embeddings, local inference"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "All cores"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Isolated"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Trio"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Structured async (nurseries)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Strict cancel semantics, teaching"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1 core / loop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Stalls all tasks"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "concurrent.futures"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Thread/process pool"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Offloading blocking work from async"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Varies"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Isolated in pool"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Node.js event loop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single-threaded async (JS)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "JS-based agent tools (LangChain.js)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1 core"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Stalls all tasks"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (single model)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cancellation safety"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Coroutines can be cancelled at any "
+          },
+          {
+            "type": "text",
+            "text": "await",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " point via "
+          },
+          {
+            "type": "text",
+            "text": "task.cancel()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", which injects an "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.CancelledError",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " into the coroutine. Agent code that holds resources (open files, DB transactions, lock-like state) must handle this with "
+          },
+          {
+            "type": "text",
+            "text": "try/finally",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "text": "asynccontextmanager",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to avoid leaking resources on cancellation."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def agent_step_with_cleanup(run_id: str):\n    lock_acquired = False\n    try:\n        await acquire_run_lock(run_id)\n        lock_acquired = True\n        result = await call_llm(\"next step\")\n        return result\n    finally:\n        # Always releases the lock, even on cancellation\n        if lock_acquired:\n            await release_run_lock(run_id)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Exception isolation between tasks"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "An unhandled exception in a detached task does not propagate to the parent coroutine. In agent systems this means a crashing background poller will not terminate the main agent session — but it also means failures go unnoticed unless explicitly handled. Use "
+          },
+          {
+            "type": "text",
+            "text": "TaskGroup",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " when you need exception propagation, and the spawn-with-callback pattern shown in the implementation section for true fire-and-forget tasks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Timeout hygiene"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Every outbound call in an agent — LLM API, tool HTTP, database — must have an explicit timeout. Without one, a hanging upstream service holds a coroutine slot open indefinitely. Accumulate enough of these and the process appears to hang, accepting new connections but never responding. Wrap external calls in "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.wait_for()",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " with per-call deadlines, and configure separate connect and read timeouts on HTTP clients."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Signal handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Graceful shutdown under SIGTERM requires flushing in-flight agent runs rather than hard-killing them. Register a signal handler that sets a shutdown event, waits for running tasks to complete (with a deadline), then stops the loop."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio, signal\n\nasync def serve(shutdown_event: asyncio.Event):\n    loop = asyncio.get_running_loop()\n    loop.add_signal_handler(signal.SIGTERM,\n                             lambda: shutdown_event.set())\n    await shutdown_event.wait()\n    # Drain active runs before exiting\n    active = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]\n    if active:\n        await asyncio.wait(active, timeout=30)\n"
           }
         ]
       },
@@ -583,9 +3347,34 @@
         "content": [
           {
             "type": "text",
-            "text": "The event loop is an air traffic controller for coroutines — it lands whichever plane (I/O) is ready next, never letting one long runway occupation idle everyone else if work can be interleaved."
+            "text": "Think of the event loop as an air-traffic controller at a single runway. Every coroutine is a plane wanting to use the runway to do some computation. When a plane needs to wait for fuel (I/O), the controller tells it to taxi to the apron and immediately clears the next plane for take-off. The controller never idles — as long as any plane is ready, it is landing or departing. The controller only waits when every single plane is sitting at the apron waiting for fuel."
           }
         ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The critical rule is that each plane must yield the runway voluntarily every time it encounters a wait. A plane that parks on the active runway (a blocking call) stops all other planes cold. The controller (the scheduler) cannot preempt it — there is only cooperative scheduling. Every "
+          },
+          {
+            "type": "text",
+            "text": "await",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " keyword is the pilot signalling \"I'm parking; someone else can use the runway.\""
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
       },
       {
         "type": "heading",
@@ -610,7 +3399,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "The event loop schedules all async agent work on one thread"
+                    "text": "The event loop runs on one OS thread and interleaves coroutines at every await point, enabling thousands of concurrent I/O operations without threads."
                   }
                 ]
               }
@@ -624,7 +3413,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Blocking the loop blocks every concurrent session"
+                    "text": "Any synchronous code that runs without awaiting — blocking HTTP calls, time.sleep(), heavy CPU work — stalls all other coroutines for its entire duration."
                   }
                 ]
               }
@@ -638,7 +3427,7 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "Use executors/to_thread for sync tools; let uvicorn own the loop in APIs"
+                    "text": "Use asyncio.to_thread() for blocking I/O libraries and ProcessPoolExecutor for CPU-bound work; never run these directly on the loop thread."
                   }
                 ]
               }
@@ -652,7 +3441,63 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "create_task for background polling; always handle task exceptions"
+                    "text": "Let the ASGI server (uvicorn, Hypercorn) own the event loop in web services; call asyncio.run() only at the top-level entry point of scripts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Store every create_task() reference and attach a done callback that logs exceptions; detached tasks silently swallow errors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set explicit timeouts on every outbound call (LLM API, tool HTTP, DB) to prevent coroutine slot exhaustion from hanging upstreams."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "uvloop replaces the default asyncio selector with a libuv-backed implementation, delivering 2-4x throughput gains in network-heavy agent servers with zero code changes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "asyncio.TaskGroup (Python 3.11+) provides structured concurrency: if any child task raises, all siblings are cancelled automatically, preventing orphaned background work."
                   }
                 ]
               }
