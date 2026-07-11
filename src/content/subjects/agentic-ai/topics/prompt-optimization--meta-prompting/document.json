@@ -1,1 +1,2527 @@
-{"format": "tiptap/v1", "doc": {"type": "doc", "content": [{"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "What it is"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompting is the practice of using one language model call — the "}, {"type": "text", "text": "meta-LLM", "marks": [{"type": "bold"}]}, {"type": "text", "text": " — to generate, refine, or optimize the instruction text (the prompt) that will drive a second LLM call on the actual task. Instead of writing a system prompt by hand, you describe the task in plain terms and let the model synthesize a precisely worded, structurally sound instruction."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The term is used in two related but distinct senses in the literature. In the narrow sense it means asking an LLM to write a prompt for another LLM, a one-shot operation. In the broader sense — the sense dominant in agentic-AI work — it refers to an automated optimization loop where candidate prompts are generated, evaluated against a held-out dataset, and iteratively refined by feeding the score and error analysis back to the meta-LLM. This document covers both senses, with emphasis on the loop-based form because that is what production agentic systems actually deploy."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompting is closely related to the concept of "}, {"type": "text", "text": "prompt optimization", "marks": [{"type": "bold"}]}, {"type": "text", "text": ", sometimes also called automatic prompt engineering (APE). The core insight is that natural-language gradients — a critique of why a prompt failed expressed in words — can substitute for the numerical gradient used in classical machine-learning optimization, because an LLM can read a critique and act on it."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Why it matters"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Hand-written prompts are brittle. Small wording changes can shift accuracy by 10–20 percentage points on structured tasks such as classification, extraction, or code generation. Finding the right phrasing is time-consuming, non-transferable between models, and does not scale when you need hundreds of specialized prompts for a multi-agent pipeline."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompting shifts prompt engineering from a manual craft to a measurable, repeatable process. You supply a task description and a labeled test set; the loop discovers a prompt that actually performs well on that distribution. The result is a prompt that is both human-readable (unlike a fine-tuned weight matrix) and model-agnostic enough to transfer across model versions with a re-run of the loop rather than a full re-engineering effort."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "In agentic pipelines where dozens of specialized sub-agents each need a tuned instruction, the economics are compelling: a one-time optimization run that costs a few API calls per sub-agent is cheaper than engineer time spent on empirical prompt tuning."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Benefits"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Measurable quality: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Optimization against a held-out evaluation set gives a concrete accuracy or score rather than a gut-feel estimate of prompt quality."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Scalable prompt authoring: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The same pipeline generates a prompt for a billing-triage agent and a code-review agent with equal effort — only the task description and examples change."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model-version resilience: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "When the underlying model is updated, re-running the optimization loop often recovers or improves performance without manual rework."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Non-obvious instruction discovery: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The meta-LLM can discover phrasings — role definitions, output-format constraints, chain-of-thought triggers — that a human engineer would not think to try."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Explainable artifacts: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The optimized prompt is a plain text string that engineers can read, audit, and manually override, unlike a fine-tuned model where the optimization result is opaque."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Separation of concerns: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Task specification (what you want) is kept separate from prompt specification (how to instruct the model), making each independently maintainable."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Trade-offs"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Extra API cost: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Each optimization round burns at least one meta-LLM call plus N task-LLM calls for scoring. For large validation sets or many rounds, costs accumulate fast."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Latency before first use: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The optimized prompt is not available until the loop converges, which may take minutes to hours depending on loop budget and API rate limits."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Evaluation set dependency: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The resulting prompt is only as good as the validation set. A poorly representative set leads to a prompt that scores well in-sample but fails in production."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Overfitting risk: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Running too many rounds on a small validation set can overfit the prompt to those exact examples, degrading generalization."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Complexity overhead: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Adding a meta-prompting layer introduces orchestration code, evaluation logic, and storage for prompt versions — not justified for simple one-off tasks."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompt quality ceiling: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The meta-LLM itself needs a well-specified input; a vague task description produces a vague generated prompt. Garbage in, garbage out still applies."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "How it works"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The fundamental loop has four components that execute in a cycle:"}]}, {"type": "orderedList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Candidate generation: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The meta-LLM receives the task description, optional few-shot examples, and — after the first round — the feedback from the previous round. It outputs one or more candidate prompts as plain text strings."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Execution: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Each candidate prompt is used as the system prompt (or user-turn prefix) for the task LLM, which is run against every item in the validation set."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Evaluation: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Each task output is scored against the ground-truth label. Scoring can use exact string match (for classification), a reference-based metric (BLEU, ROUGE, BERTScore), a unit-test suite (for code generation), or an LLM-as-judge that rates output quality on a rubric."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Feedback synthesis: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "The score and a sample of mislabeled or poorly-rated examples are converted into a natural-language feedback message that explains what went wrong. This message — a "}, {"type": "text", "text": "natural-language gradient", "marks": [{"type": "italic"}]}, {"type": "text", "text": " — is prepended to the next candidate-generation call."}]}]}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The loop terminates when a score threshold is reached, a maximum round count is exhausted, or the score stops improving across consecutive rounds (early stopping). The best-scoring candidate is selected and saved to a prompt library or configuration file for production use."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "A key design choice is whether to maintain a single evolving prompt or a population of candidates (as in PromptBreeder or evolutionary approaches). Population-based methods explore more of the search space but multiply API costs by the population size."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Architecture"}]}, {"type": "image", "attrs": {"src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDQwIiB2aWV3Qm94PSIwIDAgODIwIDQ0MCI+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhckIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjciIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiMzOGJkZjgiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJZIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI3IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDgsMyB6IiBmaWxsPSIjZjU5ZTBiIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFyRyIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNyIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzM0ZDM5OSIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhckdMIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSIxIiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNOCwwIEw4LDYgTDAsMyB6IiBmaWxsPSIjMzRkMzk5Ii8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFyWUwiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjEiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik04LDAgTDgsNiBMMCwzIHoiIGZpbGw9IiNmNTllMGIiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjQ0MCIgZmlsbD0iIzBmMTcyYSIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iMzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIj5NZXRhLVByb21wdGluZyBBcmNoaXRlY3R1cmUg4oCUIEF1dG9tYXRlZCBQcm9tcHQgT3B0aW1pemF0aW9uIExvb3A8L3RleHQ+CgogIDwhLS0gUk9XIDEgLS0+CiAgPCEtLSBUYXNrIElucHV0IGJveCAtLT4KICA8cmVjdCB4PSIxOCIgeT0iNjAiIHdpZHRoPSIxNDAiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9Ijg4IiB5PSI4OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM4YmRmOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiPlRhc2sgSW5wdXQ8L3RleHQ+CiAgPHRleHQgeD0iODgiIHk9IjEwNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+Z29hbCBkZXNjcmlwdGlvbjwvdGV4dD4KICA8dGV4dCB4PSI4OCIgeT0iMTIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiPmZldy1zaG90IGV4YW1wbGVzPC90ZXh0PgoKICA8IS0tIEFycm93IDEgLS0+CiAgPGxpbmUgeDE9IjE1OCIgeTE9IjEwMCIgeDI9IjIwOCIgeTI9IjEwMCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuOCIgbWFya2VyLWVuZD0idXJsKCNhckIpIi8+CgogIDwhLS0gTWV0YS1MTE0gYm94IC0tPgogIDxyZWN0IHg9IjIxMCIgeT0iNTUiIHdpZHRoPSIxNzAiIGhlaWdodD0iOTAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjI5NSIgeT0iODMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5NZXRhLUxMTTwvdGV4dD4KICA8dGV4dCB4PSIyOTUiIHk9IjEwMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+UHJvbXB0IEdlbmVyYXRvcjwvdGV4dD4KICA8dGV4dCB4PSIyOTUiIHk9IjExNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5zeW50aGVzaXplcyArIG9wdGltaXplczwvdGV4dD4KICA8dGV4dCB4PSIyOTUiIHk9IjEzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5pbnN0cnVjdGlvbiBjYW5kaWRhdGVzPC90ZXh0PgoKICA8IS0tIEFycm93IDIgLS0+CiAgPGxpbmUgeDE9IjM4MCIgeTE9IjEwMCIgeDI9IjQzMCIgeTI9IjEwMCIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuOCIgbWFya2VyLWVuZD0idXJsKCNhclkpIi8+CgogIDwhLS0gR2VuZXJhdGVkIFByb21wdCBib3ggLS0+CiAgPHJlY3QgeD0iNDMyIiB5PSI1NSIgd2lkdGg9IjE2NSIgaGVpZ2h0PSI5MCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNTE0IiB5PSI4MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiPkdlbmVyYXRlZDwvdGV4dD4KICA8dGV4dCB4PSI1MTQiIHk9Ijk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCI+UHJvbXB0PC90ZXh0PgogIDx0ZXh0IHg9IjUxNCIgeT0iMTE2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZTJlOGYwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiPnN0cnVjdHVyZWQgaW5zdHJ1Y3Rpb248L3RleHQ+CiAgPHRleHQgeD0iNTE0IiB5PSIxMzEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSI+KyBjaGFpbi1vZi10aG91Z2h0IGhpbnRzPC90ZXh0PgoKICA8IS0tIEFycm93IDMgLS0+CiAgPGxpbmUgeDE9IjU5NyIgeTE9IjEwMCIgeDI9IjY0NyIgeTI9IjEwMCIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuOCIgbWFya2VyLWVuZD0idXJsKCNhckcpIi8+CgogIDwhLS0gVGFzayBMTE0gYm94IC0tPgogIDxyZWN0IHg9IjY0OSIgeT0iNjAiIHdpZHRoPSIxNDgiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjcyMyIgeT0iODgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzOGJkZjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5UYXNrIExMTTwvdGV4dD4KICA8dGV4dCB4PSI3MjMiIHk9IjEwNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+ZXhlY3V0ZXMgcHJvbXB0PC90ZXh0PgogIDx0ZXh0IHg9IjcyMyIgeT0iMTIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiPnByb2R1Y2VzIHJlc3BvbnNlPC90ZXh0PgoKICA8IS0tIEFycm93IGRvd24gZnJvbSBUYXNrIExMTSAtLT4KICA8bGluZSB4MT0iNzIzIiB5MT0iMTQwIiB4Mj0iNzIzIiB5Mj0iMTk4IiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS44IiBtYXJrZXItZW5kPSJ1cmwoI2FyRykiLz4KCiAgPCEtLSBST1cgMiAtLT4KICA8IS0tIE91dHB1dCBib3ggLS0+CiAgPHJlY3QgeD0iNjU0IiB5PSIyMDAiIHdpZHRoPSIxMzgiIGhlaWdodD0iNzAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS44Ii8+CiAgPHRleHQgeD0iNzIzIiB5PSIyMjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNGQzOTkiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIj5PdXRwdXQ8L3RleHQ+CiAgPHRleHQgeD0iNzIzIiB5PSIyNDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiPnRhc2sgcmVzcG9uc2U8L3RleHQ+CiAgPHRleHQgeD0iNzIzIiB5PSIyNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSI+c2NvcmVkIGFnYWluc3QgZ3JvdW5kIHRydXRoPC90ZXh0PgoKICA8IS0tIEFycm93IGZyb20gT3V0cHV0IHRvIEV2YWx1YXRvciAtLT4KICA8bGluZSB4MT0iNjU0IiB5MT0iMjM1IiB4Mj0iNjIwIiB5Mj0iMjM1IiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS44IiBtYXJrZXItZW5kPSJ1cmwoI2FyR0wpIi8+CgogIDwhLS0gRXZhbHVhdG9yIGJveCAtLT4KICA8cmVjdCB4PSI0MzIiIHk9IjIwMCIgd2lkdGg9IjE4NSIgaGVpZ2h0PSI3MCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNTI0IiB5PSIyMjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5FdmFsdWF0b3I8L3RleHQ+CiAgPHRleHQgeD0iNTI0IiB5PSIyNDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSI+c2NvcmUgLyBjcml0aXF1ZSAvIHJ1YnJpYzwvdGV4dD4KICA8dGV4dCB4PSI1MjQiIHk9IjI2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5MTE0tYXMtanVkZ2Ugb3IgZXhhY3QgbWF0Y2g8L3RleHQ+CgogIDwhLS0gQXJyb3cgZnJvbSBFdmFsdWF0b3IgdG8gRmVlZGJhY2sgLS0+CiAgPGxpbmUgeDE9IjQzMiIgeTE9IjIzNSIgeDI9IjQwMCIgeTI9IjIzNSIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuOCIgbWFya2VyLWVuZD0idXJsKCNhcllMKSIvPgoKICA8IS0tIEZlZWRiYWNrIGJveCAtLT4KICA8cmVjdCB4PSIyMTAiIHk9IjIwMCIgd2lkdGg9IjE4OCIgaGVpZ2h0PSI3MCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjgiLz4KICA8dGV4dCB4PSIzMDQiIHk9IjIyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiPkZlZWRiYWNrIFNpZ25hbDwvdGV4dD4KICA8dGV4dCB4PSIzMDQiIHk9IjI0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5zY29yZSArIGVycm9yIGFuYWx5c2lzPC90ZXh0PgogIDx0ZXh0IHg9IjMwNCIgeT0iMjYwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiPm5hdHVyYWwtbGFuZ3VhZ2UgZ3JhZGllbnQ8L3RleHQ+CgogIDwhLS0gRGFzaGVkIGxvb3AgYXJyb3cgZnJvbSBGZWVkYmFjayB1cCB0byBNZXRhLUxMTSAtLT4KICA8cGF0aCBkPSJNMjk1LDIwMCBMMjk1LDE2NSBMMjk1LDE1MiIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuOCIgZmlsbD0ibm9uZSIgc3Ryb2tlLWRhc2hhcnJheT0iNiwzIiBtYXJrZXItZW5kPSJ1cmwoI2FyWSkiLz4KICA8dGV4dCB4PSIyMDAiIHk9IjE4MiIgZmlsbD0iI2Y1OWUwYiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5yZWZpbmUgJmFtcDsgaXRlcmF0ZTwvdGV4dD4KCiAgPCEtLSBDb252ZXJnZW5jZSBib3ggLS0+CiAgPHJlY3QgeD0iMTgiIHk9IjIwMCIgd2lkdGg9IjE3MiIgaGVpZ2h0PSI3MCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjgiLz4KICA8dGV4dCB4PSIxMDQiIHk9IjIyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiPkJlc3QgUHJvbXB0PC90ZXh0PgogIDx0ZXh0IHg9IjEwNCIgeT0iMjQ0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZTJlOGYwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiPmhpZ2hlc3Qtc2NvcmluZyBjYW5kaWRhdGU8L3RleHQ+CiAgPHRleHQgeD0iMTA0IiB5PSIyNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSI+c2F2ZWQgdG8gcHJvbXB0IGxpYnJhcnk8L3RleHQ+CgogIDwhLS0gQXJyb3cgZnJvbSBNZXRhLUxMTSBkb3duIHRvIEJlc3QgUHJvbXB0IChjb252ZXJnZW5jZSkgLS0+CiAgPHBhdGggZD0iTTIxMCwyMzUgTDE5MCwyMzUiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIG1hcmtlci1lbmQ9InVybCgjYXJHTCkiLz4KCiAgPCEtLSBMZWdlbmQgLS0+CiAgPHJlY3QgeD0iMTgiIHk9IjMwMCIgd2lkdGg9Ijc4NCIgaGVpZ2h0PSIxMjAiIHJ4PSI2IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzMzQxNTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iMzIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCI+S0VZIENPTkNFUFRTPC90ZXh0PgogIDx0ZXh0IHg9IjYwIiB5PSIzNDIiIGZpbGw9IiMzOGJkZjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIj5CbHVlPC90ZXh0PgogIDx0ZXh0IHg9Ijk1IiB5PSIzNDIiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiPiDigJQgSW5wdXQgLyBFeGVjdXRvciBub2RlczwvdGV4dD4KICA8dGV4dCB4PSIyOTAiIHk9IjM0MiIgZmlsbD0iI2Y1OWUwYiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkFtYmVyPC90ZXh0PgogIDx0ZXh0IHg9IjMzMCIgeT0iMzQyIiBmaWxsPSIjZTJlOGYwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIj4g4oCUIE9wdGltaXplciAvIEZlZWRiYWNrIG5vZGVzPC90ZXh0PgogIDx0ZXh0IHg9IjU2MCIgeT0iMzQyIiBmaWxsPSIjMzRkMzk5IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+R3JlZW48L3RleHQ+CiAgPHRleHQgeD0iNTk4IiB5PSIzNDIiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiPiDigJQgUHJvbXB0IC8gT3V0cHV0IG5vZGVzPC90ZXh0PgogIDxsaW5lIHgxPSIzNiIgeTE9IjM2MCIgeDI9IjcwIiB5Mj0iMzYwIiBzdHJva2U9IiNlMmU4ZjAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNzYiIHk9IjM2NCIgZmlsbD0iI2UyZThmMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+Rm9yd2FyZCBwYXNzIChkYXRhIGZsb3cpPC90ZXh0PgogIDxsaW5lIHgxPSIyNjAiIHkxPSIzNjAiIHgyPSIyOTQiIHkyPSIzNjAiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjUsMyIvPgogIDx0ZXh0IHg9IjMwMCIgeT0iMzY0IiBmaWxsPSIjZTJlOGYwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIj5GZWVkYmFjayBsb29wIChyZWZpbmVtZW50KTwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjM5NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5NZXRhLUxMTSByZWFkcyB0YXNrIGdvYWwgKyBwcmlvciBzY29yZSArIGVycm9ycywgdGhlbiBlbWl0cyBhIGJldHRlciBpbnN0cnVjdGlvbi4gTG9vcCBydW5zIE4gaXRlcmF0aW9ucyBvciB1bnRpbCBzY29yZSB0aHJlc2hvbGQgaXMgbWV0LjwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjQxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5Ij5CZXN0IGNhbmRpZGF0ZSBpcyBzZWxlY3RlZCBieSBoaWdoZXN0IGV2YWwgc2NvcmUgYW5kIHNhdmVkLiBGcmFtZXdvcmtzOiBEU1B5LCBUZXh0R3JhZCwgQVBFLCBQcm9tcHRCcmVlZGVyLjwvdGV4dD4KPC9zdmc+", "alt": "Meta-Prompting architecture diagram showing the automated prompt optimization loop: Task Input flows into Meta-LLM which generates a prompt that feeds the Task LLM producing output, which is evaluated and the feedback signal loops back to the Meta-LLM for refinement until the best prompt is found."}}, {"type": "paragraph", "content": [{"type": "text", "text": "The diagram above shows the full optimization loop. The "}, {"type": "text", "text": "Meta-LLM", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (amber, top-center) is the optimizer — it reads the task goal and any prior feedback and emits candidate prompts. The "}, {"type": "text", "text": "Task LLM", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (blue, top-right) is the executor — it runs the generated prompt against the validation inputs. The "}, {"type": "text", "text": "Evaluator", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (amber, bottom-center) scores the outputs and the "}, {"type": "text", "text": "Feedback Signal", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (amber, bottom-left) summarizes errors in natural language. The dashed arrow represents the refinement cycle. The final artifact is the "}, {"type": "text", "text": "Best Prompt", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (green, bottom-left), which is persisted and deployed."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "When to use it"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Structured classification or extraction tasks", "marks": [{"type": "bold"}]}, {"type": "text", "text": " where there is a measurable ground truth and the prompt needs to be correct for thousands of inputs."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Multi-agent pipelines", "marks": [{"type": "bold"}]}, {"type": "text", "text": " where each sub-agent needs a specialized, tuned instruction and writing all of them by hand would take prohibitive engineering time."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Model migration", "marks": [{"type": "bold"}]}, {"type": "text", "text": " — when you upgrade from one model version to another, re-running the optimization loop on the new model is faster than re-engineering each prompt manually."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prompt libraries", "marks": [{"type": "bold"}]}, {"type": "text", "text": " that need to be maintained at scale across many tasks, where manual quality checks become a bottleneck."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "When you have a labeled evaluation set", "marks": [{"type": "bold"}]}, {"type": "text", "text": " — even 20–50 labeled examples are enough to make the loop meaningful. Without evaluation data the loop has no signal to optimize against."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Research and experimentation", "marks": [{"type": "bold"}]}, {"type": "text", "text": " — comparing how different prompt styles (role-play vs. direct instruction vs. chain-of-thought) affect the same model gives quantitative insight."}]}]}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Avoid meta-prompting when the task is genuinely one-off, when you have no evaluation data whatsoever, or when the latency of the optimization pass is incompatible with your deployment timeline."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "How to implement"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "A minimal working implementation requires four things: a task description string, a labeled validation set, a meta-LLM call that produces candidate prompts, and a scoring function. The following steps outline the full production approach:"}]}, {"type": "orderedList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Define the task precisely.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Write a one- to three-paragraph task description that covers the goal, the input format, the output format, and any known edge cases. Vague descriptions produce vague prompts."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Build a validation set.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Collect 30–100 labeled examples covering the distribution you care about. Stratify by category if the task has categories. Split off a small holdout set that is never shown to the optimization loop to detect overfitting."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Choose your meta-LLM.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Use the largest model available (e.g., claude-opus-4-5) for candidate generation; it needs to understand meta-level prompt engineering. Use a cheaper model (e.g., claude-haiku-4-5) for the task execution during scoring to keep cost down."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Implement the scoring function.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " For classification: exact match accuracy. For generation: LLM-as-judge. For code: unit tests. Keep the scoring function deterministic where possible (use temperature=0 on the task LLM)."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Run the loop.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Start with one candidate per round. If the loop plateaus early, try generating 3–5 candidates per round and selecting the best (beam search over prompts)."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Apply early stopping.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " If the score does not improve by at least 1% across two consecutive rounds, stop. Running longer usually overfits the validation set."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Persist and version the prompt.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Save the best prompt as a plain text file in version control alongside the evaluation score and the validation set it was tested on. This enables reproducible re-optimization later."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Examples"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The following three code examples demonstrate: (1) a single meta-prompt call that generates an optimized system prompt, (2) a full iterative optimization loop with scoring, and (3) an LLM-as-judge evaluator used inside the loop."}]}, {"type": "codeBlock", "attrs": {"language": "python"}, "content": [{"type": "text", "text": "\"\"\"\nmeta_prompting_basic.py\nUse an LLM to generate an optimized system prompt for a target task,\nthen execute the task with that generated prompt.\n\"\"\"\n\nimport anthropic\n\nclient = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env\n\nTASK_DESCRIPTION = \"\"\"\nTask: Classify customer support tickets into one of these categories:\n  billing, technical, account, feature-request, other.\nInput: a raw ticket message (plain text).\nOutput: exactly one category label, nothing else.\n\"\"\"\n\nFEW_SHOT_EXAMPLES = \"\"\"\nTicket: \"I was charged twice this month\"  -> billing\nTicket: \"The app crashes when I upload a PDF\" -> technical\nTicket: \"Can I change my username?\" -> account\nTicket: \"Would love a dark mode option\" -> feature-request\n\"\"\"\n\nMETA_PROMPT = f\"\"\"\nYou are an expert prompt engineer. Your job is to write a precise system\nprompt for another language model that will perform the following task.\n\nTASK DESCRIPTION:\n{TASK_DESCRIPTION}\n\nEXAMPLE INPUT/OUTPUT PAIRS:\n{FEW_SHOT_EXAMPLES}\n\nRequirements for the system prompt you write:\n- Start with a role definition sentence.\n- Include the exact output format constraints (label only, no explanation).\n- Add a short chain-of-thought hint to improve accuracy.\n- Keep it under 150 words.\n\nOutput ONLY the system prompt text, nothing else.\n\"\"\"\n\n# Step 1: Meta-LLM generates the optimized system prompt\nmeta_response = client.messages.create(\n    model=\"claude-opus-4-5\",\n    max_tokens=300,\n    messages=[{\"role\": \"user\", \"content\": META_PROMPT}]\n)\ngenerated_system_prompt = meta_response.content[0].text\nprint(\"=== Generated System Prompt ===\")\nprint(generated_system_prompt)\nprint()\n\n# Step 2: Execute the task with the generated prompt\ntest_ticket = \"My account got locked and I cannot log in\"\ntask_response = client.messages.create(\n    model=\"claude-haiku-4-5\",\n    max_tokens=20,\n    system=generated_system_prompt,\n    messages=[{\"role\": \"user\", \"content\": test_ticket}]\n)\nprint(\"=== Task Output ===\")\nprint(task_response.content[0].text)\n"}]}, {"type": "codeBlock", "attrs": {"language": "python"}, "content": [{"type": "text", "text": "\"\"\"\nmeta_prompting_loop.py\nIterative prompt optimization: generate candidate prompts, score each\nagainst a labeled validation set, feed the best score back to the\nmeta-LLM, and refine until the score threshold is met or max rounds hit.\n\"\"\"\n\nimport anthropic\n\nclient = anthropic.Anthropic()\n\n# Labeled validation set (ground truth)\nVALIDATION_SET = [\n    (\"I was charged twice this month\", \"billing\"),\n    (\"The app crashes on iOS 17\", \"technical\"),\n    (\"How do I cancel my subscription?\", \"billing\"),\n    (\"Can I add a second admin user?\", \"account\"),\n    (\"Please add a bulk export feature\", \"feature-request\"),\n    (\"My login code never arrives by email\", \"technical\"),\n    (\"I need a VAT invoice for last quarter\", \"billing\"),\n    (\"App is very slow on my laptop\", \"technical\"),\n]\n\nTASK_DESC = (\n    \"Classify support tickets into: billing, technical, account, \"\n    \"feature-request, or other. Return exactly one label.\"\n)\n\n\ndef generate_prompt_candidate(meta_llm, task_desc, feedback=\"\"):\n    \"\"\"Ask the meta-LLM to produce an instruction string.\"\"\"\n    msg = f\"Task: {task_desc}\\n\"\n    if feedback:\n        msg += f\"\\nPrevious attempt feedback:\\n{feedback}\\nImprove the prompt accordingly.\"\n    else:\n        msg += \"\\nWrite a concise, accurate system prompt for this task.\"\n    resp = meta_llm.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=250,\n        messages=[{\"role\": \"user\", \"content\": msg}]\n    )\n    return resp.content[0].text.strip()\n\n\ndef score_prompt(task_llm, system_prompt, validation_set):\n    \"\"\"Return accuracy (0-1) of the prompt on the validation set.\"\"\"\n    correct = 0\n    errors = []\n    for ticket, expected in validation_set:\n        resp = task_llm.messages.create(\n            model=\"claude-haiku-4-5\",\n            max_tokens=10,\n            system=system_prompt,\n            messages=[{\"role\": \"user\", \"content\": ticket}]\n        )\n        predicted = resp.content[0].text.strip().lower()\n        if predicted == expected:\n            correct += 1\n        else:\n            errors.append(f\"'{ticket}' -> got '{predicted}', want '{expected}'\")\n    accuracy = correct / len(validation_set)\n    return accuracy, errors\n\n\ndef optimize_prompt(task_desc, validation_set, max_rounds=5, target_score=0.9):\n    best_prompt = \"\"\n    best_score = 0.0\n    feedback = \"\"\n\n    for round_num in range(1, max_rounds + 1):\n        print(f\"--- Round {round_num} ---\")\n        candidate = generate_prompt_candidate(client, task_desc, feedback)\n        score, errors = score_prompt(client, candidate, validation_set)\n        print(f\"Score: {score:.2%}  Errors: {len(errors)}\")\n\n        if score > best_score:\n            best_score = score\n            best_prompt = candidate\n\n        if score >= target_score:\n            print(\"Target score reached — stopping early.\")\n            break\n\n        # Build feedback for the next meta-LLM call\n        error_summary = \"\\n\".join(errors[:3])  # top 3 errors\n        feedback = (\n            f\"Score was {score:.2%}. Misclassified examples:\\n{error_summary}\\n\"\n            \"Fix the prompt to handle these cases.\"\n        )\n\n    return best_prompt, best_score\n\n\nbest, score = optimize_prompt(TASK_DESC, VALIDATION_SET)\nprint(f\"\\nBest prompt (score {score:.2%}):\\n{best}\")\n"}]}, {"type": "codeBlock", "attrs": {"language": "python"}, "content": [{"type": "text", "text": "\"\"\"\nllm_as_judge_evaluator.py\nAn LLM-as-judge evaluator used inside a meta-prompting loop.\nReturns a structured score + critique that the meta-LLM can act on.\n\"\"\"\n\nimport anthropic\nimport json\n\nclient = anthropic.Anthropic()\n\nJUDGE_SYSTEM = \"\"\"\nYou are an impartial evaluator. You will be given:\n1. A task description.\n2. A prompt under evaluation.\n3. The prompt's output on a test input.\n4. The expected correct output.\n\nRespond with a JSON object only, no markdown:\n{\n  \"score\": <0-10 integer>,\n  \"correct\": <true|false>,\n  \"critique\": \"<one sentence explaining the main issue, if any>\"\n}\n\"\"\"\n\n\ndef judge_output(task_desc, prompt_text, model_output, expected_output):\n    user_msg = json.dumps({\n        \"task\": task_desc,\n        \"prompt_under_test\": prompt_text,\n        \"model_output\": model_output,\n        \"expected_output\": expected_output,\n    }, indent=2)\n\n    resp = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=150,\n        system=JUDGE_SYSTEM,\n        messages=[{\"role\": \"user\", \"content\": user_msg}]\n    )\n    return json.loads(resp.content[0].text)\n\n\ndef aggregate_judgements(judgements):\n    \"\"\"Summarize a list of per-example judgement dicts into a single report.\"\"\"\n    avg_score = sum(j[\"score\"] for j in judgements) / len(judgements)\n    accuracy = sum(1 for j in judgements if j[\"correct\"]) / len(judgements)\n    critiques = [j[\"critique\"] for j in judgements if not j[\"correct\"]]\n    return {\n        \"avg_score\": round(avg_score, 2),\n        \"accuracy\": round(accuracy, 2),\n        \"top_critiques\": critiques[:3],\n    }\n\n\n# Example usage\nif __name__ == \"__main__\":\n    task = \"Classify support tickets into: billing, technical, account, feature-request, other.\"\n    prompt = \"You classify support tickets. Return one label: billing, technical, account, feature-request, or other.\"\n    test_cases = [\n        (\"I was charged twice\", \"billing\", \"billing\"),\n        (\"App keeps crashing\", \"technical\", \"technical\"),\n        (\"Add dark mode please\", \"feature-request\", \"other\"),   # simulated wrong output\n    ]\n\n    judgements = [\n        judge_output(task, prompt, model_out, expected)\n        for _, expected, model_out in test_cases\n    ]\n    report = aggregate_judgements(judgements)\n    print(json.dumps(report, indent=2))\n"}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Real-world example"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The paper "}, {"type": "text", "text": "Large Language Models Are Human-Level Prompt Engineers", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (Zhou et al., 2022) introduced APE (Automatic Prompt Engineer), which demonstrated that an LLM instructed to generate instruction candidates for few-shot benchmarks (like instruction induction tasks) could match or exceed human-written prompts on 24 of 24 tasks."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "DSPy", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (Khattab et al., 2023, Stanford) operationalized meta-prompting inside a full programming model. In DSPy you define your pipeline as a Python program using typed signatures ("}, {"type": "text", "text": "Predict", "marks": [{"type": "code"}]}, {"type": "text", "text": ", "}, {"type": "text", "text": "ChainOfThought", "marks": [{"type": "code"}]}, {"type": "text", "text": "). The DSPy optimizer ("}, {"type": "text", "text": "BootstrapFewShot", "marks": [{"type": "code"}]}, {"type": "text", "text": ", "}, {"type": "text", "text": "MIPRO", "marks": [{"type": "code"}]}, {"type": "text", "text": ") then runs meta-prompting under the hood: it generates few-shot demonstrations and instruction strings, evaluates each variant on your metric, and assembles the highest-scoring combination. The developer never writes raw prompts — the system engineers them."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "TextGrad", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (Yuksekgonul et al., 2024) extended meta-prompting into a framework that mirrors backpropagation but substitutes natural-language critiques for numerical gradients, enabling end-to-end optimization of multi-step LLM pipelines, not just single prompt strings."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "In production, Anthropic's own evaluation infrastructure uses meta-prompting to generate variants of grader prompts and select the highest-agreement variant, reducing the effort required to build reliable LLM-based evaluation pipelines."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Common mistakes"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Vague task description: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Providing a one-line task description leaves the meta-LLM guessing about output format, edge cases, and constraints. The generated prompt will be similarly underspecified."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No evaluation metric: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Running the loop without a concrete scoring function means you cannot compare candidates — the loop has no direction and you are just generating random prompts."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tiny or biased validation set: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "A set of five examples is not enough signal. Worse, if all examples come from one class or writing style, the optimized prompt will fail on the real distribution."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Running too many rounds: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Ten or more rounds on a small validation set almost always produces an overfit prompt. Three to five rounds is usually the sweet spot for most tasks."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Using the same model for meta and task: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Pointing both the meta-LLM and the task LLM at the same small model limits optimization quality. Use a capable model to generate and a cheaper model to score."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Not versioning the output: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Saving the generated prompt only in a notebook or chat window makes it impossible to re-produce the result or compare future loop runs."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Ignoring the holdout set: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Checking the optimized prompt only against the validation set used during optimization gives an inflated view of accuracy. Always test on a held-out set before deploying."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Best practices"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Include negative examples in the task description.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Showing the meta-LLM cases that should "}, {"type": "text", "text": "not", "marks": [{"type": "italic"}]}, {"type": "text", "text": " match a given label is as important as showing positive cases."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Stratify the validation set.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Make sure rare categories and edge cases are represented proportionally; otherwise the loop will optimize for the majority class."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use temperature=0 during scoring.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Deterministic task-LLM calls make the evaluation function stable across re-runs, which is necessary for comparing candidates reliably."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Limit candidate length.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Instruct the meta-LLM to keep generated prompts under 200 words. Longer prompts do not consistently outperform shorter ones and cost more tokens at inference time."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Log every candidate and its score.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Prompt optimization runs often surface insights about failure modes. The full history of candidates and scores is more valuable than just the winner."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Test the best prompt against an out-of-sample holdout.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Never deploy a prompt whose only evaluation is the set used during optimization. A 10–20% holdout is sufficient to detect gross overfitting."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Combine meta-prompting with few-shot examples.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " The loop can optimize not just the system instruction but also the selection and ordering of few-shot demonstrations, as DSPy's BootstrapFewShot shows."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Performance & scalability"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The dominant cost is the number of LLM calls per optimization run. For a loop of "}, {"type": "text", "text": "R", "marks": [{"type": "code"}]}, {"type": "text", "text": " rounds, "}, {"type": "text", "text": "K", "marks": [{"type": "code"}]}, {"type": "text", "text": " candidates per round, and a validation set of size "}, {"type": "text", "text": "N", "marks": [{"type": "code"}]}, {"type": "text", "text": ", the total task-LLM calls are "}, {"type": "text", "text": "R × K × N", "marks": [{"type": "code"}]}, {"type": "text", "text": " plus "}, {"type": "text", "text": "R × K", "marks": [{"type": "code"}]}, {"type": "text", "text": " meta-LLM calls. With R=5, K=3, N=50 this is 750 task calls and 15 meta calls — manageable with caching."}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Practical scalability strategies:"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cache task-LLM outputs: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "If the same prompt candidate is re-evaluated across rounds (e.g., you keep the best from round N in round N+1), cache the outputs keyed on (prompt_hash, input_hash). Anthropic's prompt caching ("}, {"type": "text", "text": "cache_control", "marks": [{"type": "code"}]}, {"type": "text", "text": " blocks) reduces cost on repeated system-prompt evaluations by 90%."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use a cheaper model for scoring: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "claude-haiku-4-5 costs a fraction of claude-opus-4-5. Running 500 validation calls on Haiku instead of Opus cuts scoring cost by 20–30×."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Parallel scoring: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Run all N validation inputs in parallel using async calls ("}, {"type": "text", "text": "asyncio", "marks": [{"type": "code"}]}, {"type": "text", "text": " + "}, {"type": "text", "text": "anthropic.AsyncAnthropic", "marks": [{"type": "code"}]}, {"type": "text", "text": ") — the evaluation of each example is independent."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Adaptive stopping: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "Stop the loop as soon as the score plateaus rather than running fixed rounds. A simple rule: stop if the best score does not improve by more than 0.01 across two consecutive rounds."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Distill the result: ", "marks": [{"type": "bold"}]}, {"type": "text", "text": "After optimization, the best prompt can be used as a fine-tuning target for a smaller model, capturing the optimization result in model weights for zero-marginal-inference-cost deployment."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Tooling & ecosystem"}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "DSPy"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The leading open-source meta-prompting framework. Developers write pipeline logic using typed module signatures; DSPy optimizers ("}, {"type": "text", "text": "BootstrapFewShot", "marks": [{"type": "code"}]}, {"type": "text", "text": ", "}, {"type": "text", "text": "MIPRO", "marks": [{"type": "code"}]}, {"type": "text", "text": ", "}, {"type": "text", "text": "BayesianSignatureOptimizer", "marks": [{"type": "code"}]}, {"type": "text", "text": ") automatically tune instructions and few-shot demonstrations. Works with any OpenAI-compatible or Anthropic endpoint."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "TextGrad"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Implements automatic differentiation through language model calls using natural-language gradients. Supports optimizing multi-node pipelines (not just single prompts) by propagating critiques backwards through the call graph, analogous to backpropagation."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "PromptBreeder"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Google DeepMind's evolutionary approach: maintains a population of mutation-prompt / task-prompt pairs and evolves them using crossover and mutation operators driven by the LLM, without requiring a fixed feedback format."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "APE (Automatic Prompt Engineer)"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The original academic implementation by Zhou et al. Generates a large set of instruction candidates by paraphrasing, scores them on few-shot benchmarks, and selects the top performer. Straightforward to adapt as a library."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "LangChain / LangGraph"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Do not include a built-in optimization loop but provide the scaffolding (LLM wrappers, chain composition, prompt templates) needed to build one. Community projects on top of LangChain implement APE-style loops."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Anthropic SDK utilities"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Prompt caching ("}, {"type": "text", "text": "cache_control", "marks": [{"type": "code"}]}, {"type": "text", "text": " on system prompts) and batched requests (the Batch API) both reduce the cost of running large validation sets, making optimization loops cheaper to operate on Claude models."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Comparison with alternatives"}]}, {"type": "table", "content": [{"type": "tableRow", "content": [{"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Approach", "marks": [{"type": "bold"}]}]}]}, {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cost", "marks": [{"type": "bold"}]}]}]}, {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Requires labeled data", "marks": [{"type": "bold"}]}]}]}, {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Output explainability", "marks": [{"type": "bold"}]}]}]}, {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Generalizes to new model", "marks": [{"type": "bold"}]}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompting (loop)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Medium (API calls)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (validation set)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High — plain text prompt"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Re-run loop"}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Hand-written prompting"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low (engineer time)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Manual rework"}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Few-shot prompting"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (examples only)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Usually transfers"}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Fine-tuning"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (GPU compute)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (large, labeled)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low — model weights"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "New fine-tune needed"}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "RAG (retrieval augmentation)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Medium (retrieval infra)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Partially"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Medium — retrieved chunks"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Usually transfers"}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Soft-prompt tuning"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (gradient compute)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes (large)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Very low — token embeddings"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No — model-specific"}]}]}]}, {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Human evaluation loop"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High (human labor)"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Yes"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Manual rework"}]}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Security & reliability"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompting introduces a class of risks that do not exist when prompts are authored by humans and reviewed before deployment."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Prompt injection in the meta-prompt input"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "If the task description or few-shot examples used to build the meta-prompt input come from untrusted user data, an attacker can embed instructions that redirect the meta-LLM to generate a malicious task prompt — for example, one that exfiltrates conversation history or bypasses guardrails. "}, {"type": "text", "text": "Always sanitize any user-controlled content before including it in a meta-prompt.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " Treat the meta-prompt input with the same care as a SQL query parameter."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Prompt drift and version mismatch"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Storing the optimized prompt only in a database without version control creates a risk of silent drift: the prompt is overwritten by a new optimization run but the change is not reviewed. Use git-tracked prompt files and require a human review before deploying a newly optimized prompt to production."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Evaluation gaming"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The optimization loop can find prompts that exploit weaknesses in the scoring function — for example, if an LLM-as-judge always rates confident-sounding answers highly, the optimized prompt may learn to sound confident rather than be correct. Diversify your evaluation metrics and use a holdout set that the judge was not calibrated on."}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Reliability of the meta-LLM"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "The meta-LLM can hallucinate prompt structures that look plausible but contain factually incorrect examples or contradictory constraints. Always run the generated prompt through your test suite before treating it as production-ready, regardless of its optimization score."}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pin the meta-LLM model version so a new deployment does not silently change how candidates are generated."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Log the full meta-prompt input and the generated prompt for every optimization run to support auditing."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Set a maximum prompt length limit on the meta-LLM output to prevent runaway verbosity that could cause context-length issues at inference time."}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Mental model"}]}, {"type": "blockquote", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Think of meta-prompting as gradient descent where the loss is your task score and the gradient is a plain-English critique.", "marks": [{"type": "bold"}]}, {"type": "text", "text": " You cannot differentiate through the tokenizer, so the meta-LLM reads the error analysis and proposes a better parameter — a better string of words — in the next iteration. The \"learning rate\" is how aggressively you change the prompt between rounds, and \"overfitting\" is the same problem it always is: optimizing so hard against one dataset that you lose generalization."}]}]}, {"type": "paragraph", "content": [{"type": "text", "text": "A useful companion mental model: the meta-LLM is a junior prompt engineer who has read every paper on prompting and can produce a technically correct first draft very quickly, but needs to see failing examples before it can close the gap to expert quality. Your job is to give it the right task description, the right examples, and the right feedback loop — not to write the final prompt yourself."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Key takeaways"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Meta-prompting uses an LLM to generate and iteratively refine the prompt used by a second LLM, replacing manual prompt engineering with a measurable optimization loop."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The loop requires a precise task description, a labeled validation set, and a scoring function; without all three the loop has no signal to optimize against."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Natural-language feedback (critique of errors) substitutes for a numerical gradient — the meta-LLM reads what went wrong and proposes a better instruction."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Overfit risk is real: run for 3–5 rounds, apply early stopping, and always evaluate the winning prompt on a held-out test set before deployment."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Cost is manageable: use a capable model to generate candidates and a cheap model with prompt caching to score them, plus async parallel evaluation of the validation set."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "DSPy, TextGrad, and APE are the dominant open-source implementations; all are compatible with the Anthropic API."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Security risk: never include raw user content in meta-prompt inputs without sanitization; an attacker can embed instructions that redirect the meta-LLM."}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The output artifact is a plain text string — readable, auditable, version-controllable, and model-agnostic — which distinguishes meta-prompting from fine-tuning and soft-prompt tuning."}]}]}]}, {"type": "horizontalRule"}]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Rather than crafting prompts by hand, meta-prompting delegates that job to the model itself: one LLM call produces the instructions that a second LLM call executes. This level of indirection transforms prompting from artisanal guesswork into a systematic, automatable engineering practice — and is foundational to modern automatic prompt optimization pipelines."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What It Is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Meta-prompting is a technique in which a language model is instructed to generate, critique, or refine a prompt that will be used to solve a downstream task. The term operates at two levels: the "
+          },
+          {
+            "type": "text",
+            "text": "meta-level",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (where a prompt is constructed or improved) and the "
+          },
+          {
+            "type": "text",
+            "text": "task level",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (where the constructed prompt is executed to produce a result). In the simplest form, a meta-prompt says something like: \"Write a system prompt that will make an LLM perform X as accurately as possible.\" A more sophisticated version includes an evaluation loop: the generated prompt is tested on sample inputs, scored, and the score is fed back to the meta-level LLM to produce a better prompt."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The concept spans several related but distinct patterns: single-pass meta-prompting (generate once), iterative meta-prompting (generate-evaluate-refine loop), self-play (same model at both levels), cross-model meta-prompting (different models at each level), and population-based search (sample many candidate prompts and select the best). All share the same core property: prompt content is treated as an optimizable variable, not as a fixed engineering artifact."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Manual prompt engineering is labor-intensive, brittle, and difficult to transfer across tasks. A prompt carefully tuned for one use case often degrades when the input distribution shifts, the underlying model is updated, or the task requirements evolve. Human engineers must re-invest significant effort every time, and the quality ceiling is limited by the engineer's own intuition about what the model responds to."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Meta-prompting addresses these issues by making the model itself the primary author of prompts. Models have been trained on vastly more examples of effective prompts than any individual human has written. They can generate dozens of candidate phrasings, critique their own outputs, and systematically explore variations that a human would not think to try. When paired with an objective evaluation function — even an LLM-as-judge — this creates a search process over prompt space that is both scalable and task-adaptive."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In production agentic systems, meta-prompting enables agents to adapt their own instructions based on feedback, bootstrap specialized sub-agent prompts from high-level task descriptions, and continuously improve performance without requiring engineering intervention."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reduced manual effort",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Engineers describe the task goal at a high level; the model generates the detailed prompt, eliminating hours of trial-and-error tuning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scalability across tasks",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": The same meta-prompting harness can generate optimized prompts for hundreds of distinct sub-tasks in a pipeline without per-task manual engineering."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exploits model self-knowledge",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": The model is aware of its own strengths and failure modes and can incorporate that awareness into the prompts it writes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Automatic adaptation",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": When model versions or task distributions change, the meta-prompting loop can re-run to regenerate prompts appropriate for the new context without human re-intervention."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt interpretability",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Unlike gradient-based soft-prompt tuning, meta-prompting produces human-readable natural-language prompts, making them inspectable, auditable, and easy to manually override."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No gradient access required",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Works with any API-accessible model, including closed-weight commercial APIs, without needing backpropagation or fine-tuning infrastructure."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Token cost multiplier",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": The meta-level LLM call adds latency and cost on top of the task-level call. In iterative loops, cost scales with the number of optimization rounds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Evaluation dependency",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": The quality of optimization is bounded by the quality of the evaluation signal. Noisy or misaligned evaluators cause the loop to optimize for the wrong objective."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Instability",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Without careful temperature control and sampling strategy, iterative loops can oscillate between good and bad prompts rather than converging."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Overfitting to evaluation set",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": If the evaluation examples are not representative of production inputs, the optimized prompt may perform poorly on real traffic even though it scores well in the loop."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Brittleness to model updates",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": A prompt optimized against one model checkpoint may degrade when the model is updated, requiring re-optimization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Verbosity creep",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Models tend to generate long, instruction-heavy prompts. Without constraints, meta-prompting can produce prompts that consume disproportionate context budget."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At its core, meta-prompting treats a prompt "
+          },
+          {
+            "type": "text",
+            "text": "p",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " as a free parameter in a quality function "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "Q(p, D)"
+            }
+          },
+          {
+            "type": "text",
+            "text": " where "
+          },
+          {
+            "type": "text",
+            "text": "D",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is a set of evaluation examples. The goal is to find a prompt that maximizes this quality:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "p^* = \\underset{p}{\\arg\\max} \\; Q(p, D)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because the prompt space is a discrete, high-dimensional space of natural language strings, gradient descent cannot be applied directly. Meta-prompting instead performs "
+          },
+          {
+            "type": "text",
+            "text": "black-box optimization",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " over this space, using the LLM itself as the proposal distribution. The meta-level LLM generates candidate prompts conditioned on the task description and, in iterative variants, on previous prompts along with their scores. This is analogous to Bayesian optimization where the LLM acts as a surrogate-free acquisition function."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Iterative Refinement Loop"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The canonical iterative variant proceeds as follows. In round "
+          },
+          {
+            "type": "text",
+            "text": "t",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", the meta-LLM is given the task description, the current best prompt "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "p_t"
+            }
+          },
+          {
+            "type": "text",
+            "text": ", and a critique or score "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "s_t = Q(p_t, D)"
+            }
+          },
+          {
+            "type": "text",
+            "text": ". It proposes a revised prompt "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "p_{t+1}"
+            }
+          },
+          {
+            "type": "text",
+            "text": ". The revised prompt is then evaluated on "
+          },
+          {
+            "type": "text",
+            "text": "D",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " to obtain "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "s_{t+1}"
+            }
+          },
+          {
+            "type": "text",
+            "text": ". If "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "s_{t+1} > s_t"
+            }
+          },
+          {
+            "type": "text",
+            "text": ", the new prompt is accepted; otherwise the previous best is retained. The loop runs for a fixed number of rounds or until convergence (no improvement over "
+          },
+          {
+            "type": "text",
+            "text": "k",
+            "marks": [
+              {
+                "type": "italic"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " consecutive rounds)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Textual Gradient Feedback"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A key refinement used by algorithms like ProTeGi (Prompt Optimization with Textual Gradients) and DSPy's MIPRO optimizer is replacing a numeric score with a "
+          },
+          {
+            "type": "text",
+            "text": "natural-language critique",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". Rather than passing \"score: 0.62\" to the meta-LLM, the evaluator produces: \"The prompt lacks explicit output format instructions, causing the model to return verbose prose when JSON is expected. Add a JSON schema constraint.\" This textual gradient tells the meta-LLM exactly what aspect of the prompt to change, dramatically reducing the search space and accelerating convergence."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows the canonical meta-prompting pipeline. A user goal flows into the meta-prompt generator, which uses a language model to produce an optimized prompt. That prompt is passed to the task LLM, whose output is scored by the evaluator. The evaluation feedback (numeric score or textual critique) loops back to the meta-prompt generator to drive refinement."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMjYwIiB2aWV3Qm94PSIwIDAgODIwIDI2MCI+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIyNjAiIGZpbGw9IiMwZjE3MmEiIHJ4PSIxMiIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iMjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTMiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTJlOGYwIj5NZXRhLVByb21wdGluZyBGbG93PC90ZXh0PgoKICA8IS0tIFN0ZXAgMTogVXNlciBHb2FsIC0tPgogIDxyZWN0IHg9IjE4IiB5PSI0NSIgd2lkdGg9IjEzMCIgaGVpZ2h0PSI2NSIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI4MyIgeT0iNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjOTRhM2I4Ij5Vc2VyIEdvYWw8L3RleHQ+CiAgPHRleHQgeD0iODMiIHk9Ijg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiPiJ3cml0ZSBhIHBhcnNlciI8L3RleHQ+CiAgPHRleHQgeD0iODMiIHk9IjEwMSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj5oaWdoLWxldmVsIHRhc2s8L3RleHQ+CgogIDwhLS0gQXJyb3cgMSAtLT4KICA8bGluZSB4MT0iMTQ4IiB5MT0iNzciIHgyPSIxODMiIHkyPSI3NyIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwb2x5Z29uIHBvaW50cz0iMTgxLDczIDE5MSw3NyAxODEsODEiIGZpbGw9IiM0NzU1NjkiLz4KCiAgPCEtLSBTdGVwIDI6IE1ldGEtUHJvbXB0IEdlbmVyYXRvciAtLT4KICA8cmVjdCB4PSIxOTMiIHk9IjQwIiB3aWR0aD0iMTU1IiBoZWlnaHQ9Ijc1IiByeD0iOCIgZmlsbD0iIzFlM2E1ZiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIyNzAiIHk9IjY0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzM4YmRmOCI+TWV0YS1Qcm9tcHQ8L3RleHQ+CiAgPHRleHQgeD0iMjcwIiB5PSI4MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzdkZDNmYyI+R2VuZXJhdG9yPC90ZXh0PgogIDx0ZXh0IHg9IjI3MCIgeT0iOTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+TExNIGNyYWZ0cyB0aGUgcHJvbXB0PC90ZXh0PgoKICA8IS0tIEFycm93IDIgLS0+CiAgPGxpbmUgeDE9IjM0OCIgeTE9Ijc3IiB4Mj0iMzgzIiB5Mj0iNzciIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cG9seWdvbiBwb2ludHM9IjM4MSw3MyAzOTEsNzcgMzgxLDgxIiBmaWxsPSIjMzhiZGY4Ii8+CgogIDwhLS0gU3RlcCAzOiBPcHRpbWl6ZWQgUHJvbXB0IC0tPgogIDxyZWN0IHg9IjM5MyIgeT0iNDUiIHdpZHRoPSIxNDUiIGhlaWdodD0iNjUiIHJ4PSI4IiBmaWxsPSIjMWUyZDFlIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjQ2NSIgeT0iNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzRkMzk5Ij5PcHRpbWl6ZWQ8L3RleHQ+CiAgPHRleHQgeD0iNDY1IiB5PSI4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzZlZTdiNyI+UHJvbXB0PC90ZXh0PgogIDx0ZXh0IHg9IjQ2NSIgeT0iMTAxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM0NzU1NjkiPnJvbGUgKyBjb250ZXh0ICsgZXhhbXBsZXM8L3RleHQ+CgogIDwhLS0gQXJyb3cgMyAtLT4KICA8bGluZSB4MT0iNTM4IiB5MT0iNzciIHgyPSI1NzMiIHkyPSI3NyIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwb2x5Z29uIHBvaW50cz0iNTcxLDczIDU4MSw3NyA1NzEsODEiIGZpbGw9IiMzNGQzOTkiLz4KCiAgPCEtLSBTdGVwIDQ6IFRhc2sgTExNIC0tPgogIDxyZWN0IHg9IjU4MyIgeT0iNDAiIHdpZHRoPSIxNTUiIGhlaWdodD0iNzUiIHJ4PSI4IiBmaWxsPSIjMmExZTNmIiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjY2MCIgeT0iNjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjYTc4YmZhIj5UYXNrIExMTTwvdGV4dD4KICA8dGV4dCB4PSI2NjAiIHk9IjgwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjYzRiNWZkIj5leGVjdXRlcyBvcHRpbWl6ZWQ8L3RleHQ+CiAgPHRleHQgeD0iNjYwIiB5PSI5NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNDc1NTY5Ij5wcm9tcHQg4oaSIG91dHB1dDwvdGV4dD4KCiAgPCEtLSBFdmFsdWF0aW9uIGJveCAtLT4KICA8cmVjdCB4PSIyMzgiIHk9IjE1NSIgd2lkdGg9IjM1NSIgaGVpZ2h0PSI1NSIgcng9IjgiIGZpbGw9IiMyYTFhMTAiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTUiIHk9IjE3OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNmNTllMGIiPkV2YWx1YXRpb24gJmFtcDsgRmVlZGJhY2sgTG9vcDwvdGV4dD4KICA8dGV4dCB4PSI0MTUiIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjZmNkMzRkIj5zY29yZSDihpIgY3JpdGlxdWUg4oaSIHJlZmluZSBtZXRhLXByb21wdCDihpIgaXRlcmF0ZTwvdGV4dD4KCiAgPCEtLSBBcnJvdzogVGFzayBMTE0gZG93biB0byBFdmFsdWF0aW9uIC0tPgogIDxsaW5lIHgxPSI2NjAiIHkxPSIxMTUiIHgyPSI2NjAiIHkyPSIxNDUiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjQsMyIvPgogIDxsaW5lIHgxPSI2NjAiIHkxPSIxNDUiIHgyPSI1OTUiIHkyPSIxNTQiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjQsMyIvPgogIDxwb2x5Z29uIHBvaW50cz0iNTkxLDE1MCA1OTQsMTYyIDYwMCwxNTIiIGZpbGw9IiNmNTllMGIiLz4KCiAgPCEtLSBBcnJvdzogRXZhbHVhdGlvbiBiYWNrIHRvIE1ldGEtUHJvbXB0IEdlbmVyYXRvciAtLT4KICA8bGluZSB4MT0iMjM4IiB5MT0iMTgxIiB4Mj0iMTk4IiB5Mj0iMTgxIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSI0LDMiLz4KICA8bGluZSB4MT0iMTk4IiB5MT0iMTgxIiB4Mj0iMTk4IiB5Mj0iMTE3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSI0LDMiLz4KICA8cG9seWdvbiBwb2ludHM9IjE5NCwxMTkgMTk4LDEwOSAyMDIsMTE5IiBmaWxsPSIjZjU5ZTBiIi8+CgogIDwhLS0gTGVnZW5kIHJvdyAtLT4KICA8dGV4dCB4PSIxOCIgeT0iMjM4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiMzOGJkZjgiPi0tIG1ldGEtbGV2ZWw8L3RleHQ+CiAgPHRleHQgeD0iMTE1IiB5PSIyMzgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzM0ZDM5OSI+LS0gcHJvbXB0IG91dHB1dDwvdGV4dD4KICA8dGV4dCB4PSIyMzciIHk9IjIzOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjZjU5ZTBiIj4tLSBmZWVkYmFjazwvdGV4dD4KICA8dGV4dCB4PSIzMzAiIHk9IjIzOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjYTc4YmZhIj4tLSB0YXNrIGV4ZWN1dGlvbjwvdGV4dD4KICA8dGV4dCB4PSI0NjAiIHk9IjIzOCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj4tLSBpdGVyYXRpb24gcmVmaW5lcyBwcm9tcHRzIGF1dG9tYXRpY2FsbHk8L3RleHQ+Cjwvc3ZnPgo=",
+          "alt": "Meta-Prompting flow: user goal through meta-prompt generator, optimized prompt to task LLM, evaluation feedback loop"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use It"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Meta-prompting is most valuable when the prompt-quality gap is measurable and the cost of suboptimal prompts is high. The following scenarios are strong candidates:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "High-stakes classification or extraction tasks",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " where even a few percentage points of accuracy improvement translates to meaningful downstream value (e.g., medical coding, contract clause extraction)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pipeline bootstrapping",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": When building a multi-step agentic pipeline and you need per-step system prompts quickly, meta-prompting provides a solid first draft for each step without manual authoring."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Domain-specific adaptation",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": When prompts must be tailored to domain vocabulary, tone, or format requirements that the generic model does not follow by default."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Regression-safe prompt maintenance",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": After a model update, running a meta-prompting re-optimization pass guards against silent prompt regressions."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Avoid meta-prompting when latency is severely constrained and offline optimization is impractical, when evaluation examples are too few to distinguish good prompts from bad ones (fewer than ~20 labeled examples), or when the task is so open-ended that quality cannot be quantified (e.g., creative writing with purely subjective quality)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A minimal meta-prompting implementation requires three components: a meta-prompt template, an evaluation function, and a loop controller. The following steps describe the setup:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Define the task description",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": A clear natural-language statement of what the task-level LLM should do, including expected input and output format."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prepare an evaluation set",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Collect 20-100 input/expected-output pairs that represent the real input distribution. These drive the quality signal."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Choose an evaluation metric",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Exact match, F1, BLEU, LLM-as-judge score, or a custom domain metric. The choice determines what the optimizer converges on."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Write the meta-prompt template",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": A prompt that instructs the meta-LLM to produce a system prompt. Include the task description, any constraints (token budget, output format), and — in later rounds — the previous prompt and its critique."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run the loop",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": For each round, call the meta-LLM to generate a candidate prompt, evaluate it on the eval set, and collect the score or critique. Retain the best candidate."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate and deploy",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Run the final prompt on a held-out test set to confirm generalization before deploying to production."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Simple Single-Pass Meta-Prompting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The simplest form: ask an LLM to write a prompt for a specific task, then execute that prompt on real inputs."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\n\nclient = anthropic.Anthropic()\n\n# Step 1: Use the meta-LLM to generate a task prompt\ndef generate_task_prompt(task_description: str) -> str:\n    meta_prompt = f\"\"\"You are a prompt engineering expert.\n\nWrite a system prompt for an AI assistant that will: {task_description}\n\nRequirements:\n- Be specific about the desired output format\n- Include guidance on tone and depth\n- Handle edge cases the model might misinterpret\n- Keep the prompt under 300 words\n\nReturn ONLY the system prompt text, with no explanation.\"\"\"\n\n    response = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=500,\n        messages=[{\"role\": \"user\", \"content\": meta_prompt}]\n    )\n    return response.content[0].text\n\n\n# Step 2: Execute the generated prompt on a real task\ndef execute_with_prompt(system_prompt: str, user_input: str) -> str:\n    response = client.messages.create(\n        model=\"claude-haiku-4-5\",\n        max_tokens=1024,\n        system=system_prompt,\n        messages=[{\"role\": \"user\", \"content\": user_input}]\n    )\n    return response.content[0].text\n\n\nif __name__ == \"__main__\":\n    task = (\n        \"Extract all named entities (people, organizations, locations) \"\n        \"from user-provided text and return them as a JSON object with \"\n        \"keys 'people', 'organizations', 'locations', each containing a list of strings.\"\n    )\n\n    print(\"Generating optimized prompt...\")\n    generated_prompt = generate_task_prompt(task)\n    print(f\"Generated prompt:\\n{generated_prompt}\\n\")\n\n    test_input = (\n        \"Elon Musk met with Angela Merkel in Berlin last Tuesday to discuss \"\n        \"a new partnership between Tesla and the European Commission.\"\n    )\n    result = execute_with_prompt(generated_prompt, test_input)\n    print(f\"Task output:\\n{result}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Iterative Meta-Prompting with Textual Critique"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This example implements a full generate-evaluate-critique-refine loop. The evaluator uses exact-match accuracy on a labeled dataset and converts the error analysis into a textual critique for the next round."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import json\nfrom dataclasses import dataclass\nfrom typing import Optional\nimport anthropic\n\nclient = anthropic.Anthropic()\n\n@dataclass\nclass EvalExample:\n    input_text: str\n    expected_output: str\n\n\nEVAL_SET = [\n    EvalExample(\"The sky is blue.\", \"positive\"),\n    EvalExample(\"I hate waiting in long lines.\", \"negative\"),\n    EvalExample(\"The food was okay, nothing special.\", \"neutral\"),\n    EvalExample(\"Best concert I've ever attended!\", \"positive\"),\n    EvalExample(\"Terrible customer service experience.\", \"negative\"),\n    EvalExample(\"It arrived on time.\", \"neutral\"),\n    EvalExample(\"Absolutely love this product.\", \"positive\"),\n    EvalExample(\"Broken on arrival, very disappointed.\", \"negative\"),\n]\n\n\ndef evaluate_prompt(prompt: str) -> tuple[float, list[dict]]:\n    \"\"\"Run the prompt on eval set, return (accuracy, error_cases).\"\"\"\n    correct = 0\n    errors = []\n    for ex in EVAL_SET:\n        resp = client.messages.create(\n            model=\"claude-haiku-4-5\",\n            max_tokens=10,\n            system=prompt,\n            messages=[{\"role\": \"user\", \"content\": ex.input_text}]\n        )\n        pred = resp.content[0].text.strip().lower()\n        if ex.expected_output in pred:\n            correct += 1\n        else:\n            errors.append({\"input\": ex.input_text, \"expected\": ex.expected_output, \"got\": pred})\n    return correct / len(EVAL_SET), errors\n\n\ndef generate_critique(task: str, prompt: str, score: float, errors: list[dict]) -> str:\n    \"\"\"Ask meta-LLM to generate a textual critique given the failure cases.\"\"\"\n    errors_str = json.dumps(errors, indent=2)\n    critique_request = f\"\"\"\nTask: {task}\nCurrent system prompt:\n---\n{prompt}\n---\nAccuracy: {score:.0%}\nFailed cases:\n{errors_str}\n\nIdentify the specific weaknesses in the current prompt that caused these failures.\nReturn a short, actionable critique (max 150 words).\"\"\"\n    resp = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=300,\n        messages=[{\"role\": \"user\", \"content\": critique_request}]\n    )\n    return resp.content[0].text\n\n\ndef refine_prompt(task: str, current_prompt: str, critique: str) -> str:\n    \"\"\"Ask meta-LLM to produce an improved prompt given the critique.\"\"\"\n    refine_request = f\"\"\"\nTask: {task}\nCurrent system prompt:\n---\n{current_prompt}\n---\nCritique: {critique}\n\nWrite an improved system prompt that addresses the critique.\nReturn ONLY the new system prompt text.\"\"\"\n    resp = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=600,\n        messages=[{\"role\": \"user\", \"content\": refine_request}]\n    )\n    return resp.content[0].text\n\n\ndef meta_prompting_loop(\n    task: str,\n    initial_prompt: str,\n    max_rounds: int = 5,\n    target_score: float = 0.95,\n) -> tuple[str, float]:\n    \"\"\"Iterative meta-prompting: refine until target score or max rounds.\"\"\"\n    best_prompt = initial_prompt\n    best_score, errors = evaluate_prompt(initial_prompt)\n    print(f\"Round 0: score={best_score:.0%}\")\n\n    for round_num in range(1, max_rounds + 1):\n        if best_score >= target_score:\n            break\n        critique = generate_critique(task, best_prompt, best_score, errors)\n        candidate = refine_prompt(task, best_prompt, critique)\n        score, errors = evaluate_prompt(candidate)\n        print(f\"Round {round_num}: score={score:.0%}\")\n        if score > best_score:\n            best_score, best_prompt = score, candidate\n\n    return best_prompt, best_score\n\n\nif __name__ == \"__main__\":\n    TASK = \"Classify the sentiment of the input text as 'positive', 'negative', or 'neutral'. Output only the single label word.\"\n    INITIAL = \"Classify the sentiment of the following text.\"\n    final_prompt, final_score = meta_prompting_loop(TASK, INITIAL)\n    print(f\"\\nFinal score: {final_score:.0%}\")\n    print(f\"Final prompt:\\n{final_prompt}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A fintech company uses an LLM pipeline to classify customer support tickets into routing categories (billing, fraud, technical, account). With 50,000 tickets per day, even a 2% misrouting rate translates to 1,000 tickets handled by the wrong team. The initial hand-authored prompt achieved 89% accuracy on a test set of 500 labeled tickets."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The team ran a meta-prompting loop: 80 labeled examples formed the eval set, with a held-out 420 for final testing. The meta-LLM was given the current prompt, the accuracy, and a list of the 10 most common error patterns (e.g., \"account closure requests mislabeled as billing\"). Over 6 rounds, the accuracy improved from 89% to 96%. The loop was also integrated into CI: any model version bump automatically re-runs the optimization, preventing silent regressions."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Production pattern: versioned prompt store with meta-prompting\nimport hashlib\nimport json\nfrom pathlib import Path\n\nPROMPT_STORE = Path(\"prompts/\")\nPROMPT_STORE.mkdir(exist_ok=True)\n\n\ndef load_or_optimize_prompt(\n    task_id: str,\n    task_description: str,\n    eval_fn,          # callable(prompt) -> float\n    force_reoptimize: bool = False,\n) -> str:\n    \"\"\"\n    Load a cached optimized prompt, or run meta-prompting to create one.\n    Keys the cache on (task_id, model_id) to detect model-version changes.\n    \"\"\"\n    import anthropic\n    client = anthropic.Anthropic()\n    model_id = \"claude-haiku-4-5\"\n    version_key = hashlib.md5(\n        f\"{task_id}:{model_id}\".encode()\n    ).hexdigest()[:8]\n    cache_path = PROMPT_STORE / f\"{task_id}_{version_key}.json\"\n\n    if cache_path.exists() and not force_reoptimize:\n        data = json.loads(cache_path.read_text())\n        print(f\"Loaded cached prompt for {task_id} (score={data['score']:.0%})\")\n        return data[\"prompt\"]\n\n    seed_prompt = _generate_seed_prompt(client, task_description)\n    best_prompt, best_score = _optimize_loop(seed_prompt, eval_fn, rounds=5)\n\n    cache_path.write_text(json.dumps({\"prompt\": best_prompt, \"score\": best_score}))\n    print(f\"Optimized and cached prompt for {task_id} (score={best_score:.0%})\")\n    return best_prompt\n\n\ndef _generate_seed_prompt(client, task_description: str) -> str:\n    resp = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=400,\n        messages=[{\"role\": \"user\", \"content\":\n            f\"Write a concise system prompt for an LLM that will: {task_description}\\n\"\n            \"Return only the prompt text.\"}]\n    )\n    return resp.content[0].text\n\n\ndef _optimize_loop(initial: str, eval_fn, rounds: int) -> tuple[str, float]:\n    import anthropic\n    client = anthropic.Anthropic()\n    best, best_score = initial, eval_fn(initial)\n    for _ in range(rounds):\n        if best_score >= 0.97:\n            break\n        critique_resp = client.messages.create(\n            model=\"claude-opus-4-5\",\n            max_tokens=300,\n            messages=[{\"role\": \"user\", \"content\":\n                f\"Current prompt: {best}\\nScore: {best_score:.0%}\\n\"\n                \"List specific improvements needed (max 100 words).\"}]\n        )\n        refine_resp = client.messages.create(\n            model=\"claude-opus-4-5\",\n            max_tokens=500,\n            messages=[{\"role\": \"user\", \"content\":\n                f\"Improve this prompt based on: {critique_resp.content[0].text}\\n\"\n                f\"Original: {best}\\nReturn only the new prompt.\"}]\n        )\n        candidate = refine_resp.content[0].text\n        score = eval_fn(candidate)\n        if score > best_score:\n            best, best_score = candidate, score\n    return best, best_score\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Evaluating on the Training Set"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Using the same examples for both optimization and final evaluation inflates the apparent accuracy. The optimized prompt memorizes the eval set rather than generalizing. Always hold out a separate test partition that the optimizer never sees."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "No Convergence Criterion"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running fixed rounds without tracking the best-seen score causes regressions: a later round may produce a worse prompt that gets accepted because the loop has no memory. Always maintain a best-score variable and only update the prompt when the new score strictly improves."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Vague Meta-Prompt Instructions"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A meta-prompt that says only \"write a better prompt\" produces generic output. The meta-LLM needs the task description, the output format requirement, any hard constraints (e.g., token limit, language), and an example of a good vs. bad response to have enough signal for useful improvement."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Ignoring Prompt Length Growth"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without explicit constraints, each refinement round tends to add more instructions, making the prompt longer. A 2,000-token system prompt on a 128k-context model is not inherently wrong, but it adds cost to every task call. Impose a word-budget constraint in the meta-prompt and monitor prompt length across rounds."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a stronger meta-LLM and a weaker task LLM",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": The meta-LLM needs reasoning capability; the task LLM needs speed and low cost. Using a large model for meta-level work and a small model for execution is a common and effective division."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Seed the loop with a reasonable initial prompt",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Starting from an obviously bad prompt wastes early rounds on obvious fixes. Use a manually authored or meta-generated seed that already captures the task basics."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Include both success and failure examples in the critique",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Showing the meta-LLM only what went wrong is half the picture. Providing examples it got right helps it understand what to preserve in the next version."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version and cache optimized prompts",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Store the final prompt along with its score, the model version it was optimized for, and the date. Re-run optimization when the model changes, not on every deployment."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set a token budget in the meta-prompt",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Explicitly instruct the meta-LLM to produce a prompt under N words. This avoids runaway verbosity without requiring post-processing."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run multiple candidates in parallel",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Instead of one candidate per round, sample 3-5 variations at temperature > 0 and select the best. This increases exploration at the cost of more eval calls."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The cost of a meta-prompting run scales as:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{Total cost} = R \\cdot (C_{\\text{meta}} + N_{\\text{eval}} \\cdot C_{\\text{task}})"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "R"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the number of optimization rounds, "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "C_{\\text{meta}}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the cost of one meta-LLM call, "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "N_{\\text{eval}}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the eval set size, and "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "C_{\\text{task}}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the cost of one task call. For a typical setup with 5 rounds, 50 eval examples, and a haiku-class task model, the total optimization cost is on the order of a few dollars — a one-time investment that pays off across millions of production inferences."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallelizing the eval set calls is the single largest optimization. Evaluating 50 examples sequentially at ~200ms each takes 10 seconds per round; evaluating them concurrently with async API calls takes under 2 seconds. Use "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.gather",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " or a thread pool executor to batch eval calls within each round."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For large-scale deployments where hundreds of distinct sub-tasks each need optimized prompts, run the meta-prompting loops in parallel (one per task). The loops are independent and can be distributed across worker processes. The only shared resource is the API rate limit, which can be managed with a semaphore or token bucket."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "DSPy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "DSPy (Declarative Self-improving Python) is the most mature open-source framework for meta-prompting. It represents LLM pipelines as Python programs with typed signatures, and includes optimizers (MIPRO, BootstrapFewShot, COPRO) that automatically tune both prompts and few-shot examples. DSPy's COPRO optimizer performs iterative meta-prompting with LLM-generated critiques, closely matching the pattern described above."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import dspy\n\n# Configure the language model\nlm = dspy.LM(\"anthropic/claude-haiku-4-5\")\ndspy.configure(lm=lm)\n\n\n# Define a typed task signature — the docstring becomes the meta-prompt seed\nclass SentimentClassifier(dspy.Signature):\n    \"\"\"Classify the sentiment of the input text.\"\"\"\n    text: str = dspy.InputField()\n    sentiment: str = dspy.OutputField(desc=\"One of: positive, negative, neutral\")\n\n\n# Wrap in a Module\nclassifier = dspy.Predict(SentimentClassifier)\n\n# Compile with COPRO (Coordinate Prompt Optimization — iterative meta-prompting)\nfrom dspy.teleprompt import COPRO\n\noptimizer = COPRO(\n    metric=lambda pred, gold: pred.sentiment.lower() == gold.sentiment.lower(),\n    breadth=5,     # candidate prompts per round\n    depth=3,       # refinement rounds\n    verbose=True,\n)\n\ntrainset = [\n    dspy.Example(text=\"Best product ever!\", sentiment=\"positive\").with_inputs(\"text\"),\n    dspy.Example(text=\"Terrible experience.\", sentiment=\"negative\").with_inputs(\"text\"),\n    dspy.Example(text=\"It was fine.\", sentiment=\"neutral\").with_inputs(\"text\"),\n    dspy.Example(text=\"I love this.\", sentiment=\"positive\").with_inputs(\"text\"),\n    dspy.Example(text=\"Worst service ever.\", sentiment=\"negative\").with_inputs(\"text\"),\n]\n\noptimized_classifier = optimizer.compile(classifier, trainset=trainset)\n\n# Inspect the generated system prompt\nprint(\"Optimized signature instructions:\")\nprint(optimized_classifier.predict.signature.instructions)\n\n# Use the optimized classifier\nresult = optimized_classifier(text=\"This exceeded all my expectations!\")\nprint(f\"Sentiment: {result.sentiment}\")\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Other Tools"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "PromptFoo",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": A prompt testing CLI that includes a \"suggest\" command generating prompt variations via meta-prompting and running them against a test suite."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "LangChain / LangSmith",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": LangSmith's evaluation loops and hub can be combined with custom meta-prompting chains, providing observability on prompt version history and score trends."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Weights & Biases Prompts",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Provides prompt versioning and experiment tracking that integrates naturally with meta-prompting runs to compare generations across rounds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Anthropic Console",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Includes a built-in \"Generate prompt\" feature that performs single-pass meta-prompting from a task description, making it useful for bootstrapping new prompts manually."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Requires Gradients",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Human-readable Prompt",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Eval Data Required",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best For",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Meta-prompting",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "20-100 examples"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Closed-model APIs, rapid iteration"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Soft-prompt tuning",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "100s-1000s"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Open-weight models, maximum accuracy"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Manual prompt engineering",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None required"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Novel tasks with no eval data"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fine-tuning",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "N/A"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "1000s"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Persistent behavior change, style, safety"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Few-shot selection",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "50-200 examples"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "In-context learning improvements, complementary"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & Reliability"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt Injection via Generated Prompts"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When the meta-LLM generates a system prompt that includes dynamic user-supplied content (e.g., extracted task descriptions from user messages), there is a risk of indirect prompt injection: a malicious user inserts instructions into the task description that propagate into the generated system prompt, then influence every subsequent execution. Mitigate this by sanitizing inputs to the meta-level call and never including raw user-provided text verbatim in the meta-prompt."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Alignment Drift in Iterative Loops"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "An unconstrained meta-prompting loop can converge on a prompt that achieves high eval score but violates safety or tone guidelines — for example, an overly authoritative tone or prompts that elicit overconfident model behavior. Include a safety checker in the eval function that penalizes policy violations, and always do a human review of the final prompt before deployment."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Evaluation Set Poisoning"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the eval set is sourced from production logs, it may contain adversarial examples crafted by users trying to steer model behavior. Audit the eval set for anomalies before using it as the optimization target. Prefer manually curated, representative examples over unfiltered production samples."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt Versioning and Rollback"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Store every generated prompt with its round number, score, and timestamp. If a newly optimized prompt causes a production regression, the ability to instantly roll back to the previous version is critical. Version control for prompts follows the same discipline as version control for code."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of meta-prompting as hiring an experienced technical writer to draft your instructions, then having a QA engineer test them, and repeating the cycle until the instructions reliably produce the desired outcome. The technical writer (meta-LLM) knows the conventions, the language the model responds to, and can incorporate critique quickly. The QA engineer (evaluator) knows whether the instructions actually work. The engineer defines the acceptance criterion and the test cases, but delegates the actual writing and rewriting to these specialized roles."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Another useful frame: meta-prompting is Bayesian optimization over the discrete space of natural-language strings. The meta-LLM serves as the acquisition function — it picks the next candidate to evaluate based on everything known so far. The textual critique is the \"gradient\" that guides the acquisition function toward more promising regions of prompt space."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Meta-prompting delegates prompt authorship to the LLM itself, treating the prompt as an optimizable variable rather than a fixed engineering artifact."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The core loop is: generate candidate prompt, evaluate on labeled examples, produce textual critique, refine, repeat until convergence."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Textual critiques (what to change and why) outperform numeric scores as feedback signals because they reduce the search space and guide the meta-LLM toward specific fixes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The quality ceiling is set by the evaluation function — noisy or misaligned evaluators cause the loop to optimize for the wrong objective."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a stronger model for meta-level work and a faster, cheaper model for task execution; cache and version the resulting prompts to amortize optimization cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Unlike soft-prompt tuning or fine-tuning, meta-prompting requires no gradient access, works with any API, and produces human-readable, auditable prompts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "DSPy's COPRO and MIPRO optimizers provide production-ready implementations of meta-prompting loops with typed signatures, few-shot management, and evaluation harnesses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Security risks include prompt injection via generated prompts, alignment drift in unconstrained loops, and evaluation set poisoning — all require explicit mitigation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
