@@ -1,1 +1,2762 @@
-{"format":"tiptap/v1","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Containers package an application and its dependencies into a portable, self-contained unit that runs identically across environments. When AI agents execute code, containerization provides a principled boundary between the agent-generated logic and the host system — making every execution reproducible, auditable, and hardened against a wide class of malicious or buggy code behaviors."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What is Containerization Security?"}]},{"type":"paragraph","content":[{"type":"text","text":"Containerization security refers to the set of mechanisms, policies, and practices that constrain what a containerized process can do on the host system. A container is not a virtual machine — it shares the host OS kernel — so the security boundary must be enforced through a combination of kernel features: Linux namespaces for resource partitioning, control groups (cgroups) for resource limits, seccomp for syscall filtering, Linux capabilities for privilege reduction, and mandatory access control (MAC) frameworks such as AppArmor or SELinux for path- and action-level policies."}]},{"type":"paragraph","content":[{"type":"text","text":"In the context of agentic AI, containerization security is applied specifically at the code-execution layer. An AI orchestrator generates code snippets — Python scripts, shell commands, data analysis pipelines — and submits them for execution. The container wraps that execution in an environment where only a precisely enumerated set of operations is permitted. Because each container is ephemeral (created fresh, destroyed after the run), state contamination between agent turns is eliminated by construction."}]},{"type":"paragraph","content":[{"type":"text","text":"The Open Container Initiative (OCI) standardizes the image format and runtime interface, which means security hardening techniques developed for one OCI-compliant runtime — Docker, containerd, Podman — apply uniformly across tools. The "},{"type":"text","marks":[{"type":"code"}],"text":"runc"},{"type":"text","text":" low-level runtime is the reference implementation that actually invokes the kernel primitives; higher-level runtimes delegate to it (or to alternatives like "},{"type":"text","marks":[{"type":"code"}],"text":"crun"},{"type":"text","text":" for better performance and "},{"type":"text","marks":[{"type":"code"}],"text":"runsc"},{"type":"text","text":" for kernel isolation via gVisor)."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why It Matters"}]},{"type":"paragraph","content":[{"type":"text","text":"When an AI agent executes code, it operates with the same OS-level privileges as the process that invoked it — unless an explicit isolation boundary is interposed. Without containerization, a prompt-injected instruction to delete files, a carelessly generated "},{"type":"text","marks":[{"type":"code"}],"text":"subprocess.run"},{"type":"text","text":" call, or a malicious pip package installed during a code-generation step can interact directly with the host filesystem, internal network, and credentials store."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Prompt injection through external content"},{"type":"text","text":" — an agent reading a document or webpage can encounter embedded instructions to exfiltrate API keys; containerization with network isolation blocks the exfiltration path even when the injection succeeds."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Malicious dependencies installed at runtime"},{"type":"text","text":" — agent-generated code that calls "},{"type":"text","marks":[{"type":"code"}],"text":"pip install"},{"type":"text","text":" can pull in packages with supply-chain malware; read-only root filesystems and network restrictions limit what those packages can do."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Unbounded resource consumption"},{"type":"text","text":" — an infinite loop or a deliberately crafted memory-exhaustion payload in agent output can crash the host without cgroup limits; containers make resource DoS a recoverable, per-execution event."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Lateral movement inside internal networks"},{"type":"text","text":" — code executing on a host with internal service access can pivot laterally; per-container network namespaces with egress filtering remove this pivot surface."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"State leakage between agent sessions"},{"type":"text","text":" — without ephemeral containers, a previous run's temporary files, environment variables, or cached credentials can influence subsequent runs, creating unpredictable and exploitable behavior."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Benefits"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Deterministic, clean execution environments"},{"type":"text","text":" — every run starts from an identical image; there is no dependency on host-installed packages, accumulated state, or environment drift between runs. This makes agent behavior reproducible and debugging tractable."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Defense in depth against model failures"},{"type":"text","text":" — even when the language model generates malicious, buggy, or prompt-injected code, the container limits the blast radius to the ephemeral environment. The host system, secrets, and other users' data remain unexposed."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Machine-readable, auditable security policy"},{"type":"text","text":" — a "},{"type":"text","marks":[{"type":"code"}],"text":"docker run"},{"type":"text","text":" command with explicit flags, a seccomp JSON profile, and a cgroup configuration constitute a version-controllable security contract. It can be code-reviewed, tested, and diffed alongside application code."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Resource fairness in multi-tenant deployments"},{"type":"text","text":" — per-container CPU, memory, and PID limits ensure that one user's expensive computation does not starve others on shared infrastructure."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Compliance enablement"},{"type":"text","text":" — containerized, network-isolated execution is a prerequisite for processing regulated data under SOC 2, ISO 27001, and HIPAA, where agent-generated code must not be able to access PII or PHI at rest on the host."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Portable security model"},{"type":"text","text":" — OCI-standard images and runtime spec files work identically across cloud providers, Kubernetes clusters, and on-premise bare metal, so hardening done in development applies directly to production."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Trade-offs and Limitations"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Shared host kernel is the fundamental limitation"},{"type":"text","text":" — all containers on a host share the same Linux kernel. A kernel-level exploit (e.g., a namespace escape or a seccomp bypass via an unpatched CVE) can grant the attacker host-level access regardless of the container policy. MicroVM isolation (Firecracker, gVisor) addresses this at the cost of additional latency and operational complexity."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Cold-start latency"},{"type":"text","text":" — launching a fresh container takes 100–500 ms on a warm Docker daemon with the image already cached. For interactive agentic use cases with a target response time under 2 seconds, this overhead is significant and must be managed with container pre-warming pools."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Policy misconfiguration is silent and dangerous"},{"type":"text","text":" — an overly permissive seccomp profile, a missing capability drop, or accidental volume mount of the Docker socket provides a false sense of security. The policy must be audited as rigorously as application code."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Image supply-chain risk"},{"type":"text","text":" — a compromised base image in the registry introduces vulnerabilities before the container even runs. Images must be signed, scanned for CVEs, and pulled from private or verified registries."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Output sanitization still required"},{"type":"text","text":" — containerization controls what code can do during execution, but it does not sanitize what the code writes to stdout. Arbitrarily long or injected outputs can still influence the next LLM call if stdout is not length-capped and treated as untrusted."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Filesystem-only isolation is incomplete"},{"type":"text","text":" — mounting host directories read-only into the container still exposes those files to the process. If the agent code is buggy, it may leak file contents to stdout even without network access."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"How It Works"}]},{"type":"paragraph","content":[{"type":"text","text":"Containerization security is not a single mechanism but a stack of independent kernel and runtime controls that each address a different threat axis. Understanding each layer separately is important because a gap in one layer is not automatically covered by the others."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Linux Namespaces"}]},{"type":"paragraph","content":[{"type":"text","text":"Linux namespaces partition kernel data structures so that a process inside a namespace sees its own isolated view of a resource. The PID namespace gives the container process a private process tree where its init is PID 1 and it cannot see host processes. The network namespace provides an isolated network stack — its own interfaces, routing table, and iptables rules — meaning that by default the container has no route to the host or any external network. The mount namespace controls which filesystem paths are visible, enabling a read-only root with a separate writable "},{"type":"text","marks":[{"type":"code"}],"text":"tmpfs"},{"type":"text","text":" for "},{"type":"text","marks":[{"type":"code"}],"text":"/tmp"},{"type":"text","text":". The user namespace maps UID 0 inside the container to an unprivileged UID on the host, so even apparent root inside the container has no host privileges."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Control Groups (cgroups v2)"}]},{"type":"paragraph","content":[{"type":"text","text":"cgroups v2 impose hard resource ceilings on the process tree inside the container. "},{"type":"text","marks":[{"type":"code"}],"text":"cpu.max"},{"type":"text","text":" caps the CPU bandwidth as a fraction of available time. "},{"type":"text","marks":[{"type":"code"}],"text":"memory.max"},{"type":"text","text":" triggers an OOM kill when the process hierarchy exceeds the memory ceiling, preventing host memory exhaustion. "},{"type":"text","marks":[{"type":"code"}],"text":"pids.max"},{"type":"text","text":" caps the number of processes/threads, defeating fork bombs. "},{"type":"text","marks":[{"type":"code"}],"text":"io.max"},{"type":"text","text":" limits block device I/O bandwidth. These limits are enforced by the kernel scheduler and I/O subsystem — they cannot be bypassed from user space regardless of how the code attempts to do so."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Seccomp Syscall Filtering"}]},{"type":"paragraph","content":[{"type":"text","text":"Seccomp (secure computing mode) attaches a BPF program to the process that is evaluated on every system call before the kernel processes it. If the call number or its arguments do not match the allowlist, the kernel either kills the process ("},{"type":"text","marks":[{"type":"code"}],"text":"SECCOMP_RET_KILL"},{"type":"text","text":") or returns EPERM ("},{"type":"text","marks":[{"type":"code"}],"text":"SECCOMP_RET_ERRNO"},{"type":"text","text":"). A well-designed sandbox allows read/write on pre-opened file descriptors, memory allocation, clock access, and safe exits — while denying "},{"type":"text","marks":[{"type":"code"}],"text":"execve"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"ptrace"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"mount"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"socket"},{"type":"text","text":" (in network-denied profiles), "},{"type":"text","marks":[{"type":"code"}],"text":"setuid"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"clone"},{"type":"text","text":" with dangerous flags. Because the filter runs at the syscall boundary, user-space techniques cannot bypass it."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Linux Capabilities"}]},{"type":"paragraph","content":[{"type":"text","text":"Linux capabilities decompose the traditional all-or-nothing root privilege into about 40 distinct capabilities. Dropping all capabilities with "},{"type":"text","marks":[{"type":"code"}],"text":"--cap-drop=ALL"},{"type":"text","text":" removes the ability to bind low ports, mount filesystems, load kernel modules, change file ownership, and many other privileged operations. Containers running agent-generated code need no capabilities at all for pure computation — they only need the basic POSIX file and process operations that unprivileged users have anyway. "},{"type":"text","marks":[{"type":"code"}],"text":"--security-opt no-new-privileges"},{"type":"text","text":" ensures that no child process can regain capabilities through setuid binaries."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Mandatory Access Control (AppArmor / SELinux)"}]},{"type":"paragraph","content":[{"type":"text","text":"MAC frameworks add a policy layer above POSIX permissions that cannot be overridden even by root. Docker's default AppArmor profile ("},{"type":"text","marks":[{"type":"code"}],"text":"docker-default"},{"type":"text","text":") blocks access to "},{"type":"text","marks":[{"type":"code"}],"text":"/proc/sysrq-trigger"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"/sys/"},{"type":"text","text":", and other dangerous host-visible paths. A custom profile for agent code execution can additionally deny write access to all paths outside "},{"type":"text","marks":[{"type":"code"}],"text":"/tmp"},{"type":"text","text":", deny network operations entirely, and write audit log entries for every policy violation — giving operators visibility into what the agent code attempted."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Union Filesystem and Image Layers"}]},{"type":"paragraph","content":[{"type":"text","text":"Container images use a union filesystem (OverlayFS on modern Linux) to stack read-only image layers beneath a single writable container layer. For agent code execution the writable layer is replaced by an in-memory "},{"type":"text","marks":[{"type":"code"}],"text":"tmpfs"},{"type":"text","text":" and the root filesystem is mounted read-only with "},{"type":"text","marks":[{"type":"code"}],"text":"--read-only"},{"type":"text","text":". This means agent code cannot modify the image, cannot persist files across runs, and cannot accumulate state that influences future executions. The tmpfs capacity limit enforces a ceiling on how much output data the code can generate before the run is killed."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Architecture Overview"}]},{"type":"image","attrs":{"src":"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNTgwIiB2aWV3Qm94PSIwIDAgODIwIDU4MCI+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnJvdy1ibHVlIiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iOSIgcmVmWT0iMy41IiBvcmllbnQ9ImF1dG8iPgogICAgICA8cG9seWdvbiBwb2ludHM9IjAgMCwgMTAgMy41LCAwIDciIGZpbGw9IiMzOGJkZjgiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyb3ctZ3JlZW4iIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI5IiByZWZZPSIzLjUiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwb2x5Z29uIHBvaW50cz0iMCAwLCAxMCAzLjUsIDAgNyIgZmlsbD0iIzM0ZDM5OSIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnJvdy1yZWQiIG1hcmtlcldpZHRoPSIxMCIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI5IiByZWZZPSIzLjUiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwb2x5Z29uIHBvaW50cz0iMCAwLCAxMCAzLjUsIDAgNyIgZmlsbD0iI2Y4NzE3MSIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnJvdy1ncmF5IiBtYXJrZXJXaWR0aD0iMTAiIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iOSIgcmVmWT0iMy41IiBvcmllbnQ9ImF1dG8iPgogICAgICA8cG9seWdvbiBwb2ludHM9IjAgMCwgMTAgMy41LCAwIDciIGZpbGw9IiM5NGEzYjgiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KCiAgPCEtLSBCYWNrZ3JvdW5kIC0tPgogIDxyZWN0IHdpZHRoPSI4MjAiIGhlaWdodD0iNTgwIiBmaWxsPSIjMGYxNzJhIiByeD0iMTIiLz4KCiAgPCEtLSBUaXRsZSAtLT4KICA8dGV4dCB4PSI0MTAiIHk9IjM0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjE1IiBmaWxsPSIjZTJlOGYwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCI+Q29udGFpbmVyaXphdGlvbiBTZWN1cml0eSBBcmNoaXRlY3R1cmUg4oCUIEFJIEFnZW50IENvZGUgRXhlY3V0aW9uPC90ZXh0PgoKICA8IS0tID09PT09IEFJIE9yY2hlc3RyYXRvciA9PT09PSAtLT4KICA8cmVjdCB4PSIyNjAiIHk9IjU1IiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjU2IiByeD0iOCIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI0MTAiIHk9Ijc5IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEzIiBmaWxsPSIjMzhiZGY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCI+QUkgQWdlbnQgLyBPcmNoZXN0cmF0b3I8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSI5OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Z2VuZXJhdGVzIGNvZGUgIMK3ICBzdWJtaXRzIHJ1biByZXF1ZXN0ICDCtyAgY29uc3VtZXMgb3V0cHV0PC90ZXh0PgoKICA8IS0tIEFycm93IGRvd24gdG8gT0NJIFJ1bnRpbWUgLS0+CiAgPGxpbmUgeDE9IjQxMCIgeTE9IjExMSIgeDI9IjQxMCIgeTI9IjE0MiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYXJyb3ctYmx1ZSkiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjEzMSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzM4YmRmOCI+cnVuKGltYWdlLCBjb2RlLCBwb2xpY3kpPC90ZXh0PgoKICA8IS0tID09PT09IE9DSSBSdW50aW1lIC8gY29udGFpbmVyZCA9PT09PSAtLT4KICA8cmVjdCB4PSIyMDAiIHk9IjE0OCIgd2lkdGg9IjQyMCIgaGVpZ2h0PSI0NCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjE2OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iI2Y1OWUwYiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiPk9DSSBSdW50aW1lIChjb250YWluZXJkICsgcnVuYyk8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSIxODQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnB1bGxzIGltYWdlICDCtyAgc2V0cyB1cCBuYW1lc3BhY2VzICDCtyAgYXBwbGllcyBzZWNjb21wICsgY2FwYWJpbGl0aWVzICDCtyAgZW5mb3JjZXMgY2dyb3VwczwvdGV4dD4KCiAgPCEtLSBBcnJvdyBkb3duIHRvIFNlY3VyaXR5IGVuZm9yY2VtZW50IC0tPgogIDxsaW5lIHgxPSI0MTAiIHkxPSIxOTIiIHgyPSI0MTAiIHkyPSIyMTgiIHN0cm9rZT0iIzk0YTNiOCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyb3ctZ3JheSkiLz4KCiAgPCEtLSA9PT09PSBTZWN1cml0eSBFbmZvcmNlbWVudCBSb3cgPT09PT0gLS0+CiAgPCEtLSBOYW1lc3BhY2VzIGJveCAtLT4KICA8cmVjdCB4PSI1NSIgeT0iMjI0IiB3aWR0aD0iMTc1IiBoZWlnaHQ9Ijg2IiByeD0iNiIgZmlsbD0iIzE3MjAzMyIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjE0MiIgeT0iMjQ0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjYTc4YmZhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCI+TGludXggTmFtZXNwYWNlczwvdGV4dD4KICA8dGV4dCB4PSIxNDIiIHk9IjI2MiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5QSUQgIMK3ICBOZXR3b3JrICDCtyAgTW91bnQ8L3RleHQ+CiAgPHRleHQgeD0iMTQyIiB5PSIyNzciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+VVRTICDCtyAgSVBDICDCtyAgVXNlcjwvdGV4dD4KICA8dGV4dCB4PSIxNDIiIHk9IjI5MiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5pc29sYXRlZCBwcm9jZXNzIHRyZWU8L3RleHQ+CiAgPHRleHQgeD0iMTQyIiB5PSIzMDIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+aXNvbGF0ZWQgbmV0d29yayBzdGFjazwvdGV4dD4KCiAgPCEtLSBTZWNjb21wICsgQ2FwYWJpbGl0aWVzIGJveCAtLT4KICA8cmVjdCB4PSIyNDciIHk9IjIyNCIgd2lkdGg9IjE3NSIgaGVpZ2h0PSI4NiIgcng9IjYiIGZpbGw9IiMxNzIwMzMiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIzMzQiIHk9IjI0NCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2Y1OWUwYiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiPnNlY2NvbXAgKyBDYXBhYmlsaXRpZXM8L3RleHQ+CiAgPHRleHQgeD0iMzM0IiB5PSIyNjIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+c3lzY2FsbCBhbGxvd2xpc3QgKEJQRik8L3RleHQ+CiAgPHRleHQgeD0iMzM0IiB5PSIyNzciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+LS1jYXAtZHJvcD1BTEw8L3RleHQ+CiAgPHRleHQgeD0iMzM0IiB5PSIyOTIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+bm8gcHRyYWNlIC8gbm8gbW91bnQ8L3RleHQ+CiAgPHRleHQgeD0iMzM0IiB5PSIzMDciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+bm8gc2V0dWlkIC8gbm8gZXhlY3ZlPC90ZXh0PgoKICA8IS0tIGNncm91cHMgYm94IC0tPgogIDxyZWN0IHg9IjQzOSIgeT0iMjI0IiB3aWR0aD0iMTc1IiBoZWlnaHQ9Ijg2IiByeD0iNiIgZmlsbD0iIzE3MjAzMyIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjUyNiIgeT0iMjQ0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzRkMzk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCI+Y2dyb3VwcyB2MjwvdGV4dD4KICA8dGV4dCB4PSI1MjYiIHk9IjI2MiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5jcHUubWF4ICDCtyAgbWVtb3J5Lm1heDwvdGV4dD4KICA8dGV4dCB4PSI1MjYiIHk9IjI3NyIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5waWRzLm1heCAoZm9yayBib21iKTwvdGV4dD4KICA8dGV4dCB4PSI1MjYiIHk9IjI5MiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5pby5tYXggIMK3ICB3YWxsIHRpbWVvdXQ8L3RleHQ+CiAgPHRleHQgeD0iNTI2IiB5PSIzMDciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+T09NIGtpbGwgb24gYnJlYWNoPC90ZXh0PgoKICA8IS0tIEFwcEFybW9yL1NFTGludXggYm94IC0tPgogIDxyZWN0IHg9IjYzMSIgeT0iMjI0IiB3aWR0aD0iMTQwIiBoZWlnaHQ9Ijg2IiByeD0iNiIgZmlsbD0iIzE3MjAzMyIgc3Ryb2tlPSIjZjg3MTcxIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjcwMSIgeT0iMjQ0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjZjg3MTcxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCI+QXBwQXJtb3IgLyBTRUxpbnV4PC90ZXh0PgogIDx0ZXh0IHg9IjcwMSIgeT0iMjYyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPk1BQyBwcm9maWxlPC90ZXh0PgogIDx0ZXh0IHg9IjcwMSIgeT0iMjc3IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnBhdGgtYmFzZWQgYWNjZXNzPC90ZXh0PgogIDx0ZXh0IHg9IjcwMSIgeT0iMjkyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmRlbnkgbmV0d29yayB3cml0ZXM8L3RleHQ+CiAgPHRleHQgeD0iNzAxIiB5PSIzMDciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+YXVkaXQgbG9nIHZpb2xhdGlvbnM8L3RleHQ+CgogIDwhLS0gQXJyb3cgZnJvbSBlbmZvcmNlbWVudCB0byBjb250YWluZXIgLS0+CiAgPGxpbmUgeDE9IjQxMCIgeTE9IjMxMCIgeDI9IjQxMCIgeTI9IjMzOCIgc3Ryb2tlPSIjOTRhM2I4IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnJvdy1ncmF5KSIvPgoKICA8IS0tID09PT09IFJ1bm5pbmcgQ29udGFpbmVyID09PT09IC0tPgogIDxyZWN0IHg9IjcwIiB5PSIzNDQiIHdpZHRoPSI2ODAiIGhlaWdodD0iMTQwIiByeD0iMTAiIGZpbGw9IiMwYzE2MjgiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtZGFzaGFycmF5PSI4LDQiLz4KICA8dGV4dCB4PSIxMzAiIHk9IjM2OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzM0ZDM5OSIgZm9udC13ZWlnaHQ9ImJvbGQiPkVwaGVtZXJhbCBDb250YWluZXIgKGlzb2xhdGVkIGVudmlyb25tZW50KTwvdGV4dD4KCiAgPCEtLSBJbWFnZSBsYXllcnMgaW5zaWRlIGNvbnRhaW5lciAtLT4KICA8IS0tIFdyaXRhYmxlIGxheWVyIC0tPgogIDxyZWN0IHg9IjkwIiB5PSIzNzgiIHdpZHRoPSIxODAiIGhlaWdodD0iMzAiIHJ4PSI0IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjE4MCIgeT0iMzk4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzhiZGY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Xcml0YWJsZSBMYXllciAodG1wZnMsIDMyIE1CKTwvdGV4dD4KICA8IS0tIEJhc2UgaW1hZ2UgbGF5ZXIgLS0+CiAgPHJlY3QgeD0iOTAiIHk9IjQxMCIgd2lkdGg9IjE4MCIgaGVpZ2h0PSIyNiIgcng9IjQiIGZpbGw9IiMxZTJhM2EiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMTgwIiB5PSI0MjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnB5dGhvbjozLjEyLWFscGluZSAocmVhZC1vbmx5KTwvdGV4dD4KICA8IS0tIE9TIGxheWVyIC0tPgogIDxyZWN0IHg9IjkwIiB5PSI0MzgiIHdpZHRoPSIxODAiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMWEyNjM4IiBzdHJva2U9IiMzMzQxNTUiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjE4MCIgeT0iNDU1IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5BbHBpbmUgYmFzZSAocmVhZC1vbmx5KTwvdGV4dD4KCiAgPCEtLSBQcm9jZXNzIGluIGNvbnRhaW5lciAtLT4KICA8cmVjdCB4PSIzMDAiIHk9IjM3OCIgd2lkdGg9IjE2MCIgaGVpZ2h0PSI4NiIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMzgwIiB5PSIzOTciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiNhNzhiZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkFnZW50IENvZGUgUHJvY2VzczwvdGV4dD4KICA8dGV4dCB4PSIzODAiIHk9IjQxNCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5VSUQgMTAwMCwgUElEIDE8L3RleHQ+CiAgPHRleHQgeD0iMzgwIiB5PSI0MzAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+bm8gc2hlbGwgLyBubyBwa2cgbWdyPC90ZXh0PgogIDx0ZXh0IHg9IjM4MCIgeT0iNDQ2IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnN0ZG91dCBjYXB0dXJlZCBvbmx5PC90ZXh0PgogIDx0ZXh0IHg9IjM4MCIgeT0iNDYxIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPm5ldHdvcms9bm9uZTwvdGV4dD4KCiAgPCEtLSBCbG9ja2VkIGVzY2FwZSBhdHRlbXB0cyAtLT4KICA8cmVjdCB4PSI0OTAiIHk9IjM3OCIgd2lkdGg9IjI0MCIgaGVpZ2h0PSI4NiIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2Y4NzE3MSIgc3Ryb2tlLXdpZHRoPSIxIiBzdHJva2UtZGFzaGFycmF5PSI0LDIiLz4KICA8dGV4dCB4PSI2MTAiIHk9IjM5NyIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2Y4NzE3MSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+QmxvY2tlZCBFc2NhcGUgQXR0ZW1wdHM8L3RleHQ+CiAgPHRleHQgeD0iNjEwIiB5PSI0MTYiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+4pyXICBob3N0IGZpbGVzeXN0ZW0gYWNjZXNzPC90ZXh0PgogIDx0ZXh0IHg9IjYxMCIgeT0iNDMyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuKclyAgb3V0Ym91bmQgbmV0d29yayBjYWxsczwvdGV4dD4KICA8dGV4dCB4PSI2MTAiIHk9IjQ0OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7inJcgIHByaXZpbGVnZSBlc2NhbGF0aW9uPC90ZXh0PgogIDx0ZXh0IHg9IjYxMCIgeT0iNDY0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPuKclyAga2VybmVsIGV4cGxvaXQgcGF0aHM8L3RleHQ+CgogIDwhLS0gQXJyb3c6IHN0ZG91dCBvdXQgb2YgY29udGFpbmVyIC0tPgogIDxsaW5lIHgxPSI0MTAiIHkxPSI0ODQiIHgyPSI0MTAiIHkyPSI1MTgiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2Fycm93LWdyZWVuKSIvPgoKICA8IS0tIE91dHB1dCBsYWJlbCAtLT4KICA8dGV4dCB4PSI0MzIiIHk9IjUwNyIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzM0ZDM5OSI+c2FuaXRpemVkIHN0ZG91dCBvbmx5PC90ZXh0PgoKICA8IS0tID09PT09IE91dHB1dCAvIHJldHVybmVkIHJlc3VsdCA9PT09PSAtLT4KICA8cmVjdCB4PSIyNzAiIHk9IjUyNCIgd2lkdGg9IjI4MCIgaGVpZ2h0PSIzNCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjU0NiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzM0ZDM5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+UmVzdWx0IHJldHVybmVkIHRvIE9yY2hlc3RyYXRvcjwvdGV4dD4KCiAgPCEtLSBMZWdlbmQgLS0+CiAgPHJlY3QgeD0iNTUiIHk9IjU0NSIgd2lkdGg9IjExIiBoZWlnaHQ9IjExIiBmaWxsPSJub25lIiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI0LDIiLz4KICA8dGV4dCB4PSI3MiIgeT0iNTU1IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPnNhbmRib3ggYm91bmRhcnk8L3RleHQ+CiAgPHJlY3QgeD0iMTYwIiB5PSI1NDUiIHdpZHRoPSIxMSIgaGVpZ2h0PSIxMSIgZmlsbD0iIzM4YmRmOCIgcng9IjIiLz4KICA8dGV4dCB4PSIxNzciIHk9IjU1NSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij50cnVzdGVkIGRhdGEgcGF0aDwvdGV4dD4KICA8cmVjdCB4PSIyNjAiIHk9IjU0NSIgd2lkdGg9IjExIiBoZWlnaHQ9IjExIiBmaWxsPSIjZjg3MTcxIiByeD0iMiIvPgogIDx0ZXh0IHg9IjI3NyIgeT0iNTU1IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPmJsb2NrZWQ8L3RleHQ+Cjwvc3ZnPgo=","alt":"Containerization security architecture showing the AI orchestrator sending code through the OCI runtime and security enforcement layers (namespaces, seccomp, cgroups, AppArmor) into an ephemeral container, with escape attempts blocked and only sanitized stdout returned."}},{"type":"paragraph","content":[{"type":"text","text":"The diagram shows the security stack from top to bottom: the orchestrator submits a run request through the OCI runtime, which applies the full enforcement stack before the code process starts. Inside the ephemeral container, image layers are read-only; only a size-limited tmpfs is writable. The only output path is captured stdout flowing back up to the orchestrator — all other interactions with the host (filesystem reads, network connections, privilege escalations) are intercepted at the enforcement layer."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Mental Model"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of a container sandbox as a sealed examination room. The AI agent (invigilator) passes an exam paper (code) through a slot in the wall. Inside the room, a student (the container process) works on the exam using only the tools pre-loaded in the room — no phone, no textbook, no external contact. When finished, the student passes the answer sheet back through the slot. The room itself is destroyed and rebuilt from scratch for the next student."}]},{"type":"paragraph","content":[{"type":"text","text":"The security properties follow naturally from this model: the room's contents are determined before the exam starts (the image), the room cannot be modified during the exam (read-only root), the student cannot communicate with the outside world (network isolation), and the only thing that leaves is the answer sheet (stdout), which the invigilator checks before acting on it. This model also makes the attack surface clear: the only leverage an adversarial exam paper has on the outside world is what it writes in the answers."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"When to Use It"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Any agent with a code-execution tool"},{"type":"text","text":" — the moment an agent can run Python, JavaScript, or shell, every invocation must be containerized. There is no secure alternative for production deployments."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Multi-agent pipelines where one agent evaluates code from another"},{"type":"text","text":" — when an orchestrator agent passes code to a sub-agent for evaluation, the evaluation step must be containerized regardless of the apparent trust level of the generating agent."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Data analysis over regulated or sensitive data"},{"type":"text","text":" — agent-generated pandas or SQL scripts processing PII must run in network-isolated containers so they cannot exfiltrate the data even if compromised."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"AI-assisted CI/CD pipelines"},{"type":"text","text":" — agent-generated build scripts, test generation, or deployment automation must be sandboxed to prevent access to production credentials and infrastructure."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"When NOT to use it at the inference layer"},{"type":"text","text":" — model inference (calling the LLM API) does not benefit from containerization in most architectures. The boundary is at code execution, not at text generation. Containerize the tool-call executor, not the LLM client."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"When NOT to use full containers for purely in-process tools"},{"type":"text","text":" — lightweight tools that only manipulate in-memory data structures (e.g., a JSON formatter) and make no OS calls do not need container isolation. The overhead is not justified for purely functional transforms."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"How to Implement"}]},{"type":"paragraph","content":[{"type":"text","text":"The following steps describe building a hardened container-based sandbox for AI agent code execution using Docker. The same options apply to Podman (rootless) and containerd via "},{"type":"text","marks":[{"type":"code"}],"text":"nerdctl"},{"type":"text","text":"."}]},{"type":"orderedList","attrs":{"start":1},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Build a minimal base image."},{"type":"text","text":" Start from "},{"type":"text","marks":[{"type":"code"}],"text":"python:3.12-alpine"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"node:20-alpine"},{"type":"text","text":". Remove package managers, shells, and build tools with a "},{"type":"text","marks":[{"type":"code"}],"text":"RUN apk del apk-tools"},{"type":"text","text":" step. Set a "},{"type":"text","marks":[{"type":"code"}],"text":"USER 1000:1000"},{"type":"text","text":" directive so the process does not start as root."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Create a custom seccomp profile."},{"type":"text","text":" Start from Docker's default profile and remove syscalls not used by the runtime. Deny "},{"type":"text","marks":[{"type":"code"}],"text":"execve"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"fork"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"socket"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"mount"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"ptrace"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"setuid"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"chroot"},{"type":"text","text":" explicitly. Test by running typical agent workloads and checking for seccomp violations in kernel logs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Set resource limits on every run."},{"type":"text","text":" Always specify "},{"type":"text","marks":[{"type":"code"}],"text":"--memory"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"--cpus"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"--pids-limit"},{"type":"text","text":". Do not rely on defaults — they are unlimited on many Docker installations."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Make the root filesystem read-only."},{"type":"text","text":" Pass "},{"type":"text","marks":[{"type":"code"}],"text":"--read-only"},{"type":"text","text":" and mount "},{"type":"text","marks":[{"type":"code"}],"text":"/tmp"},{"type":"text","text":" as a size-limited "},{"type":"text","marks":[{"type":"code"}],"text":"tmpfs"},{"type":"text","text":" for any temporary file writes the code needs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Drop all capabilities and block privilege escalation."},{"type":"text","text":" Use "},{"type":"text","marks":[{"type":"code"}],"text":"--cap-drop=ALL"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"--security-opt no-new-privileges:true"},{"type":"text","text":". Verify with "},{"type":"text","marks":[{"type":"code"}],"text":"docker inspect"},{"type":"text","text":" that the effective capability set is empty."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Disable networking."},{"type":"text","text":" Use "},{"type":"text","marks":[{"type":"code"}],"text":"--network=none"},{"type":"text","text":" unless the code legitimately requires network access, in which case use a dedicated restricted bridge network with an explicit egress allowlist enforced by iptables or a cloud security group."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Enforce a wall-clock timeout."},{"type":"text","text":" Wrap the "},{"type":"text","marks":[{"type":"code"}],"text":"docker run"},{"type":"text","text":" call in an orchestrator-level timeout. After the deadline, call "},{"type":"text","marks":[{"type":"code"}],"text":"docker rm -f"},{"type":"text","text":" to immediately destroy the container."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Sanitize and cap stdout before returning to the agent."},{"type":"text","text":" Truncate output at a fixed byte limit (e.g., 16 KB), validate UTF-8 encoding, strip ANSI escape sequences, and treat the result as untrusted content when constructing the next LLM prompt."}]}]}]},{"type":"codeBlock","attrs":{"language":"dockerfile"},"content":[{"type":"text","text":"# Minimal Python sandbox image for AI agent code execution\nFROM python:3.12-alpine AS base\n\n# Install only runtime dependencies; remove package manager after\nRUN pip install --no-cache-dir numpy pandas && \\\n    pip cache purge\n\n# Remove apk to prevent package installation during execution\nRUN apk del apk-tools busybox wget curl || true\n\n# Remove shells that could be used for command execution\nRUN rm -f /bin/sh /bin/ash /usr/bin/env\n\n# Create a non-root user for running agent code\nRUN addgroup -S sandbox && adduser -S -G sandbox -u 1000 sandbox\n\n# Set working directory accessible to sandbox user\nRUN mkdir /workspace && chown sandbox:sandbox /workspace\nWORKDIR /workspace\n\nUSER sandbox\n\n# No CMD — the orchestrator passes code via volume mount"}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Examples"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Example 1 — Minimal hardened docker run for agent code"}]},{"type":"paragraph","content":[{"type":"text","text":"The following command executes agent-generated Python code from a read-only bind mount with the full set of security flags applied. The code is passed as a file (not a command-line argument) to avoid shell injection through argument escaping."}]},{"type":"codeBlock","attrs":{"language":"bash"},"content":[{"type":"text","text":"#!/usr/bin/env bash\n# execute_agent_code.sh <script_path>\n# Runs an agent-generated Python script inside a hardened container.\n\nSCRIPT=\"$(realpath \"$1\")\"\nTIMEOUT=20\n\ndocker run \\\n  --rm \\\n  --name \"agent-sandbox-$$\" \\\n  --memory=\"128m\" \\\n  --memory-swap=\"128m\" \\\n  --cpus=\"0.5\" \\\n  --pids-limit=32 \\\n  --network=none \\\n  --read-only \\\n  --tmpfs /tmp:size=32m,noexec,nosuid \\\n  --cap-drop=ALL \\\n  --security-opt no-new-privileges:true \\\n  --security-opt seccomp=/etc/docker/seccomp/agent-sandbox.json \\\n  --user 1000:1000 \\\n  --volume \"${SCRIPT}:/workspace/run.py:ro\" \\\n  agent-sandbox:latest \\\n  timeout \"${TIMEOUT}\" python /workspace/run.py 2>/dev/null\n\n# Non-zero exit code from timeout(1) means the process was killed."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Example 2 — Python SDK wrapper with resource enforcement and output caps"}]},{"type":"paragraph","content":[{"type":"text","text":"Orchestrators typically call the Docker SDK from Python rather than shelling out. The following wrapper handles timeouts, truncates output, and ensures the container is always removed even when the execution raises an exception."}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"import docker\nimport tempfile\nimport os\nimport re\n\nMEMORY_LIMIT = \"128m\"\nCPU_LIMIT = 0.5          # fraction of one CPU core\nPIDS_LIMIT = 32\nTIMEOUT_SEC = 20\nMAX_OUTPUT_BYTES = 16_384  # 16 KB\nSECCOMP_PROFILE = \"/etc/docker/seccomp/agent-sandbox.json\"\n\ndef run_agent_code(code: str) -> dict:\n    \"\"\"\n    Execute agent-generated Python code in a hardened container.\n\n    Returns:\n        {\"stdout\": str, \"exit_code\": int, \"timed_out\": bool, \"error\": str | None}\n    \"\"\"\n    client = docker.from_env()\n\n    # Write agent code to a temp file to avoid command-line injection\n    with tempfile.NamedTemporaryFile(\n        mode=\"w\", suffix=\".py\", dir=\"/tmp\", delete=False\n    ) as fh:\n        fh.write(code)\n        script_path = fh.name\n\n    container = None\n    try:\n        container = client.containers.run(\n            image=\"agent-sandbox:latest\",\n            command=[\"python\", \"/workspace/run.py\"],\n            volumes={script_path: {\"bind\": \"/workspace/run.py\", \"mode\": \"ro\"}},\n            detach=True,\n            # Resource limits\n            mem_limit=MEMORY_LIMIT,\n            memswap_limit=MEMORY_LIMIT,  # disable swap\n            nano_cpus=int(CPU_LIMIT * 1e9),\n            pids_limit=PIDS_LIMIT,\n            # Isolation\n            network_mode=\"none\",\n            read_only=True,\n            tmpfs={\"/tmp\": \"size=32m,noexec,nosuid\"},\n            cap_drop=[\"ALL\"],\n            security_opt=[\n                \"no-new-privileges:true\",\n                f\"seccomp={SECCOMP_PROFILE}\",\n            ],\n            user=\"1000:1000\",\n        )\n\n        timed_out = False\n        try:\n            container.wait(timeout=TIMEOUT_SEC)\n        except Exception:\n            timed_out = True\n            container.kill()\n\n        raw = container.logs(stdout=True, stderr=False)\n        stdout = raw[:MAX_OUTPUT_BYTES].decode(\"utf-8\", errors=\"replace\")\n        # Strip ANSI escape codes to prevent terminal injection\n        stdout = re.sub(r\"\\x1b\\[[0-9;]*[mGKHF]\", \"\", stdout)\n\n        state = container.attrs.get(\"State\", {}) if not timed_out else {}\n        exit_code = state.get(\"ExitCode\", -1) if not timed_out else -1\n\n        return {\"stdout\": stdout, \"exit_code\": exit_code,\n                \"timed_out\": timed_out, \"error\": None}\n\n    except Exception as exc:\n        return {\"stdout\": \"\", \"exit_code\": -1,\n                \"timed_out\": False, \"error\": str(exc)}\n    finally:\n        if container:\n            container.remove(force=True)\n        os.unlink(script_path)"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Example 3 — Custom seccomp profile for a Python-only sandbox"}]},{"type":"paragraph","content":[{"type":"text","text":"A seccomp allowlist that covers only the system calls a Python 3.12 process makes during pure computation — no subprocess spawning, no sockets, no filesystem writes outside pre-opened file descriptors."}]},{"type":"codeBlock","attrs":{"language":"json"},"content":[{"type":"text","text":"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"syscalls\": [\n    {\n      \"names\": [\n        \"read\", \"write\", \"close\", \"fstat\", \"lseek\",\n        \"mmap\", \"mprotect\", \"munmap\", \"brk\",\n        \"rt_sigaction\", \"rt_sigprocmask\", \"rt_sigreturn\",\n        \"getpid\", \"getppid\", \"gettid\", \"getuid\", \"getgid\",\n        \"getegid\", \"geteuid\",\n        \"clock_gettime\", \"clock_nanosleep\", \"nanosleep\",\n        \"futex\", \"set_robust_list\", \"sched_yield\",\n        \"openat\", \"newfstatat\", \"pread64\", \"readv\", \"writev\",\n        \"getrandom\", \"rseq\",\n        \"exit\", \"exit_group\"\n      ],\n      \"action\": \"SCMP_ACT_ALLOW\"\n    }\n  ]\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"Key exclusions: "},{"type":"text","marks":[{"type":"code"}],"text":"execve"},{"type":"text","text":" (no subprocess), "},{"type":"text","marks":[{"type":"code"}],"text":"fork"},{"type":"text","text":"/"},{"type":"text","marks":[{"type":"code"}],"text":"clone"},{"type":"text","text":" (no child processes), "},{"type":"text","marks":[{"type":"code"}],"text":"socket"},{"type":"text","text":"/"},{"type":"text","marks":[{"type":"code"}],"text":"connect"},{"type":"text","text":" (no network), "},{"type":"text","marks":[{"type":"code"}],"text":"mount"},{"type":"text","text":" (no filesystem mounts), "},{"type":"text","marks":[{"type":"code"}],"text":"ptrace"},{"type":"text","text":" (no process tracing), "},{"type":"text","marks":[{"type":"code"}],"text":"setuid"},{"type":"text","text":"/"},{"type":"text","marks":[{"type":"code"}],"text":"setgid"},{"type":"text","text":" (no privilege change). Any attempt to call these returns EPERM, which Python converts to an "},{"type":"text","marks":[{"type":"code"}],"text":"OSError"},{"type":"text","text":" the agent can observe."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Real-World Example"}]},{"type":"paragraph","content":[{"type":"text","text":"A healthcare analytics platform deploys an AI assistant that generates custom SQL and Python analysis scripts on demand, running them against de-identified patient datasets. Patient data is loaded into a read-only PostgreSQL container accessible only within an isolated Docker bridge network. Agent-generated Python scripts that query the database run in a separate analysis container on the same bridge, with egress rules permitting only connections to the PostgreSQL container on port 5432 — all other outbound connections are dropped by iptables. Each analysis container is torn down after the query completes; no state persists between sessions."}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"import docker\nimport json\nimport tempfile\nimport os\n\nANALYSIS_IMAGE = \"health-analytics-sandbox:2.1.0\"\nDB_NETWORK = \"analytics-internal\"   # restricted bridge; only port 5432 egress\nMAX_MEMORY = \"512m\"\nMAX_CPU = 1.0\nTIMEOUT_SEC = 60\n\ndef run_health_analysis(agent_sql_script: str) -> dict:\n    \"\"\"\n    Execute an agent-generated analytics script against the de-identified\n    patient database. Network restricted to internal analytics bridge only.\n    \"\"\"\n    client = docker.from_env()\n\n    with tempfile.NamedTemporaryFile(\n        mode=\"w\", suffix=\".py\", delete=False\n    ) as fh:\n        fh.write(agent_sql_script)\n        script_path = fh.name\n\n    container = None\n    try:\n        container = client.containers.run(\n            image=ANALYSIS_IMAGE,\n            command=[\"python\", \"/analysis/script.py\"],\n            volumes={script_path: {\"bind\": \"/analysis/script.py\", \"mode\": \"ro\"}},\n            detach=True,\n            # Resource limits\n            mem_limit=MAX_MEMORY,\n            memswap_limit=MAX_MEMORY,\n            nano_cpus=int(MAX_CPU * 1e9),\n            pids_limit=64,\n            # Network: internal only — PostgreSQL reachable, internet blocked\n            network=DB_NETWORK,\n            # Filesystem isolation\n            read_only=True,\n            tmpfs={\"/tmp\": \"size=64m,noexec\"},\n            # Privilege restrictions\n            cap_drop=[\"ALL\"],\n            security_opt=[\"no-new-privileges:true\"],\n            user=\"1000:1000\",\n            # Environment: only the DB URL, no credentials for other services\n            environment={\"DB_URL\": \"postgresql://readonly@analytics-db:5432/deidentified\"},\n        )\n\n        timed_out = False\n        try:\n            container.wait(timeout=TIMEOUT_SEC)\n        except Exception:\n            timed_out = True\n            container.kill()\n\n        output = container.logs(stdout=True, stderr=False)[:32768]\n        result = json.loads(output.decode(\"utf-8\")) if not timed_out else {}\n        return {\"data\": result, \"timed_out\": timed_out}\n\n    finally:\n        if container:\n            container.remove(force=True)\n        os.unlink(script_path)"}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern ensures that even if the agent generates a script that attempts to call external APIs, POST data to an attacker server, or read host files, every such attempt is blocked at the network or filesystem layer before it reaches the OS. The only observable side effect of the container run is the JSON written to stdout."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Common Mistakes"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Running the sandbox container as root"},{"type":"text","text":" — the default UID in many base images is 0. Without an explicit "},{"type":"text","marks":[{"type":"code"}],"text":"--user 1000:1000"},{"type":"text","text":" flag (or a "},{"type":"text","marks":[{"type":"code"}],"text":"USER"},{"type":"text","text":" directive in the image), a kernel escape hands the attacker root on the host."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Mounting the Docker socket"},{"type":"text","text":" — mounting "},{"type":"text","marks":[{"type":"code"}],"text":"/var/run/docker.sock"},{"type":"text","text":" inside a container gives that container the ability to create new privileged containers, effectively granting host root. This is an unconditional sandbox escape and must never appear in a sandbox specification."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Using --privileged mode"},{"type":"text","text":" — "},{"type":"text","marks":[{"type":"code"}],"text":"--privileged"},{"type":"text","text":" grants the container all capabilities and disables the seccomp profile, effectively removing the entire security boundary. It is for container management tooling, not agent sandboxes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Passing agent code via environment variables"},{"type":"text","text":" — environment variables are visible in "},{"type":"text","marks":[{"type":"code"}],"text":"/proc/self/environ"},{"type":"text","text":" to all processes in the container and can be logged by some runtimes. Always pass code via a read-only file mount or stdin."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Not removing containers after execution"},{"type":"text","text":" — without "},{"type":"text","marks":[{"type":"code"}],"text":"--rm"},{"type":"text","text":" or an explicit "},{"type":"text","marks":[{"type":"code"}],"text":"docker rm -f"},{"type":"text","text":", stopped containers accumulate on the host, consuming disk space through their writable layers and creating a forensic record of every run that may contain sensitive data."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Not capping stdout length"},{"type":"text","text":" — without a byte limit on captured output, a sandbox that returns unlimited data allows code to write hundreds of megabytes of content back to the orchestrator, wasting tokens or embedding large prompt-injection payloads that exceed the context window."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Using image tags instead of digests"},{"type":"text","text":" — pulling "},{"type":"text","marks":[{"type":"code"}],"text":"python:3.12-alpine"},{"type":"text","text":" by tag does not guarantee the same image across runs; a supply-chain attack that compromises the tag on Docker Hub will silently swap the base image. Pin with "},{"type":"text","marks":[{"type":"code"}],"text":"@sha256:<digest>"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Reusing containers between agent turns"},{"type":"text","text":" — if the same container is reused, files written to "},{"type":"text","marks":[{"type":"code"}],"text":"/tmp"},{"type":"text","text":" by one execution are visible to the next. Each agent code execution must use a fresh container."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best Practices"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Layer all five security mechanisms — no single layer is sufficient."},{"type":"text","text":" Namespaces partition resources; cgroups cap resource usage; seccomp restricts syscalls; capabilities limit privilege; MAC adds path-level control. Omitting any one layer creates a class of attacks not covered by the others."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Use allowlist-based seccomp profiles."},{"type":"text","text":" A denylist must enumerate every dangerous syscall and will miss any new or unusual attack vector. An allowlist starts from zero and adds only what is verified to be needed by the specific runtime."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Pre-warm a pool of idle containers."},{"type":"text","text":" Cold container startup (including image layer mount, namespace setup, and cgroup creation) takes 100–500 ms. For interactive agent use cases with a 2-second response target, maintain a pool of 5–20 warm containers per worker and swap them out after each use, replenishing asynchronously."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Pin images by digest and scan for CVEs on every build."},{"type":"text","text":" Tools like Trivy, Snyk, or Grype can scan images in CI and block promotion of images with critical-severity CVEs. Pin the base image digest in the Dockerfile to guarantee reproducibility."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Log every execution with its full security context."},{"type":"text","text":" Append an audit record containing the container ID, the seccomp profile applied, the resource limits, the exit code, elapsed time, and the first 1 KB of stdout. This provides post-incident forensic evidence without storing sensitive full outputs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Fail closed on security option rejection."},{"type":"text","text":" If the container runtime rejects the seccomp profile, refuses to apply a capability drop, or fails to mount the tmpfs, abort the execution entirely. Never fall back to an unsandboxed run."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Use rootless containers where possible."},{"type":"text","text":" Running the container runtime itself as a non-root user (Podman rootless, Docker rootless mode) means that even a complete container escape only grants unprivileged host access, dramatically limiting the damage of a kernel exploit."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Performance and Scalability"}]},{"type":"paragraph","content":[{"type":"text","text":"The primary latency cost of containerized AI agent execution is container startup time. On a host with the image already pulled and cached in the layer store, creating a new container, applying seccomp and cgroup configuration, and reaching the point where the process is executing Python typically takes 100–300 ms with the standard "},{"type":"text","marks":[{"type":"code"}],"text":"runc"},{"type":"text","text":" runtime. This is acceptable for background analysis workloads (batch jobs, async pipelines) but marginal for synchronous interactive agents where the user expects sub-second response times."}]},{"type":"paragraph","content":[{"type":"text","text":"Pre-warmed container pools reduce the effective startup overhead to near zero from the agent's perspective. In this model, a pool manager creates a set of idle containers at startup, each already past the namespace/cgroup initialization phase and waiting for work. When the orchestrator needs a sandbox, it withdraws a container from the pool, injects the code via a Unix domain socket or a watch on a pre-mounted directory, captures the output, and returns the container (or, in the ephemeral model, destroys it and instructs the pool to replenish with a fresh one). Netflix's Titus, AWS Lambda (via Firecracker), and E2B all use variants of this warm-pool pattern."}]},{"type":"paragraph","content":[{"type":"text","text":"Memory overhead per container slot depends on the base image and the workload. A "},{"type":"text","marks":[{"type":"code"}],"text":"python:3.12-alpine"},{"type":"text","text":" container consumes roughly 40–60 MB RSS before any user code runs. On a machine with 32 GB RAM, accounting for OS and orchestrator overhead, approximately 400–500 concurrent Python sandbox slots are theoretically possible — though in practice contention on the Docker daemon's gRPC endpoint becomes a bottleneck at around 100–200 concurrent creates/removes per second. Beyond that rate, use a higher-level scheduler (Kubernetes Jobs, a custom container pool daemon, or a managed service) to distribute work across multiple daemon endpoints."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tooling and Ecosystem"}]},{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Tool / Service"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Role"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Key capability for AI sandboxing"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Docker Engine"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Container runtime"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Full seccomp, cgroup v2, AppArmor, rootless mode; widely supported"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Podman (rootless)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Daemonless OCI runtime"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"No daemon required; rootless by default; drops privileges at host level"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"containerd + nerdctl"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Industry-standard runtime"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Kubernetes-native; used by most managed container platforms; snapshotter plugins"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"gVisor (runsc)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"User-space kernel runtime"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Intercepts syscalls in Go user-space kernel; eliminates kernel-sharing risk"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Trivy / Grype"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Image CVE scanning"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Scans image layers for known vulnerabilities in CI before promotion"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Falco"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Runtime anomaly detection"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Detects unexpected syscall patterns, /proc reads, network socket creation inside containers"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"E2B (e2b.dev)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Managed sandbox service"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Firecracker-backed sandboxes; SDK for Python/JS; designed for LLM code execution"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Cosign / DCT"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Image signing and verification"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Verifies that the image pulled at runtime matches the CI-built and signed artifact"}]}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Comparison with Alternatives"}]},{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Approach"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Isolation strength"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Startup overhead"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Best fit"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Bare subprocess (no sandbox)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"None"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"<5 ms"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Trusted developer tooling only"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"RestrictedPython / AST filtering"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Very low (bypassable via ctypes/cffi)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"<1 ms"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Low-risk educational contexts"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Container (OCI) + seccomp/cgroups"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Medium (kernel shared)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"100–300 ms cold; ~0 ms warm"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Most production AI code execution"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Container + gVisor (runsc)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"High (user-space kernel)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"150–400 ms cold"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Security-critical or multi-tenant SaaS"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Firecracker microVM"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Very high (separate kernel)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"125–300 ms cold; ~150 ms warm"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Regulated / adversarial workloads"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"WebAssembly (WASI)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"High (capability-based sandbox)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"<5 ms (in-process)"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"JS/TS plugins; limited language support"}]}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"OCI containers with the full security stack applied occupy the sweet spot for most production agentic AI deployments: they offer meaningful isolation, work with the existing ecosystem of tooling and managed platforms, and can be performance-tuned with pre-warming to approach the latency of bare subprocesses. Escalating to gVisor or Firecracker is warranted when the threat model includes adversarial code that actively attempts kernel exploits, or when regulatory requirements mandate VM-level isolation between tenant workloads."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Security and Reliability"}]},{"type":"paragraph","content":[{"type":"text","text":"The dominant residual risk in OCI container isolation is a kernel-level exploit. Because all containers on a host share the Linux kernel, a working exploit for a kernel namespace or seccomp bypass CVE can grant the attacker host-level privileges even in a well-configured sandbox. The Linux kernel releases approximately 200–400 CVEs per year; of these, a handful typically affect container isolation primitives. The practical mitigation strategy has three pillars: minimize exposure time through rapid kernel patching, increase isolation depth for high-risk workloads with gVisor or Firecracker, and detect anomalous behavior at runtime."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Kernel patch cadence"},{"type":"text","text":" — the sandbox fleet's host OS must be patched within 24–72 hours of a kernel security release. Automate OS patching and schedule container host reboots during low-traffic windows. An unpatched kernel is the most common reason a theoretically strong container security posture is actually weak."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Runtime anomaly detection with Falco"},{"type":"text","text":" — Falco attaches an eBPF probe to the kernel and alerts on syscall patterns that indicate suspicious activity inside containers: unexpected "},{"type":"text","marks":[{"type":"code"}],"text":"execve"},{"type":"text","text":" calls (seccomp misconfiguration), writes to "},{"type":"text","marks":[{"type":"code"}],"text":"/proc"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"/sys"},{"type":"text","text":", socket creation in a no-network container, or access to "},{"type":"text","marks":[{"type":"code"}],"text":"setuid"},{"type":"text","text":" binaries."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Image signing and provenance verification"},{"type":"text","text":" — use Cosign or Docker Content Trust to cryptographically sign images at build time and verify signatures before pulling. A compromised registry tag that bypasses signature verification is a supply-chain attack vector that bypasses all runtime security controls."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Graceful handling of OOM kills and timeouts"},{"type":"text","text":" — the orchestrator must detect when a container exits due to OOM kill (exit code 137) or timeout and return a structured error to the agent rather than silently failing or retrying with larger resource limits. Automatic resource limit escalation on retry is a denial-of-service vector."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Output integrity and injection prevention"},{"type":"text","text":" — validate that captured stdout is within the byte limit, is valid UTF-8, and does not contain known prompt-injection patterns (e.g., "},{"type":"text","marks":[{"type":"code"}],"text":"\\n\\nHuman:"},{"type":"text","text":" sequences) before inserting it into the next LLM context window. Treat container output as external, untrusted content regardless of what the code was supposed to do."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Defense in depth beyond the container"},{"type":"text","text":" — containerization is one layer. It works alongside prompt-level guardrails (preventing the model from generating overtly malicious code), output classifiers (detecting injected instructions in stdout), and data access controls (read-only mounts with minimal data exposure). No single control is sufficient on its own."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Key Takeaways"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Containerization security for AI agent code execution combines five independent kernel mechanisms: Linux namespaces (resource partitioning), cgroups v2 (resource limits), seccomp (syscall allowlisting), capabilities (privilege reduction), and MAC frameworks like AppArmor (path-level policy) — each layer independently limits a different class of attack."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The OCI standard (Docker, containerd, Podman) provides a portable, version-controllable security contract: the "},{"type":"text","marks":[{"type":"code"}],"text":"docker run"},{"type":"text","text":" flags, seccomp JSON profile, and cgroup settings that harden the sandbox are code-reviewable artifacts that travel with the deployment."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Every container running agent-generated code should use "},{"type":"text","marks":[{"type":"code"}],"text":"--read-only"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"--cap-drop=ALL"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"--network=none"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"--user 1000:1000"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"--pids-limit"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"--memory"},{"type":"text","text":", and an explicit seccomp profile. These are not optional hardening tweaks — they are the baseline security policy."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The shared host kernel is the fundamental limitation of OCI containers: a kernel CVE can enable escape even from a perfectly configured sandbox. For adversarial or compliance-critical workloads, escalate to gVisor (user-space kernel) or Firecracker (separate kernel per sandbox) to eliminate this shared surface."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Pre-warmed container pools are required for interactive agentic use cases — cold container startup of 100–300 ms makes per-request sandbox creation impractical at conversational response times."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Never mount the Docker socket, never use "},{"type":"text","marks":[{"type":"code"}],"text":"--privileged"},{"type":"text","text":", and never pass code via environment variables inside a sandbox container — these three anti-patterns each independently provide a path to full host compromise."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The output path (stdout returned to the orchestrator) is the primary remaining attack surface: length-cap it, validate encoding, strip terminal escape sequences, and treat it as untrusted external content before inserting it into any LLM prompt."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Container image supply-chain hygiene is as important as runtime security: pin base images by digest, sign images in CI with Cosign, scan for CVEs before promotion, and patch host kernels within 48 hours of security releases."}]}]}]}]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Containerization security is the practice of using Linux container primitives — namespaces, control groups, seccomp filters, and mandatory access control — to isolate the execution of agent tools so that a compromised or misbehaving tool cannot affect the host system or other workloads. In agentic AI systems, where a language model may invoke arbitrary code execution, shell commands, or third-party API clients, the container boundary acts as the last line of defense: even if the model is tricked into running malicious code, the blast radius is confined to the ephemeral container."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unlike virtual machines, containers share the host kernel, which makes them lighter and faster to start but means isolation relies on kernel namespace separation rather than hypervisor boundaries. The security guarantees are narrower than full VM isolation, and require deliberate hardening: a container launched with default Docker settings has fewer than half the security controls described in this topic enabled. Getting containerization security right means understanding which kernel mechanisms exist, which are enforced by default, and how to configure the ones that are not."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Agentic AI systems are fundamentally different from conventional web applications when it comes to code execution risk. A traditional server executes code written by its own developers. An agent executes code that was — directly or indirectly — influenced by external inputs: the user's messages, content retrieved from the web, documents uploaded by third parties, or instructions hallucinated by the model itself. Any of these can contain adversarial payloads that attempt to exploit the execution environment."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without containerization, a compromised tool call runs with the same privileges as the orchestration process: it can read application secrets, write to persistent storage, make outbound network calls, and in some cases elevate privileges. A single successful prompt-injection attack that triggers a tool call becomes a full host compromise. With containerization, the same attack is limited to reading files inside the container image and writing to the ephemeral scratch filesystem — neither of which persists beyond the container lifetime."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Blast radius containment: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A malicious or buggy tool call cannot access host files, credentials, or network resources beyond what the container is explicitly granted."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Process isolation: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "The PID namespace ensures the tool's processes cannot see or signal host processes. Fork bombs are blocked by PID limits (--pids-limit)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Resource enforcement: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "cgroups enforce hard limits on CPU, memory, and I/O, preventing a runaway computation or denial-of-service from starving the host."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Network isolation: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Setting --network=none prevents the tool from making outbound HTTP calls, exfiltrating data, or reaching internal services."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Filesystem immutability: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A read-only root filesystem ensures the tool cannot modify its own image or leave persistent artifacts, making each run fully reproducible."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Capability drop: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Dropping all Linux capabilities removes the ability to perform privileged operations such as loading kernel modules or changing file ownership."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Auditability: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Container runtimes log start and stop events with full command lines, making tool invocations auditable without instrumenting application code."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Kernel sharing: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Containers share the host kernel. A kernel exploit inside the tool's container may escape to the host. This is why kernel-level sandboxes like gVisor or Kata Containers exist for highest-risk workloads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cold-start latency: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Launching a new container per tool invocation adds 200-800ms depending on image size. Pre-warmed container pools reduce this but add operational complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Image management: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Each tool type requires a maintained container image. Outdated base images introduce CVEs; image pipelines require ongoing CI/CD integration."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Orchestration complexity: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Running tools in containers requires a container runtime on every agent host, complicating serverless and edge deployment scenarios."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not a complete defense: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Containerization does not prevent a tool from consuming its full CPU/memory budget before cgroups kill it, or from performing valid operations that are semantically harmful."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Container isolation is assembled from several independent Linux kernel mechanisms. Understanding each mechanism separately is critical because they compose independently — enabling one does not imply the others are active."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Linux namespaces"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Namespaces partition global kernel resources so that each container has its own isolated view. The key namespace types are: PID (process identifiers), NET (network stack), MNT (filesystem mount points), IPC (inter-process communication), USER (UID/GID mappings), and UTS (hostname). A container with separate PID and NET namespaces cannot see host processes or send packets on the host's network interface."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Control groups (cgroups v2)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "cgroups impose hard resource limits on a container's processes. The relevant subsystems are: memory (maximum RSS + page cache), cpu (CPU time fraction), pids (maximum number of concurrent processes), and blkio (block I/O bandwidth). When a container exceeds its memory limit, the kernel OOM-kills the container's most memory-hungry process."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{memory\\_usage} \\leq \\text{memory\\_limit} \\quad \\Rightarrow \\quad \\text{OOM-kill on violation}"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Seccomp (Secure Computing Mode)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Seccomp allows a process to declare which system calls it is allowed to make. Any call not on the allowlist returns EPERM. Docker's default seccomp profile blocks roughly 44 of 300+ available syscalls. A hardened profile for agent tools goes further: it blocks mount, ptrace, kexec, syslog, and all clock-manipulation syscalls. The seccomp profile is a JSON file pinned to the container at launch time and cannot be modified from within the container."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Linux capabilities and MAC"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The --cap-drop=ALL flag removes all Linux capabilities from the container's root user. A Python or Node.js tool typically needs zero capabilities, so --cap-drop=ALL with no cap-add is the correct baseline. Mandatory Access Control (AppArmor or SELinux) provides an additional, independently-enforced layer: Docker's default AppArmor profile restricts file writes to specific paths and blocks raw socket creation, and this enforcement survives even a namespace escape."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows the four security layers that protect the host from a tool executed inside an agent container. Each layer is independently enforced by the kernel and must be explicitly configured."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMzIwIiB2aWV3Qm94PSIwIDAgODIwIDMyMCI+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIzMjAiIGZpbGw9IiMwZjE3MmEiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjI0IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMyIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNlMmU4ZjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNvbnRhaW5lciBTZWN1cml0eSBMYXllcnMgZm9yIEFnZW50aWMgQUkgVG9vbCBFeGVjdXRpb248L3RleHQ+CgogIDwhLS0gQWdlbnRpYyBBSSBib3ggLS0+CiAgPHJlY3QgeD0iMzEwIiB5PSIzOCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI0NCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjU3IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzOGJkZjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkFnZW50aWMgQUkgU3lzdGVtPC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iNzQiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5MTE0gKyBPcmNoZXN0cmF0b3I8L3RleHQ+CgogIDwhLS0gQXJyb3cgZG93biAtLT4KICA8cGF0aCBkPSJNNDEwIDg0IEw0MTAgMTAyIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSI0MzAiIHk9Ijk3IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIj50b29sX2NhbGwoKTwvdGV4dD4KCiAgPCEtLSBDb250YWluZXIgUnVudGltZSBsYWJlbCAtLT4KICA8cmVjdCB4PSIzMCIgeT0iMTA1IiB3aWR0aD0iNzYwIiBoZWlnaHQ9IjE3MiIgcng9IjEwIiBmaWxsPSIjMGYxZjNkIiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI2IDMiLz4KICA8dGV4dCB4PSI1MCIgeT0iMTI0IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNhNzhiZmEiPkNvbnRhaW5lciBSdW50aW1lIChEb2NrZXIgLyBQb2RtYW4gLyBnVmlzb3IpPC90ZXh0PgoKICA8IS0tIE5hbWVzcGFjZSBib3ggLS0+CiAgPHJlY3QgeD0iNDgiIHk9IjEzMiIgd2lkdGg9IjE3OCIgaGVpZ2h0PSIxMjIiIHJ4PSI2IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjEzNyIgeT0iMTUwIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzOGJkZjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPk5hbWVzcGFjZSBJc29sYXRpb248L3RleHQ+CiAgPHRleHQgeD0iNjIiIHk9IjE2OSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+UElEOiBzZXBhcmF0ZSBwcm9jZXNzIHRyZWU8L3RleHQ+CiAgPHRleHQgeD0iNjIiIHk9IjE4NSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+TkVUOiBwcml2YXRlIG5ldHdvcmsgc3RhY2s8L3RleHQ+CiAgPHRleHQgeD0iNjIiIHk9IjIwMSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+TU5UOiBpc29sYXRlZCBmaWxlc3lzdGVtIHZpZXc8L3RleHQ+CiAgPHRleHQgeD0iNjIiIHk9IjIxNyIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+VVNFUjogbWFwcGVkIFVJRC9HSUQ8L3RleHQ+CiAgPHRleHQgeD0iNjIiIHk9IjIzMyIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+SVBDIC8gVVRTOiBob3N0bmFtZSBzY29wZWQ8L3RleHQ+CgogIDwhLS0gY2dyb3VwcyBib3ggLS0+CiAgPHJlY3QgeD0iMjQyIiB5PSIxMzIiIHdpZHRoPSIxNjAiIGhlaWdodD0iMTIyIiByeD0iNiIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzMjIiIHk9IjE1MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZjU5ZTBiIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5SZXNvdXJjZSBDb250cm9sczwvdGV4dD4KICA8dGV4dCB4PSIyNTYiIHk9IjE2OSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+Y2dyb3VwcyB2MjwvdGV4dD4KICA8dGV4dCB4PSIyNTYiIHk9IjE4NSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+Q1BVOiAtLWNwdXM9MC41PC90ZXh0PgogIDx0ZXh0IHg9IjI1NiIgeT0iMjAxIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5NZW1vcnk6IC0tbWVtb3J5PTI1Nm08L3RleHQ+CiAgPHRleHQgeD0iMjU2IiB5PSIyMTciIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPlBJRHM6IC0tcGlkcy1saW1pdD01MDwvdGV4dD4KICA8dGV4dCB4PSIyNTYiIHk9IjIzMyIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+SS9POiBibGtpbyB0aHJvdHRsZTwvdGV4dD4KCiAgPCEtLSBTZWNjb21wL01BQyBib3ggLS0+CiAgPHJlY3QgeD0iNDE4IiB5PSIxMzIiIHdpZHRoPSIxNzQiIGhlaWdodD0iMTIyIiByeD0iNiIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI1MDUiIHk9IjE1MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzRkMzk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5TeXNjYWxsIEZpbHRlcmluZzwvdGV4dD4KICA8dGV4dCB4PSI0MzIiIHk9IjE2OSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+c2VjY29tcCBhbGxvd2xpc3Q8L3RleHQ+CiAgPHRleHQgeD0iNDMyIiB5PSIxODUiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPmJsb2NrOiBtb3VudCwgcHRyYWNlPC90ZXh0PgogIDx0ZXh0IHg9IjQzMiIgeT0iMjAxIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5ibG9jazoga2V4ZWMsIHN5c2xvZzwvdGV4dD4KICA8dGV4dCB4PSI0MzIiIHk9IjIxNyIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+QXBwQXJtb3IgLyBTRUxpbnV4PC90ZXh0PgogIDx0ZXh0IHg9IjQzMiIgeT0iMjMzIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5tYW5kYXRvcnkgYWNjZXNzIGNvbnRyb2w8L3RleHQ+CgogIDwhLS0gRmlsZXN5c3RlbSBib3ggLS0+CiAgPHJlY3QgeD0iNjA4IiB5PSIxMzIiIHdpZHRoPSIxNjQiIGhlaWdodD0iMTIyIiByeD0iNiIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjZmI3MTg1IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2OTAiIHk9IjE1MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZmI3MTg1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5GaWxlc3lzdGVtIENvbnRyb2xzPC90ZXh0PgogIDx0ZXh0IHg9IjYyMiIgeT0iMTY5IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij4tLXJlYWQtb25seSByb290PC90ZXh0PgogIDx0ZXh0IHg9IjYyMiIgeT0iMTg1IiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij50bXBmcyBhdCAvdG1wPC90ZXh0PgogIDx0ZXh0IHg9IjYyMiIgeT0iMjAxIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5ubyBob3N0IHZvbCBtb3VudHM8L3RleHQ+CiAgPHRleHQgeD0iNjIyIiB5PSIyMTciIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPi0tbm8tbmV3LXByaXZpbGVnZXM8L3RleHQ+CiAgPHRleHQgeD0iNjIyIiB5PSIyMzMiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPm5vbi1yb290IFVJRCBpbnNpZGU8L3RleHQ+CgogIDwhLS0gQXJyb3cgZnJvbSBjb250YWluZXIgdG8gdG9vbCBleGVjdXRpb24gLS0+CiAgPHBhdGggZD0iTTQxMCAyNzggTDQxMCAyOTQiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIFRvb2wgZXhlY3V0aW9uIHJlc3VsdCAtLT4KICA8cmVjdCB4PSIyOTAiIHk9IjI5NiIgd2lkdGg9IjI0MCIgaGVpZ2h0PSIxOCIgcng9IjUiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIzMDkiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjkiIGZpbGw9IiMzNGQzOTkiIHRleHQtYW5jaG9yPSJtaWRkbGUiPklzb2xhdGVkIFRvb2wgT3V0cHV0IHJldHVybmVkIHRvIGFnZW50PC90ZXh0PgoKICA8IS0tIEhvc3QgYm91bmRhcnkgbGFiZWwgLS0+CiAgPHRleHQgeD0iNTAiIHk9IjI4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiI+SG9zdCBrZXJuZWwgc2hhcmVkIOKAlCBidXQgYWxsIGFib3ZlIGxheWVycyBwcmV2ZW50IGVzY2FwZTwvdGV4dD4KCiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM0NzU1NjkiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+Cg==",
+          "alt": "Container security layers for agentic AI tool execution: namespaces, cgroups, seccomp, and filesystem controls"
+        }
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use It"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Always apply containerization when"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The agent executes code provided or influenced by end users: Python snippets, shell commands, SQL queries, or JavaScript."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tools make network calls to external services — each tool type should be in its own network-isolated container."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Multiple tenants share the same agent infrastructure and their tool executions must not cross-contaminate."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The agent processes untrusted documents (PDFs, HTML, Office files) using parsing libraries known to have CVEs."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Lighter alternatives may suffice when"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "All tool code is written and maintained by the same trusted team and never touches user-supplied content — use process isolation with minimal filesystem access instead."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency requirements are below 50ms and container cold-start overhead is prohibitive — consider language-level sandboxes such as RestrictedPython or Deno's --allow-none as a complement."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Upgrade to VM-level isolation when"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tools execute native binaries from untrusted sources (compiled artifacts from the internet)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The agent handles highly sensitive data (cryptographic keys, medical records) where a container escape would be catastrophic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Define the minimal image for each tool type. Start from a distroless or slim base (python:3.12-slim, alpine:3.19). Remove shells, package managers, and debug utilities from the final image layer."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Write a custom seccomp JSON allowlist containing only the syscalls your tool's language runtime actually uses. Profile them with strace: strace -ff -o syscalls python3 your_tool.py."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set --cap-drop=ALL and add back only the single capability needed, if any. Most Python and Node.js tools need zero capabilities."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Mount the root filesystem read-only (--read-only) and add explicit tmpfs mounts for /tmp and any other writable paths with a size cap."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set --network=none unless the tool specifically needs outbound access. For tools that need internet access, route through an HTTP proxy with a domain allowlist."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set memory, CPU, and PID limits calibrated to the tool's measured resource usage during testing, with 2x headroom for variance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run the container as a non-root, non-privileged user (--user 65534:65534) and set --no-new-privileges."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement a container pool with pre-warmed idle containers to amortize cold-start latency; destroy and replace each container after one use."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# secure_container_runner.py\n# Launch agent tool commands inside a hardened Docker container.\nimport subprocess, tempfile, json\nfrom pathlib import Path\n\nSECCOMP_PROFILE = json.dumps({\n    \"defaultAction\": \"SCMP_ACT_ERRNO\",\n    \"architectures\": [\"SCMP_ARCH_X86_64\"],\n    \"syscalls\": [{\"names\": [\n        \"read\",\"write\",\"open\",\"openat\",\"close\",\"fstat\",\"stat\",\"lstat\",\n        \"mmap\",\"mprotect\",\"munmap\",\"brk\",\"rt_sigaction\",\"rt_sigprocmask\",\n        \"ioctl\",\"access\",\"pipe\",\"select\",\"sched_yield\",\"clone\",\"fork\",\n        \"execve\",\"exit\",\"wait4\",\"kill\",\"uname\",\"fcntl\",\"getcwd\",\"chdir\",\n        \"rename\",\"mkdir\",\"rmdir\",\"unlink\",\"readlink\",\"getpid\",\"getuid\",\n        \"futex\",\"set_tid_address\",\"exit_group\",\"epoll_ctl\",\"epoll_wait\",\n        \"clock_gettime\",\"nanosleep\",\"arch_prctl\",\"set_robust_list\",\n    ], \"action\": \"SCMP_ACT_ALLOW\"}]\n}, indent=2)\n\n\ndef run_tool_in_container(\n    command: list[str],\n    image: str = \"python:3.12-slim\",\n    timeout_seconds: int = 30,\n    memory_mb: int = 256,\n    cpu_quota: float = 0.5,\n    network: str = \"none\",\n) -> dict:\n    \"\"\"Execute a command inside a security-hardened container.\"\"\"\n    with tempfile.TemporaryDirectory() as tmpdir:\n        seccomp_path = Path(tmpdir) / \"seccomp.json\"\n        seccomp_path.write_text(SECCOMP_PROFILE)\n\n        docker_cmd = [\n            \"docker\", \"run\", \"--rm\",\n            \"--network\", network,\n            \"--memory\", f\"{memory_mb}m\",\n            \"--memory-swap\", f\"{memory_mb}m\",\n            \"--cpus\", str(cpu_quota),\n            \"--pids-limit\", \"50\",\n            \"--read-only\",\n            \"--tmpfs\", \"/tmp:size=64m\",\n            \"--no-new-privileges\",\n            \"--security-opt\", f\"seccomp={seccomp_path}\",\n            \"--cap-drop\", \"ALL\",\n            \"--user\", \"65534:65534\",\n            image,\n        ] + command\n\n        try:\n            result = subprocess.run(\n                docker_cmd, capture_output=True, text=True,\n                timeout=timeout_seconds,\n            )\n            return {\n                \"returncode\": result.returncode,\n                \"stdout\": result.stdout[:65_536],\n                \"stderr\": result.stderr[:8_192],\n                \"timed_out\": False,\n            }\n        except subprocess.TimeoutExpired:\n            return {\"returncode\": -1, \"stdout\": \"\", \"stderr\": \"Execution timed out\", \"timed_out\": True}\n\n\nif __name__ == \"__main__\":\n    result = run_tool_in_container(\n        command=[\"python3\", \"-c\", \"print(sum(range(1, 101)))\"],\n        timeout_seconds=10,\n    )\n    print(\"Exit code:\", result[\"returncode\"])\n    print(\"Output:\", result[\"stdout\"].strip())\n    assert result[\"stdout\"].strip() == \"5050\"\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Audit a running container's security posture"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# container_audit.py\n# Audit a running container's security configuration.\nimport subprocess, json, sys\n\n\ndef get_container_config(container_id: str) -> dict:\n    result = subprocess.run(\n        [\"docker\", \"inspect\", container_id],\n        capture_output=True, text=True, check=True,\n    )\n    return json.loads(result.stdout)[0]\n\n\ndef audit_security(container_id: str) -> list[dict]:\n    cfg = get_container_config(container_id)\n    hc = cfg.get(\"HostConfig\", {})\n    findings = []\n\n    def check(name: str, passed: bool, detail: str):\n        findings.append({\"check\": name, \"passed\": passed, \"detail\": detail})\n\n    check(\"memory-limit\",     hc.get(\"Memory\", 0) > 0,                              f\"Memory={hc.get('Memory', 0)} bytes\")\n    check(\"pids-limit\",       hc.get(\"PidsLimit\", 0) > 0,                           f\"PidsLimit={hc.get('PidsLimit', 0)}\")\n    check(\"readonly-rootfs\",  hc.get(\"ReadonlyRootfs\", False),                       f\"ReadonlyRootfs={hc.get('ReadonlyRootfs', False)}\")\n    check(\"no-new-privileges\",any(\"no-new-privileges\" in s for s in hc.get(\"SecurityOpt\", [])), f\"SecurityOpt={hc.get('SecurityOpt', [])}\")\n    check(\"capabilities\",     \"ALL\" in (hc.get(\"CapDrop\") or []) and not hc.get(\"CapAdd\"), f\"CapAdd={hc.get('CapAdd')}, CapDrop={hc.get('CapDrop')}\")\n    check(\"network-isolated\", \"none\" in cfg.get(\"NetworkSettings\", {}).get(\"Networks\", {}), f\"Networks={list(cfg.get('NetworkSettings', {}).get('Networks', {}).keys())}\")\n    check(\"non-root-user\",    cfg.get(\"Config\", {}).get(\"User\", \"root\") not in (\"\", \"root\", \"0\"), f\"User='{cfg.get('Config', {}).get('User', 'root')}'\")\n    return findings\n\n\ndef print_audit_report(findings: list[dict]) -> int:\n    for f in findings:\n        print(f\"[{'PASS' if f['passed'] else 'FAIL'}] {f['check']:30s} {f['detail']}\")\n    failures = [f[\"check\"] for f in findings if not f[\"passed\"]]\n    if failures:\n        print(f\"\\nSecurity audit FAILED: {failures}\")\n        return 1\n    print(\"\\nSecurity audit PASSED: all checks green\")\n    return 0\n\n\nif __name__ == \"__main__\":\n    container_id = sys.argv[1] if len(sys.argv) > 1 else \"my-agent-tool\"\n    sys.exit(print_audit_report(audit_security(container_id)))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Async agent tool executor with container dispatch"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# agent_tool_executor.py\n# Async dispatcher: run agent-generated tool calls in isolated containers.\nimport asyncio, uuid, logging\nfrom dataclasses import dataclass\nfrom secure_container_runner import run_tool_in_container\n\nlogger = logging.getLogger(__name__)\n\nTOOL_CONFIG = {\n    \"python_eval\":  {\"image\": \"python:3.12-slim\", \"cmd_prefix\": [\"python3\", \"-c\"], \"timeout\": 15},\n    \"bash_command\": {\"image\": \"alpine:3.19\",       \"cmd_prefix\": [\"sh\", \"-c\"],     \"timeout\": 10},\n}\n\n\n@dataclass\nclass ToolResult:\n    tool_id: str\n    success: bool\n    output: str\n    error: str\n    timed_out: bool\n\n\nasync def execute_tool(tool_name: str, args: dict) -> ToolResult:\n    \"\"\"Dispatch a tool call to a hardened container. Unknown tools are rejected.\"\"\"\n    tool_id = str(uuid.uuid4())[:8]\n    cfg = TOOL_CONFIG.get(tool_name)\n    if cfg is None:\n        logger.warning(\"Rejected unknown tool=%s\", tool_name)\n        return ToolResult(tool_id, False, \"\", f\"Unknown tool: {tool_name}\", False)\n\n    code = args.get(\"code\") or args.get(\"script\", \"\")\n    if not isinstance(code, str) or len(code) > 4096:\n        return ToolResult(tool_id, False, \"\", \"Invalid or oversized code argument\", False)\n\n    cmd = cfg[\"cmd_prefix\"] + [code]\n    logger.info(\"tool=%s id=%s image=%s\", tool_name, tool_id, cfg[\"image\"])\n\n    loop = asyncio.get_event_loop()\n    result = await loop.run_in_executor(\n        None,\n        lambda: run_tool_in_container(\n            command=cmd, image=cfg[\"image\"],\n            timeout_seconds=cfg[\"timeout\"], memory_mb=128, cpu_quota=0.25,\n        )\n    )\n    success = result[\"returncode\"] == 0 and not result[\"timed_out\"]\n    logger.info(\"tool=%s id=%s exit=%d timed_out=%s\", tool_name, tool_id,\n                result[\"returncode\"], result[\"timed_out\"])\n    return ToolResult(tool_id, success, result[\"stdout\"], result[\"stderr\"], result[\"timed_out\"])\n\n\nasync def main():\n    r = await execute_tool(\"python_eval\", {\"code\": \"import math; print(round(math.pi, 6))\"})\n    print(f\"success={r.success} output={r.output.strip()}\")\n\nif __name__ == \"__main__\":\n    asyncio.run(main())\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A code-execution startup builds an AI coding assistant that generates and runs Python snippets on the user's behalf. Their initial prototype runs subprocess.run() directly in the application process. In a red-team exercise, a tester submits a snippet that reads /proc/self/environ and exfiltrates the OPENAI_API_KEY via an outbound HTTP call. The entire infrastructure is compromised in minutes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After the incident they redesign tool execution around containerization: each code execution request launches a fresh python:3.12-slim container with --network=none, --read-only, --memory=128m, --cpus=0.25, --pids-limit=32, --cap-drop=ALL, --no-new-privileges, and a custom seccomp profile that blocks mount, ptrace, socket, and connect syscalls. The container has no environment variables injected, so host credentials are never reachable. Output is capped at 64 KB and the container is destroyed after each run. A pool of 20 pre-warmed instances reduces P50 cold-start from 600ms to 40ms, and all launch events are logged with the user ID and snippet SHA-256."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Post-redesign, the same red-team test fails at the seccomp layer: the socket syscall is blocked before any connection attempt. The blast radius is bounded to the ephemeral 128 MB container."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Running containers as root (UID 0)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The default Docker behavior runs processes as root inside the container. While root inside a container is not identical to root on the host, it can exploit certain container escape vulnerabilities. Always set --user to a non-root UID."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: root user inside container (Docker default)\nsubprocess.run([\"docker\", \"run\", \"--rm\", \"python:3.12-slim\", \"python3\", \"-c\", \"import os; print(os.getuid())\"])\n\n# RIGHT: explicit non-root user\nsubprocess.run([\"docker\", \"run\", \"--rm\", \"--user\", \"65534:65534\",\n                \"python:3.12-slim\", \"python3\", \"-c\", \"import os; print(os.getuid())\"])\n# Output: 65534 (nobody)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mounting host directories into the container"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Mounting a host directory breaks filesystem isolation. Any path reachable from the mount point is accessible to the tool, including application secrets and configuration."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: mounting /tmp from host (tool can read/write host temp files)\nsubprocess.run([\"docker\", \"run\", \"--rm\", \"-v\", \"/tmp:/tmp\",\n                \"python:3.12-slim\", \"python3\", \"-c\", \"import os; print(os.listdir('/tmp'))\"])\n\n# RIGHT: container-internal tmpfs only, never host paths\nsubprocess.run([\"docker\", \"run\", \"--rm\", \"--read-only\", \"--tmpfs\", \"/tmp:size=32m\",\n                \"python:3.12-slim\", \"python3\", \"-c\", \"import os; print(os.listdir('/tmp'))\"])\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Omitting resource limits"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A container with no memory or CPU limits can exhaust host resources. This is especially critical when processing adversarial inputs that trigger algorithmic complexity attacks in parsing libraries."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: no resource limits -- a fork bomb or infinite allocation kills the host\nsubprocess.run([\"docker\", \"run\", \"--rm\", \"python:3.12-slim\",\n                \"python3\", \"-c\", \"x=[];\\nwhile True: x.append(b'A'*1024*1024)\"])\n\n# RIGHT: the container OOM-kills itself without affecting the host\nsubprocess.run([\"docker\", \"run\", \"--rm\",\n                \"--memory\", \"128m\", \"--memory-swap\", \"128m\",\n                \"--cpus\", \"0.25\", \"--pids-limit\", \"32\",\n                \"python:3.12-slim\",\n                \"python3\", \"-c\", \"x=[];\\nwhile True: x.append(b'A'*1024*1024)\"])\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use ephemeral containers: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Create a new container for each tool invocation and destroy it after. Never reuse a container across tool calls — state from one call must not influence the next."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Minimize the image attack surface: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Build tool images from distroless or scratch bases. Remove compilers, package managers, and shells from the final layer to reduce the number of exploitable binaries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pin image digests in production: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Reference images by SHA-256 digest (python@sha256:abc...) rather than tags. Tags are mutable and can be silently replaced with a compromised image."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scan images for CVEs in CI: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Run Trivy or Grype on every image build. Block deployment of images with critical-severity CVEs in packages actually imported by tool code."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Apply a strict seccomp profile: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Use strace to profile the minimal syscall set during development, then write a tight allowlist. Docker's default profile is a floor, not a ceiling."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log seccomp violations: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Use SCMP_ACT_LOG for sensitive syscalls during initial deployment to detect legitimate needs before blocking them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pre-warm container pools: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Maintain a pool of idle, security-configured containers ready to accept work. Size the pool to peak concurrent request load."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor runtime anomalies with Falco: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Deploy Falco or an equivalent eBPF runtime security tool to alert when a container makes unexpected syscalls or accesses unexpected file paths."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Metric"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Baseline (no pool)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "With pre-warmed pool"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Notes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Container start latency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "400-800ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "20-60ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pool eliminates image unpack + cgroup setup"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory overhead per container"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~8 MB (Python runtime)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~8 MB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Shared image layers reduce physical footprint"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU overhead (seccomp BPF)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "<1% per syscall"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "<1% per syscall"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Negligible for typical tool workloads"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Max concurrent containers"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~100 on 8-core host"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~100 on 8-core host"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bound by cgroup CPU budget, not container count"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Throughput (short tasks)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~60 req/min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~600 req/min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "10x improvement from pool amortizing start cost"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The dominant scalability concern is container startup latency. For real-time agent interactions, a pre-warmed pool with post-execution container replacement is the standard pattern. A simple Kubernetes Deployment of idle worker pods achieves this with horizontal pod autoscaling on queue depth."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Docker: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "The most widely deployed container runtime. Provides the foundational --cap-drop, --read-only, --memory, --network, and --security-opt interfaces for hardening."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Podman: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A daemonless, rootless Docker-compatible runtime. Containers run as the invoking user's UID on the host, eliminating the attack surface of a privileged daemon."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "gVisor (runsc): ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Google's user-space kernel intercepts syscalls before they reach the host kernel, providing VM-level isolation at near-container latency. Compatible with Docker via --runtime=runsc."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Kata Containers: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Runs each container inside a lightweight VM. Provides hardware-enforced isolation at higher cold-start latency (~500ms). Strongest isolation guarantees short of a full VM."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trivy / Grype: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Open-source vulnerability scanners for container images. Integrate with CI/CD to block deployment of images with known CVEs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Falco: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Runtime security tool using eBPF to detect anomalous container behavior: unexpected syscalls, file accesses, or network connections."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Docker Bench for Security: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Audit script that checks a running Docker host against the CIS Docker Benchmark. Identifies misconfigurations in daemon settings and running container security options."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Check if gVisor runtime is available, then run with it if possible.\nimport subprocess, json, warnings\n\ndef run_with_best_runtime(command: list[str], image: str) -> dict:\n    result = subprocess.run(\n        [\"docker\", \"info\", \"--format\", \"{{json .Runtimes}}\"],\n        capture_output=True, text=True, check=True,\n    )\n    runtimes = json.loads(result.stdout)\n    runtime = \"runsc\" if \"runsc\" in runtimes else \"runc\"\n    if runtime == \"runc\":\n        warnings.warn(\"gVisor not available; falling back to runc.\")\n\n    proc = subprocess.run(\n        [\"docker\", \"run\", \"--rm\", \"--runtime\", runtime,\n         \"--network\", \"none\", \"--memory\", \"128m\",\n         \"--read-only\", \"--tmpfs\", \"/tmp:size=32m\",\n         \"--no-new-privileges\", \"--cap-drop\", \"ALL\",\n         \"--user\", \"65534:65534\", image] + command,\n        capture_output=True, text=True, timeout=30,\n    )\n    return {\"returncode\": proc.returncode, \"stdout\": proc.stdout, \"runtime\": runtime}\n\n# Scan image for CVEs using Trivy\ndef scan_image(image: str) -> list[dict]:\n    result = subprocess.run(\n        [\"trivy\", \"image\", \"--format\", \"json\", \"--quiet\", image],\n        capture_output=True, text=True,\n    )\n    if result.returncode != 0:\n        return []\n    data = json.loads(result.stdout)\n    return [\n        {\"id\": v[\"VulnerabilityID\"], \"severity\": v[\"Severity\"], \"pkg\": v[\"PkgName\"]}\n        for r in data.get(\"Results\", [])\n        for v in r.get(\"Vulnerabilities\", [])\n    ]\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Isolation level"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cold-start"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Kernel shared?"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No isolation (subprocess)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "<5ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Trusted internal tools only"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Language sandbox (RestrictedPython)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Language-level"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "<10ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Simple expression evaluation"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Container (runc/Docker)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Namespace + cgroup"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "200-800ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "General agent tool execution"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Container + gVisor"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "User-space kernel"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "300-900ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No (intercepted)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High-risk code execution"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Kata Containers (VM)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hardware hypervisor"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "500-2000ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Highest-risk, regulated workloads"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "WebAssembly (Wasm)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memory-safe bytecode"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "<10ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Compute-only, no I/O tools"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Reliability"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Kernel escape risks"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Kernel CVEs: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Containers share the host kernel. A privileged kernel exploit inside a container can compromise the host. Mitigate by keeping the host kernel patched and by using gVisor or Kata for the highest-risk containers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Image supply-chain attacks: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A compromised base image can contain backdoors. Pin images by SHA-256 digest and scan every image layer in CI."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Volume mount escapes: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Mounting sensitive host paths into a container negates namespace isolation. Enforce a policy (OPA/Gatekeeper in Kubernetes) that rejects pods with host-path volume mounts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Misconfigured seccomp: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "An overly permissive seccomp profile leaves the kernel's attack surface exposed. Write a minimal allowlist and test it with known exploit techniques during red-teaming."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Reliability considerations"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "OOM-kill calibration: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "If the memory limit is too tight, the container runtime will OOM-kill the tool mid-execution. Measure actual peak memory during testing and set the limit with at least 1.5x headroom."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "PID limit fork failures: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Some runtimes (Python multiprocessing, Node.js worker_threads) create more processes than expected. Profile PID usage under load before setting --pids-limit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Container lifecycle errors: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Container startup can fail if the image is absent, if cgroup limits are below the runtime's minimum, or if the seccomp profile has a syntax error. The executor must handle these failures gracefully and surface them as structured errors rather than hanging."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental Model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of each container as a disposable phone booth: the agent steps inside to make a tool call, the booth has no connection to the building's internal wiring (no host filesystem access, no host network), it has a coin slot that limits how long the call can run (CPU quota) and how much memory it can use, and when the call ends the booth dissolves. The agent steps back into the main building with only the words spoken during the call — the tool's stdout output — and nothing else from inside the booth can follow."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key mindset shift is treating every tool invocation as inherently untrusted, even if you wrote the tool yourself. The threat model is not 'could our code go wrong' but 'what happens when adversarial input causes our tool to behave in ways we did not anticipate.' The container enforces the answer: the worst case is bounded by the container's resource limits and network policy, regardless of what the code inside does."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Containerization applies Linux namespaces, cgroups, seccomp, and mandatory access controls as independent, composable layers — enabling one does not automatically enable the others."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The --cap-drop=ALL, --no-new-privileges, --read-only, --network=none, and --user flags together eliminate the most common container escape vectors and should be the baseline for every agent tool container."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Resource limits (--memory, --cpus, --pids-limit) are not optional hardening — they are the primary defense against denial-of-service caused by adversarial inputs that trigger unbounded computation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Container cold-start latency (200-800ms) is the main operational trade-off; pre-warmed container pools reduce this to under 60ms, making containerization practical for real-time agentic workflows."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "gVisor and Kata Containers provide stronger isolation than runc at the cost of additional latency and operational complexity; use them for tools that process untrusted binaries or highly sensitive data."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Image security is as important as runtime security: pin images by SHA-256 digest, scan for CVEs in CI, and build from minimal base images that omit package managers and shells."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Post-execution container destruction is non-negotiable: each tool invocation must run in a fresh container so that state from one call cannot influence the next, even within the same agent session."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
