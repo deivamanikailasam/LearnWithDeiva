@@ -1,0 +1,1177 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When multiple agents compete for the same shared resources — LLM API rate limits, database connections, downstream tool quotas — the order in which tasks are processed becomes as important as the processing itself. A well-designed queue is the backbone that decouples producers from consumers, absorbs bursts, enforces priority, and guarantees that every task either completes or lands in a place where it can be diagnosed and retried."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "What is Queue Management?" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue management is the set of policies and mechanisms that govern how tasks enter a queue, how they are ordered and selected for processing, how failures are handled, and how the queue's health is observed and acted upon. In the context of agentic AI systems, a queue is typically a persistent, durable message broker — Redis Streams, SQS, RabbitMQ, Celery's backend — that sits between task producers (API handlers, schedulers, upstream agents) and task consumers (agent worker processes)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A message in an agent queue represents one unit of work: a research task, a code-review job, a data-extraction run, or any other bounded agent execution. The queue holds that message durably until a worker claims it, executes the agent loop, and explicitly acknowledges success — or until the message exceeds its retry budget and is moved to a dead-letter queue (DLQ) for human inspection. Everything between enqueue and ack is the domain of queue management."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue management extends beyond the broker itself to include: priority routing across multiple queues, visibility-timeout / lease semantics that prevent duplicate processing, backpressure mechanisms that prevent producers from overwhelming consumers, autoscaling hooks that translate queue depth into replica counts, and observability pipelines that surface consumer lag to alerting and dashboards."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why It Matters" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without a queue, producers and consumers are directly coupled. A web handler that calls an agent synchronously blocks until the agent finishes — potentially minutes for a long-running LLM chain. The user-facing latency blows up, the connection pool depletes, and a single slow LLM call can cascade into a 500-error storm for every concurrent request. A queue breaks that coupling entirely: the handler enqueues a task message in milliseconds and returns a job ID; a separate worker pool processes the task in the background."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The problem compounds in multi-agent pipelines. An orchestrator spawns sub-agents that spawn further sub-agents; each level fans out into more tasks. Without explicit queue management, this fan-out can generate thousands of simultaneous LLM calls in seconds, instantly exhausting API rate limits and crashing the entire pipeline. A queue with a configurable concurrency ceiling throttles the fan-out, keeps throughput within API limits, and converts bursty spikes into a smooth, predictable processing rate."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reliability is the other critical dimension. Agent tasks are rarely idempotent from the LLM's perspective, but the side effects they trigger — writing to a database, sending an email, calling an external API — absolutely need at-least-once or exactly-once guarantees. A queue with acknowledgement semantics ensures that if a worker crashes mid-task, the message becomes visible again after the visibility timeout expires, and another worker picks it up. Without that guarantee, a crashed worker silently drops tasks with no possibility of recovery."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Benefits" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Producer-consumer decoupling: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "producers submit tasks without waiting for results; consumers process at their own pace. This eliminates synchronous coupling and enables independent scaling of both sides." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Burst absorption: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "a queue naturally smooths traffic spikes. A thousand tasks arriving in one second are stored and consumed at the rate the worker pool can sustain, protecting downstream resources." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "At-least-once delivery: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "messages are not removed from the queue until a worker explicitly acknowledges completion. Worker crashes re-expose the message for another attempt." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Priority control: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "separate queues or priority fields allow high-urgency tasks (real-time user requests) to bypass low-urgency work (background batch jobs) without starvation." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Rate-limit enforcement: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "concurrency limits on workers cap the number of simultaneous LLM calls, keeping throughput within API rate limits and preventing cascading quota exhaustion." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Built-in retry logic: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "transient failures (network errors, LLM timeouts) trigger automatic re-queuing with configurable exponential backoff, without any retry code in the agent itself." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Observability surface: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "queue depth, consumer lag, and DLQ size are rich operational signals that drive autoscaling, alerting, and capacity planning dashboards." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Trade-offs & Limitations" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Increased latency baseline: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "async processing means results are not available immediately. Users must poll for status or receive a webhook callback. This is unsuitable when synchronous, sub-second responses are required." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Operational overhead: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "a queue broker is another infrastructure component to deploy, monitor, back up, and maintain. Single-process pipelines or low-traffic prototypes pay this cost without receiving meaningful benefit." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Message ordering guarantees vary: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "most queue systems deliver messages in approximately FIFO order but do not guarantee strict ordering across concurrent consumers. Tasks with ordering dependencies require additional sequencing logic (e.g., partition keys in Kafka, FIFO queues in SQS)." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Exactly-once is hard: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "most brokers provide at-least-once semantics. Worker crashes after the agent loop completes but before the ack can cause duplicate processing. Side-effecting operations (payments, emails) must be made idempotent at the application level." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "DLQ debt accumulates silently: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "without active monitoring and a triage process, DLQs fill up and represent unresolved user requests. They require explicit operational ownership." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Visibility timeout tuning is tricky: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "if the timeout is shorter than the longest possible agent run, tasks will appear to fail and be re-queued while still being processed by the original worker, causing duplicate execution." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How It Works" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The lifecycle of a queued agent task has four phases: enqueue, claim, execute, and settle."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During enqueue, the producer serializes a task payload — typically JSON containing all inputs the agent needs — and writes it to the broker. The message receives a unique ID, a timestamp, an optional priority field, and any routing metadata (e.g., a queue name or partition key). The producer records the message ID as a job ID and returns it to the caller without waiting for the task to execute."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During claim, a worker polls the broker and receives a batch of messages. The broker simultaneously enters a visibility timeout: the claimed messages disappear from the queue's visible set for a configurable duration. If the worker does not settle the messages before the timeout expires, they become visible again and are available for re-delivery to another worker. This is the core at-least-once guarantee — the broker assumes failure if no ack arrives."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During execute, the worker deserializes the payload, runs the agent loop — which may involve multiple LLM calls, tool invocations, memory reads/writes, and sub-task spawning — and produces a result. Long-running agents must periodically extend the visibility timeout (heartbeat) to prevent the broker from re-queuing the message while it is still being processed."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During settle, the worker either acknowledges success (the broker deletes the message) or negatively acknowledges failure (the broker immediately re-enqueues with an incremented retry counter). After a configurable number of failed attempts the broker routes the message to the DLQ instead of re-queuing."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Priority is typically implemented using multiple queues rather than a priority field on a single queue. Workers poll high-priority queues first; they check lower-priority queues only when the high-priority queues are empty. This prevents starvation by design: a worker that finds no high-priority work will always fall through to the lower-priority queue."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The throughput ceiling of a single queue is governed by the relationship between arrival rate, worker count, and per-task processing time. If "
+          },
+          { "type": "text", "text": "λ", "marks": [{ "type": "italic" }] },
+          { "type": "text", "text": " is the task arrival rate (tasks/second) and " },
+          { "type": "text", "text": "μ", "marks": [{ "type": "italic" }] },
+          { "type": "text", "text": " is the per-worker service rate, then a stable system requires " },
+          { "type": "text", "text": "N × μ > λ", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " where " },
+          { "type": "text", "text": "N", "marks": [{ "type": "italic" }] },
+          { "type": "text", "text": " is the number of workers. When arrival rate exceeds processing capacity, the queue depth grows without bound — the signal an autoscaler watches to add more workers." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Architecture Overview" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram below shows the end-to-end flow: producers enqueue tasks into priority lanes, workers claim and process tasks with ack/nack semantics, an autoscaler monitors queue depth to add or remove workers, and results flow to a shared result store."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDgwIiB2aWV3Qm94PSIwIDAgODIwIDQ4MCI+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSI0ODAiIGZpbGw9IiMwZjE3MmEiIHJ4PSIxMiIvPgoKICA8IS0tIFRpdGxlIC0tPgogIDx0ZXh0IHg9IjQxMCIgeT0iMzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZTJlOGYwIj5RdWV1ZSBNYW5hZ2VtZW50IEFyY2hpdGVjdHVyZSBmb3IgQUkgQWdlbnRzPC90ZXh0PgoKICA8IS0tIFBST0RVQ0VSUyBjb2x1bW4gLS0+CiAgPHRleHQgeD0iOTAiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjOTRhM2I4Ij5QUk9EVUNFUlM8L3RleHQ+CgogIDxyZWN0IHg9IjIwIiB5PSI4MiIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIzOCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI5MCIgeT0iMTA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzhiZGY4Ij5BUEkgLyBVc2VyIFRyaWdnZXI8L3RleHQ+CgogIDxyZWN0IHg9IjIwIiB5PSIxMzQiIHdpZHRoPSIxNDAiIGhlaWdodD0iMzgiIHJ4PSI2IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iOTAiIHk9IjE1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzM4YmRmOCI+U2NoZWR1bGVkIEpvYjwvdGV4dD4KCiAgPHJlY3QgeD0iMjAiIHk9IjE4NiIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIzOCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI5MCIgeT0iMjEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzhiZGY4Ij5XZWJob29rIEV2ZW50PC90ZXh0PgoKICA8cmVjdCB4PSIyMCIgeT0iMjM4IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjM4IiByeD0iNiIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjkwIiB5PSIyNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzOGJkZjgiPlVwc3RyZWFtIEFnZW50PC90ZXh0PgoKICA8IS0tIEFycm93czogcHJvZHVjZXJzIOKGkiBxdWV1ZSAtLT4KICA8bGluZSB4MT0iMTYwIiB5MT0iMTAxIiB4Mj0iMjY4IiB5Mj0iMTIwIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1ibHVlKSIvPgogIDxsaW5lIHgxPSIxNjAiIHkxPSIxNTMiIHgyPSIyNjgiIHkyPSIxNDgiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyLWJsdWUpIi8+CiAgPGxpbmUgeDE9IjE2MCIgeTE9IjIwNSIgeDI9IjI2OCIgeTI9IjE3OCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnItYmx1ZSkiLz4KICA8bGluZSB4MT0iMTYwIiB5MT0iMjU3IiB4Mj0iMjY4IiB5Mj0iMjEwIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1ibHVlKSIvPgoKICA8IS0tIFFVRVVFIGJsb2NrIC0tPgogIDxyZWN0IHg9IjI2OCIgeT0iNjgiIHdpZHRoPSIyODQiIGhlaWdodD0iMjkwIiByeD0iMTAiIGZpbGw9IiMwZjE3MmEiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNDEwIiB5PSI5MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNhNzhiZmEiPk1FU1NBR0UgUVVFVUU8L3RleHQ+CgogIDwhLS0gUHJpb3JpdHkgSElHSCBsYW5lIC0tPgogIDxyZWN0IHg9IjI4NCIgeT0iMTAwIiB3aWR0aD0iMjUyIiBoZWlnaHQ9IjQ0IiByeD0iNiIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjMxMCIgeT0iMTE4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjZjU5ZTBiIj5ISUdIIFBSSU9SSVRZPC90ZXh0PgogIDxyZWN0IHg9IjMxMCIgeT0iMTI2IiB3aWR0aD0iMzYiIGhlaWdodD0iMTIiIHJ4PSIzIiBmaWxsPSIjZjU5ZTBiIiBvcGFjaXR5PSIwLjciLz4KICA8cmVjdCB4PSIzNTIiIHk9IjEyNiIgd2lkdGg9IjM2IiBoZWlnaHQ9IjEyIiByeD0iMyIgZmlsbD0iI2Y1OWUwYiIgb3BhY2l0eT0iMC41Ii8+CiAgPHJlY3QgeD0iMzk0IiB5PSIxMjYiIHdpZHRoPSIzNiIgaGVpZ2h0PSIxMiIgcng9IjMiIGZpbGw9IiNmNTllMGIiIG9wYWNpdHk9IjAuMyIvPgogIDx0ZXh0IHg9IjUwMCIgeT0iMTI4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPnRhc2sgbXNncyDihpI8L3RleHQ+CgogIDwhLS0gUHJpb3JpdHkgTk9STUFMIGxhbmUgLS0+CiAgPHJlY3QgeD0iMjg0IiB5PSIxNTQiIHdpZHRoPSIyNTIiIGhlaWdodD0iNDQiIHJ4PSI2IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMzEwIiB5PSIxNzIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzNGQzOTkiPk5PUk1BTCBQUklPUklUWTwvdGV4dD4KICA8cmVjdCB4PSIzMTAiIHk9IjE4MCIgd2lkdGg9IjM2IiBoZWlnaHQ9IjEyIiByeD0iMyIgZmlsbD0iIzM0ZDM5OSIgb3BhY2l0eT0iMC43Ii8+CiAgPHJlY3QgeD0iMzUyIiB5PSIxODAiIHdpZHRoPSIzNiIgaGVpZ2h0PSIxMiIgcng9IjMiIGZpbGw9IiMzNGQzOTkiIG9wYWNpdHk9IjAuNSIvPgogIDxyZWN0IHg9IjM5NCIgeT0iMTgwIiB3aWR0aD0iMzYiIGhlaWdodD0iMTIiIHJ4PSIzIiBmaWxsPSIjMzRkMzk5IiBvcGFjaXR5PSIwLjQiLz4KICA8cmVjdCB4PSI0MzYiIHk9IjE4MCIgd2lkdGg9IjM2IiBoZWlnaHQ9IjEyIiByeD0iMyIgZmlsbD0iIzM0ZDM5OSIgb3BhY2l0eT0iMC4zIi8+CiAgPHRleHQgeD0iNTAwIiB5PSIxODIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+dGFzayBtc2dzIOKGkjwvdGV4dD4KCiAgPCEtLSBQcmlvcml0eSBMT1cgbGFuZSAtLT4KICA8cmVjdCB4PSIyODQiIHk9IjIwOCIgd2lkdGg9IjI1MiIgaGVpZ2h0PSI0NCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIzMTAiIHk9IjIyNiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzY0NzQ4YiI+TE9XIFBSSU9SSVRZPC90ZXh0PgogIDxyZWN0IHg9IjMxMCIgeT0iMjM0IiB3aWR0aD0iMzYiIGhlaWdodD0iMTIiIHJ4PSIzIiBmaWxsPSIjNjQ3NDhiIiBvcGFjaXR5PSIwLjciLz4KICA8cmVjdCB4PSIzNTIiIHk9IjIzNCIgd2lkdGg9IjM2IiBoZWlnaHQ9IjEyIiByeD0iMyIgZmlsbD0iIzY0NzQ4YiIgb3BhY2l0eT0iMC41Ii8+CiAgPHRleHQgeD0iNTAwIiB5PSIyMzYiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+dGFzayBtc2dzIOKGkjwvdGV4dD4KCiAgPCEtLSBWaXNpYmlsaXR5IHRpbWVvdXQgbGFiZWwgLS0+CiAgPHJlY3QgeD0iMjg0IiB5PSIyNjQiIHdpZHRoPSIyNTIiIGhlaWdodD0iMzQiIHJ4PSI1IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iMjc4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPnZpc2liaWxpdHkgdGltZW91dCAvIGxvY2sgbGVhc2U8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSIyOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+YWNrIG9uIHN1Y2Nlc3MgIOKAoiAgbmFjay9leHBpcmUg4oaSIHJldHJ5PC90ZXh0PgoKICA8IS0tIERMUSAtLT4KICA8cmVjdCB4PSIyODQiIHk9IjMxMCIgd2lkdGg9IjI1MiIgaGVpZ2h0PSIzNiIgcng9IjUiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2VmNDQ0NCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0MTAiIHk9IjMzMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2VmNDQ0NCI+RGVhZC1MZXR0ZXIgUXVldWUgKERMUSk8L3RleHQ+CgogIDwhLS0gUmV0cnkgYXJyb3c6IHF1ZXVlIOKGkiBETFEgLS0+CiAgPHRleHQgeD0iNDEwIiB5PSIzNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2VmNDQ0NCI+bWF4IHJldHJpZXMgZXhjZWVkZWQ8L3RleHQ+CgogIDwhLS0gQXJyb3dzOiBxdWV1ZSDihpIgd29ya2VycyAtLT4KICA8bGluZSB4MT0iNTUyIiB5MT0iMTIyIiB4Mj0iNjM4IiB5Mj0iMTEwIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1ncmVlbikiLz4KICA8bGluZSB4MT0iNTUyIiB5MT0iMTc2IiB4Mj0iNjM4IiB5Mj0iMTc2IiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1ncmVlbikiLz4KICA8bGluZSB4MT0iNTUyIiB5MT0iMjMwIiB4Mj0iNjM4IiB5Mj0iMjQwIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1ncmVlbikiLz4KCiAgPCEtLSBXT1JLRVJTIGNvbHVtbiAtLT4KICA8dGV4dCB4PSI3MTAiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjOTRhM2I4Ij5BR0VOVCBXT1JLRVJTPC90ZXh0PgoKICA8cmVjdCB4PSI2MzgiIHk9IjgyIiB3aWR0aD0iMTQyIiBoZWlnaHQ9IjUyIiByeD0iNiIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjcwOSIgeT0iMTAzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzRkMzk5Ij5Xb3JrZXIgMTwvdGV4dD4KICA8dGV4dCB4PSI3MDkiIHk9IjEyMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5wdWxsIOKGkiBydW4gYWdlbnQg4oaSIGFjazwvdGV4dD4KCiAgPHJlY3QgeD0iNjM4IiB5PSIxNDgiIHdpZHRoPSIxNDIiIGhlaWdodD0iNTIiIHJ4PSI2IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNzA5IiB5PSIxNjkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzNGQzOTkiPldvcmtlciAyPC90ZXh0PgogIDx0ZXh0IHg9IjcwOSIgeT0iMTg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5NGEzYjgiPnB1bGwg4oaSIHJ1biBhZ2VudCDihpIgYWNrPC90ZXh0PgoKICA8cmVjdCB4PSI2MzgiIHk9IjIxNCIgd2lkdGg9IjE0MiIgaGVpZ2h0PSI1MiIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI3MDkiIHk9IjIzNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzM0ZDM5OSI+V29ya2VyIE48L3RleHQ+CiAgPHRleHQgeD0iNzA5IiB5PSIyNTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzk0YTNiOCI+cHVsbCDihpIgcnVuIGFnZW50IOKGkiBhY2s8L3RleHQ+CgogIDwhLS0gQXV0b3NjYWxlciAtLT4KICA8cmVjdCB4PSI2MzgiIHk9IjI4MCIgd2lkdGg9IjE0MiIgaGVpZ2h0PSI0NCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI3MDkiIHk9IjI5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iI2Y1OWUwYiI+QXV0b3NjYWxlcjwvdGV4dD4KICA8dGV4dCB4PSI3MDkiIHk9IjMxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5xdWV1ZSBkZXB0aCDihpIgc2NhbGUgwrE8L3RleHQ+CgogIDwhLS0gQXV0b3NjYWxlciBsaW5lIHRvIHdvcmtlcnMgLS0+CiAgPGxpbmUgeDE9IjcwOSIgeTE9IjI4MCIgeDI9IjcwOSIgeTI9IjI2NiIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiIHN0cm9rZS1kYXNoYXJyYXk9IjQsMyIvPgoKICA8IS0tIFJFU1VMVFMgYXQgYm90dG9tIC0tPgogIDxyZWN0IHg9IjI2OCIgeT0iMzkwIiB3aWR0aD0iMjg0IiBoZWlnaHQ9IjQ0IiByeD0iOCIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iNDA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjYTc4YmZhIj5SZXN1bHQgU3RvcmUgLyBDYWxsYmFjazwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjQyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTRhM2I4Ij5SZWRpcyAvIERCIC8gd2ViaG9vayAvIFMzPC90ZXh0PgoKICA8IS0tIFdvcmtlcnMg4oaSIFJlc3VsdHMgLS0+CiAgPGxpbmUgeDE9IjcwOSIgeTE9IjMzOCIgeDI9IjQxMCIgeTI9IjM5MCIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNSwzIiBtYXJrZXItZW5kPSJ1cmwoI2Fyci1wdXJwbGUpIi8+CgogIDwhLS0gTWV0cmljcyBib3ggLS0+CiAgPHJlY3QgeD0iMTgiIHk9IjMyMCIgd2lkdGg9IjIxOCIgaGVpZ2h0PSIxMDAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjEyNyIgeT0iMzQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2UyZThmMCI+UXVldWUgTWV0cmljczwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMzYwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTRhM2I4Ij7igKIgcXVldWUgZGVwdGggKGJhY2tsb2cgc2l6ZSk8L3RleHQ+CiAgPHRleHQgeD0iMzAiIHk9IjM3OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzk0YTNiOCI+4oCiIG1lc3NhZ2VzIGluLWZsaWdodDwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMzk2IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOTRhM2I4Ij7igKIgY29uc3VtZXIgbGFnPC90ZXh0PgogIDx0ZXh0IHg9IjMwIiB5PSI0MTQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5NGEzYjgiPuKAoiBETFEgbWVzc2FnZSBjb3VudDwvdGV4dD4KCiAgPCEtLSBNZXRyaWNzIOKGkiBhdXRvc2NhbGVyIC0tPgogIDxsaW5lIHgxPSIyMzYiIHkxPSIzNzAiIHgyPSI2MjAiIHkyPSIzMDIiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxIiBzdHJva2UtZGFzaGFycmF5PSI0LDMiLz4KCiAgPCEtLSBMZWdlbmQgLS0+CiAgPHRleHQgeD0iNDEwIiB5PSI0NjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+ZW5xdWV1ZSDihpIgICAgIGRlcXVldWUg4oaSICAtIC0gLSBvYnNlcnZlL3NjYWxlPC90ZXh0PgoKICA8IS0tIEFycm93IG1hcmtlcnMgLS0+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnItYmx1ZSIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzM4YmRmOCIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnItZ3JlZW4iIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiMzNGQzOTkiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyLXB1cnBsZSIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iI2E3OGJmYSIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgo8L3N2Zz4K",
+          "alt": "Queue management architecture: producers enqueue into priority lanes; workers pull, execute, and ack; autoscaler responds to queue depth; DLQ captures failed messages"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "When to Use It" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue management is the right tool when any of the following conditions apply."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Tasks are long-running (seconds to minutes): ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "any task that takes longer than a reasonable HTTP timeout requires async execution via a queue." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Throughput exceeds single-process capacity: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "when concurrent task count grows beyond what one process can handle, a queue enables horizontal scaling across multiple workers." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Reliability is required: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "tasks that must not be silently dropped on worker failure need a broker with acknowledgement semantics and automatic re-delivery." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Multiple priority tiers exist: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "real-time user requests must not be held behind batch background jobs; separate queues with priority polling provide the necessary isolation." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "API rate limits must be respected: ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "a concurrency-limited worker pool is the most direct way to cap the number of simultaneous LLM calls and stay within provider quotas." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queues are not appropriate when sub-second response latency is required and the task can complete within a single HTTP round trip, when tasks have strict global ordering requirements that simple FIFO cannot satisfy, or when the system processes only a handful of tasks per hour and a simple cron job or in-process thread pool would suffice without the operational overhead."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How to Implement" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following steps describe building a production queue system for an AI agent service from scratch."
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Choose a broker. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Select Redis Streams or Celery/Redis for smaller deployments; SQS for AWS-native stacks; RabbitMQ or Kafka for high-throughput or strict ordering needs. The key requirements for agents are: durable persistence across restarts, visibility timeout / ack semantics, and a DLQ mechanism." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Design the task message schema. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Each message should carry: a unique task ID, task type, input payload, priority, enqueue timestamp, retry count, and a callback URL or result key. Avoid embedding large data in the message; store blobs in S3 or a database and reference them by ID." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Create separate queues per priority tier. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Use three queues: high, normal, and low. Workers poll them in that order, falling through to the next tier only when the higher tier is empty. This prevents head-of-line blocking without starving low-priority tasks entirely." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Implement the worker loop. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "The worker polls the queue, deserializes the task, extends the visibility timeout before it expires (heartbeat), runs the agent, and acks on success. On unrecoverable errors it nacks so the broker increments the retry counter. After max retries the broker routes to DLQ." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Set visibility timeout to 2-3x the 99th-percentile task duration. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "If typical agent runs take 30 seconds but rare runs take 3 minutes, set the timeout to 9 minutes and implement heartbeating that extends it every 2 minutes. Never set a timeout shorter than the maximum observed task duration." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Wire autoscaling to queue depth. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Configure Kubernetes KEDA, AWS Application Auto Scaling, or a custom controller to read queue depth and scale worker replica count up when depth exceeds a threshold (e.g., 10 messages per worker) and scale down when depth is zero for a sustained period." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Implement DLQ triage. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Build a small admin tool or use the broker's console to inspect DLQ messages, display error context, and either replay them into the main queue or mark them as permanently failed. Alert on DLQ size exceeding zero." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Expose job status via a status endpoint. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Store task state (pending, running, completed, failed) and result in Redis or a database keyed by task ID. Callers poll GET /tasks/{id} or receive a webhook callback when the worker writes the result." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Examples" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Basic Celery worker with priority queues" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "# tasks.py — Celery task definitions with priority queues\nfrom celery import Celery\nfrom kombu import Queue\n\napp = Celery(\"agent_tasks\", broker=\"redis://localhost:6379/0\")\n\n# Define three priority queues\napp.conf.task_queues = (\n    Queue(\"high\",   routing_key=\"high\"),\n    Queue(\"normal\", routing_key=\"normal\"),\n    Queue(\"low\",    routing_key=\"low\"),\n)\napp.conf.task_default_queue = \"normal\"\napp.conf.task_default_exchange = \"tasks\"\napp.conf.task_default_routing_key = \"normal\"\n\n# Retry policy: 3 attempts with exponential backoff\n@app.task(\n    bind=True,\n    max_retries=3,\n    default_retry_delay=30,   # seconds; doubled each retry\n    acks_late=True,           # ack only after task completes\n    reject_on_worker_lost=True,  # re-queue if worker dies\n    queue=\"normal\",\n)\ndef run_research_agent(self, task_id: str, query: str, context: dict) -> dict:\n    \"\"\"Run a research agent and return structured findings.\"\"\"\n    try:\n        from my_agent import ResearchAgent\n        agent = ResearchAgent(context=context)\n        result = agent.run(query)\n        # Store result for status polling\n        from redis import Redis\n        r = Redis()\n        r.setex(f\"task:{task_id}:result\", 3600, result.json())\n        r.set(f\"task:{task_id}:status\", \"completed\")\n        return result.dict()\n    except Exception as exc:\n        from redis import Redis\n        r = Redis()\n        r.set(f\"task:{task_id}:status\", \"retrying\")\n        raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)\n\n\n# Enqueue with priority selection\ndef submit_task(task_id: str, query: str, priority: str = \"normal\") -> str:\n    run_research_agent.apply_async(\n        kwargs={\"task_id\": task_id, \"query\": query, \"context\": {}},\n        queue=priority,\n        task_id=task_id,\n    )\n    return task_id\n\n\n# Worker startup command:\n# celery -A tasks worker --loglevel=info \\\n#   --queues=high,normal,low \\\n#   --concurrency=4"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Redis Streams worker with heartbeat and DLQ" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nimport json\nimport time\nfrom redis.asyncio import Redis\n\nSTREAM_KEY = \"agent:tasks\"\nDLQ_KEY    = \"agent:tasks:dlq\"\nGROUP_NAME = \"workers\"\nMAX_RETRIES = 3\nVISIBILITY_TIMEOUT_MS = 300_000  # 5 minutes\n\n\nasync def create_consumer_group(r: Redis) -> None:\n    try:\n        await r.xgroup_create(STREAM_KEY, GROUP_NAME, id=\"0\", mkstream=True)\n    except Exception:\n        pass  # group already exists\n\n\nasync def heartbeat(\n    r: Redis, stream: str, group: str, consumer: str, msg_id: str\n) -> None:\n    \"\"\"Extend the visibility timeout by re-acknowledging in-flight.\"\"\"\n    while True:\n        await asyncio.sleep(60)  # heartbeat every 60 s\n        await r.xclaim(\n            stream, group, consumer, min_idle_time=0, message_ids=[msg_id]\n        )\n\n\nasync def process_task(payload: dict) -> dict:\n    \"\"\"Placeholder for the actual agent execution.\"\"\"\n    import asyncio\n    await asyncio.sleep(0.1)  # simulate agent work\n    return {\"result\": f\"processed: {payload.get('query', '')[:40]}\"}\n\n\nasync def worker_loop(consumer_name: str) -> None:\n    r = await Redis.from_url(\"redis://localhost:6379\")\n    await create_consumer_group(r)\n\n    while True:\n        # Block for up to 2 seconds waiting for messages\n        messages = await r.xreadgroup(\n            GROUP_NAME,\n            consumer_name,\n            {STREAM_KEY: \">\"},\n            count=1,\n            block=2000,\n        )\n        if not messages:\n            continue\n\n        _, entries = messages[0]\n        msg_id, fields = entries[0]\n        payload = json.loads(fields[b\"payload\"])\n        retry_count = int(fields.get(b\"retry_count\", 0))\n\n        # Start heartbeat coroutine\n        hb_task = asyncio.create_task(\n            heartbeat(r, STREAM_KEY, GROUP_NAME, consumer_name, msg_id)\n        )\n\n        try:\n            result = await process_task(payload)\n            # Ack success: remove from stream\n            await r.xack(STREAM_KEY, GROUP_NAME, msg_id)\n            await r.xdel(STREAM_KEY, msg_id)\n            # Store result\n            await r.setex(\n                f\"task:{payload['task_id']}:result\",\n                3600,\n                json.dumps(result),\n            )\n            await r.set(f\"task:{payload['task_id']}:status\", \"completed\")\n        except Exception as exc:\n            if retry_count >= MAX_RETRIES:\n                # Move to DLQ\n                await r.xadd(\n                    DLQ_KEY,\n                    {\n                        \"payload\": json.dumps(payload),\n                        \"error\": str(exc),\n                        \"failed_at\": str(time.time()),\n                    },\n                )\n                await r.xack(STREAM_KEY, GROUP_NAME, msg_id)\n                await r.xdel(STREAM_KEY, msg_id)\n            else:\n                # Nack: re-add with incremented retry count\n                payload[\"retry_count\"] = retry_count + 1\n                await r.xadd(STREAM_KEY, {\"payload\": json.dumps(payload)})\n                await r.xack(STREAM_KEY, GROUP_NAME, msg_id)\n                await r.xdel(STREAM_KEY, msg_id)\n        finally:\n            hb_task.cancel()\n\n\nif __name__ == \"__main__\":\n    asyncio.run(worker_loop(\"worker-1\"))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Real-World Example" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Consider a B2B document intelligence platform that ingests customer-uploaded contracts and runs an AI agent pipeline: extract clauses, flag risks, generate a summary, and notify the customer via webhook. At peak hours the platform receives 200 document uploads per minute; each pipeline run takes 45–120 seconds. A single-process architecture cannot handle this; the queue is the core architectural decision."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The implementation uses three queues: a high-priority queue for documents marked \"urgent\" by the customer, a normal queue for standard uploads, and a low-priority queue for background re-processing triggered by model updates. SQS is chosen as the broker because the platform runs on AWS and SQS provides managed durability, a DLQ, and native integration with CloudWatch for metrics."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Workers run as ECS Fargate tasks. KEDA watches the SQS ApproximateNumberOfMessages metric and scales the worker fleet from a minimum of 2 to a maximum of 40 tasks within 90 seconds. The visibility timeout is set to 10 minutes — safely above the 99th-percentile run time of 4 minutes. Each worker extends the timeout with a ChangeMessageVisibility call every 3 minutes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "import boto3\nimport json\nimport time\nimport threading\nfrom typing import Optional\n\nsqs = boto3.client(\"sqs\", region_name=\"us-east-1\")\n\nHIGH_QUEUE_URL   = \"https://sqs.us-east-1.amazonaws.com/123456/contracts-high\"\nNORMAL_QUEUE_URL = \"https://sqs.us-east-1.amazonaws.com/123456/contracts-normal\"\nLOW_QUEUE_URL    = \"https://sqs.us-east-1.amazonaws.com/123456/contracts-low\"\n\nVISIBILITY_TIMEOUT = 600   # 10 minutes\nHEARTBEAT_INTERVAL = 180   # 3 minutes\n\n\ndef extend_visibility(\n    queue_url: str, receipt_handle: str, stop_event: threading.Event\n) -> None:\n    \"\"\"Background thread that keeps the message invisible while processing.\"\"\"\n    while not stop_event.wait(HEARTBEAT_INTERVAL):\n        try:\n            sqs.change_message_visibility(\n                QueueUrl=queue_url,\n                ReceiptHandle=receipt_handle,\n                VisibilityTimeout=VISIBILITY_TIMEOUT,\n            )\n        except Exception:\n            break  # message may already be deleted\n\n\ndef run_contract_pipeline(document_id: str, s3_uri: str) -> dict:\n    \"\"\"Orchestrates the agent pipeline for a single contract.\"\"\"\n    from my_agents import ClauseExtractor, RiskFlagger, Summarizer\n    clauses  = ClauseExtractor().run(s3_uri)\n    risks    = RiskFlagger().run(clauses)\n    summary  = Summarizer().run(clauses, risks)\n    return {\"document_id\": document_id, \"risks\": risks, \"summary\": summary}\n\n\ndef poll_and_process() -> None:\n    \"\"\"Main worker loop: poll queues in priority order.\"\"\"\n    queue_order = [HIGH_QUEUE_URL, NORMAL_QUEUE_URL, LOW_QUEUE_URL]\n\n    while True:\n        message: Optional[dict] = None\n        selected_queue: Optional[str] = None\n\n        for queue_url in queue_order:\n            response = sqs.receive_message(\n                QueueUrl=queue_url,\n                MaxNumberOfMessages=1,\n                VisibilityTimeout=VISIBILITY_TIMEOUT,\n                WaitTimeSeconds=1,  # short-poll; use 20 for long-poll in prod\n            )\n            msgs = response.get(\"Messages\", [])\n            if msgs:\n                message = msgs[0]\n                selected_queue = queue_url\n                break\n\n        if message is None:\n            time.sleep(5)\n            continue\n\n        body = json.loads(message[\"Body\"])\n        receipt = message[\"ReceiptHandle\"]\n\n        stop_event = threading.Event()\n        hb_thread = threading.Thread(\n            target=extend_visibility,\n            args=(selected_queue, receipt, stop_event),\n            daemon=True,\n        )\n        hb_thread.start()\n\n        try:\n            result = run_contract_pipeline(\n                document_id=body[\"document_id\"],\n                s3_uri=body[\"s3_uri\"],\n            )\n            # Store result and notify customer\n            store_result(result)\n            notify_webhook(body[\"callback_url\"], result)\n            # Ack\n            sqs.delete_message(\n                QueueUrl=selected_queue,\n                ReceiptHandle=receipt,\n            )\n        except Exception as exc:\n            # Do NOT delete message; SQS will re-deliver after timeout\n            # After maxReceiveCount, SQS routes to the redrive DLQ\n            print(f\"Task failed: {exc}\")\n        finally:\n            stop_event.set()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common Mistakes" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Setting visibility timeout shorter than task duration" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the visibility timeout is 60 seconds but the agent takes 90 seconds to run, the broker re-exposes the message while the original worker is still processing it. A second worker claims it and starts a duplicate run. Both workers then ack, but only one result is stored — or worse, both complete conflicting writes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: visibility timeout too short, no heartbeat\nresponse = sqs.receive_message(\n    QueueUrl=queue_url,\n    VisibilityTimeout=60,   # agent can take up to 3 minutes\n)\nresult = run_agent(...)    # may take > 60 s → duplicate delivery\nsqs.delete_message(...)\n\n# RIGHT: generous timeout + heartbeat thread that extends it\nresponse = sqs.receive_message(\n    QueueUrl=queue_url,\n    VisibilityTimeout=600,  # 10 minutes; much larger than max task time\n)\nstop = threading.Event()\nthreading.Thread(target=extend_visibility, args=(queue_url, receipt, stop)).start()\ntry:\n    result = run_agent(...)   # safe: heartbeat keeps message invisible\n    sqs.delete_message(...)\nfinally:\n    stop.set()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best Practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Make tasks idempotent. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "At-least-once delivery guarantees re-delivery on worker failure. Design tasks so running them twice with the same input produces the same side effects — use task IDs as idempotency keys when writing results." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use exponential backoff with jitter for retries. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Uniform retry delays create thundering-herd behavior when many tasks fail simultaneously. Add random jitter: " },
+                  { "type": "text", "text": "delay = base * 2^attempt + random(0, base)", "marks": [{ "type": "code" }] },
+                  { "type": "text", "text": "." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Separate queues by workload type, not just priority. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Long-running batch jobs should not share a queue with short interactive tasks even at the same priority level, because one slow batch job can consume a worker slot needed for fast interactive tasks." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Instrument every phase of the task lifecycle. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Emit metrics and structured log events at enqueue, dequeue, execution start, execution end, ack, nack, and DLQ routing. This makes it possible to answer \"where are tasks spending time?\" without guessing." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Use long polling to reduce empty receives. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "SQS WaitTimeSeconds=20 reduces API call volume by 90% compared to short polling during idle periods. Redis BLPOP and XREADGROUP with BLOCK achieve the same effect." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Size concurrency to your LLM tier. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "If the LLM provider allows 1000 RPM and each agent run makes 5 LLM calls averaging 10 seconds, the theoretical maximum workers is 1000 / (5 * 6) = 33. Start below this ceiling and observe rate-limit errors before raising it." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Set a task TTL. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Enqueue tasks with a maximum age. If a task sits in the queue longer than this age it is already stale by the time it processes — check the enqueue timestamp at dequeue and discard stale tasks rather than wasting LLM tokens on them." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Performance & Scalability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The throughput of a queue-based agent system is bounded by the slower of two rates: the LLM API's token throughput and the worker fleet's capacity to execute agent logic. For most agentic workloads the LLM API is the bottleneck because it is shared infrastructure with hard rate limits expressed in requests-per-minute (RPM) and tokens-per-minute (TPM)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If T is the average task duration in seconds, C the worker concurrency, and R the LLM rate limit in tasks-per-second, the system throughput is "
+          },
+          { "type": "text", "text": "min(C / T, R)", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": ". Increasing C beyond R × T will not improve throughput — it only raises the rate at which tasks hit rate-limit errors." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue depth (backlog size) is the key autoscaling signal. With KEDA and SQS, a ScaledObject targeting 10 messages per replica means the autoscaler adds a replica whenever backlog-per-replica exceeds 10. Scale-up events should be fast (30–60 seconds) because queued messages represent real user wait time; scale-down can be slower (5–10 minutes) to avoid flapping during brief lulls."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For batch pipelines where latency per task is not a concern, maximize utilization by setting worker concurrency high and using the queue's throttling to absorb bursts. For user-facing pipelines where P99 latency matters, keep the queue shallow: size the baseline worker count so the queue depth stays below 5 messages under normal load, with autoscaling headroom for spikes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Celery's prefetch multiplier defaults to 4, meaning each worker holds 4 messages even though it processes only one at a time. For long agent tasks, set "
+          },
+          { "type": "text", "text": "CELERY_WORKER_PREFETCH_MULTIPLIER = 1", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " and " },
+          { "type": "text", "text": "task_acks_late = True", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " to prevent workers from hoarding messages they cannot immediately process." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Tooling & Ecosystem" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Tool" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Type" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Strengths" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best for" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Celery + Redis/RabbitMQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Python task queue" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Rich ecosystem, priority queues, built-in retry, Flower monitoring" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Python-native agent stacks, moderate scale" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "AWS SQS" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Managed message queue" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Zero ops, DLQ, FIFO mode, CloudWatch metrics, pay-per-message" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "AWS-native deployments, serverless workers" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Redis Streams" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Persistent log" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Consumer groups, replay, low-latency, fine-grained ACK" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low-latency queuing when Redis is already in the stack" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "RabbitMQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "AMQP broker" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Complex routing, exchanges, per-message TTL, DLX, rich plugin ecosystem" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Complex routing topologies, multi-language workers" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Kafka" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Distributed log" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Very high throughput, replay, partitioned ordering, stream processing" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High-volume event pipelines, auditing, multi-consumer fan-out" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "KEDA" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Autoscaler" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Kubernetes event-driven autoscaling; reads queue depth to scale workers" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Kubernetes-hosted worker fleets" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Flower" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Monitoring UI" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Real-time Celery task monitoring, worker status, task history" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Celery-based stacks" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Dramatiq" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Python task queue" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Simpler API than Celery, reliable middleware pipeline, actor model" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Greenfield Python agents preferring simplicity over feature breadth" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Comparison with Alternatives" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Approach" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Latency" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reliability" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Scalability" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Complexity" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Message queue (SQS, Redis, RabbitMQ)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Async; seconds to minutes" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High; ack semantics, DLQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High; horizontal workers" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medium; broker + worker ops" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Direct HTTP call (synchronous)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; request-response" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; caller must handle errors" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; limited by process" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; simplest to build" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "In-process thread/asyncio pool" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; runs in same process" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; crashes lose all tasks" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medium; limited to one machine" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Very low; no broker needed" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Serverless functions (Lambda, Cloud Run)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low-medium; cold starts add latency" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High; managed retry, DLQ" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Very high; auto-scales to zero" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low-medium; vendor-managed" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Streaming log (Kafka)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low; high-throughput" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Very high; replay, partition" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Very high; partition fan-out" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High; Kafka cluster ops" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Security & Reliability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue messages often carry sensitive data: user-provided inputs, API keys passed as part of task context, or personally identifiable information. Treat the broker as a security boundary and apply the following controls."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Encrypt messages in transit and at rest. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "SQS supports SSE-KMS; Redis supports TLS; RabbitMQ supports TLS and per-vhost authorization. Enable encryption by default; it has negligible latency impact." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Apply least-privilege IAM/ACL policies. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Producers should only be able to send messages; workers should only be able to receive, change visibility, and delete. No component should have queue management permissions (create/delete queues) in production." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Validate message schema at dequeue. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Workers should reject malformed messages immediately rather than passing them to the agent. An attacker who can enqueue arbitrary messages could attempt prompt injection by crafting the task payload." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Never store secrets in message bodies. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "API keys, database passwords, and tokens should be fetched from a secret manager (AWS Secrets Manager, Vault) at worker startup or task execution time, keyed by a reference ID in the message." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Configure message retention and TTL. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "SQS retains messages for up to 14 days; Redis Streams can grow without bound. Set explicit retention windows (e.g., 7 days for main queues, 30 days for DLQs) and monitor for unexpected growth." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Implement poison-message detection. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "A message that crashes every worker it lands on will cycle through retries, consuming worker capacity and polluting logs. Detect this by tracking the receive count and routing to DLQ aggressively when a message has been received more than 3 times." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Test broker failure modes. ", "marks": [{ "type": "bold" }] },
+                  { "type": "text", "text": "Simulate broker unavailability in a staging environment. Workers should back off and retry the connection, not crash the process. Producers should queue locally or return a 503 to the caller rather than blocking indefinitely." }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key Takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "A message queue decouples producers from consumers, converts bursty demand into smooth throughput, and is the correct architectural choice whenever agent tasks are long-running, must survive worker failure, or need priority separation." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Visibility timeout is the core reliability mechanism: size it to at least 2–3x the 99th-percentile task duration and implement a heartbeat that extends it for genuinely long tasks." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Priority is best enforced through separate queues with ordered polling — workers check high before normal before low — rather than a priority field on a single queue." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "At-least-once delivery means tasks can execute more than once on worker failure; all side effects must be idempotent, keyed on the task ID." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "The DLQ is not optional — it is the reliability contract's final clause. Monitor it actively and build a triage process before going to production." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Worker concurrency is bounded by LLM API rate limits, not by CPU. Calculate the maximum safe concurrency from the provider's RPM/TPM limits and calibrate the autoscaler target accordingly." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Celery's prefetch multiplier should be set to 1 for long-running agent tasks; the default of 4 causes workers to hoard messages they cannot immediately process, reducing effective parallelism." }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  { "type": "text", "text": "Treat the queue broker as a security boundary: encrypt all messages, apply least-privilege access, validate schemas at dequeue, and never store secrets in message bodies." }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
