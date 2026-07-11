@@ -1,0 +1,707 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "What is Speculative Execution?" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Speculative execution", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " is a latency-reduction technique where a system starts computing likely future work " },
+          { "type": "text", "text": "before", "marks": [{ "type": "italic" }] },
+          { "type": "text", "text": " it has confirmed that the work is actually needed. If the speculation turns out to be correct, the result is already available when requested — eliminating wait time. If wrong, the pre-computed result is discarded and the correct path is taken instead." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "In the context of agentic AI, speculative execution appears in two distinct but related forms. The first is " },
+          { "type": "text", "text": "speculative decoding", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " — a technique used at LLM inference time where a small draft model generates several tokens ahead, and a large target model verifies them in a single parallel pass. The second is " },
+          { "type": "text", "text": "speculative agent steps", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " — where an agent pipeline prefetches tool results, database queries, or sub-task outputs for the most likely next decisions before the orchestrating model has made its choice." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Both forms exploit the same asymmetry: predicting the future cheaply is often easier than waiting for a slow sequential process. By overlapping prediction with verification, you trade a small amount of extra compute for a large reduction in wall-clock latency." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why it matters" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "LLM inference is " },
+          { "type": "text", "text": "memory-bandwidth bound", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": ", not compute bound. A large model like Claude Sonnet spends most of each token generation cycle loading its billions of weights from GPU HBM, not doing matrix multiplications. This means the GPU is underutilized during a single-token forward pass — but a forward pass that checks " },
+          { "type": "text", "text": "k", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " candidate tokens in parallel costs only marginally more than one that checks a single token. Speculative decoding exploits this by having a cheap draft model fill the GPU's idle capacity." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "For agents, the stakes are even higher. An agent making five sequential tool calls each taking 200 ms accumulates 1 second of latency before the user sees a result. If the agent can start tool call 2, 3, and 4 speculatively while waiting on tool call 1, the effective latency collapses toward the longest single call rather than their sum." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "This matters especially in interactive settings — customer-facing agents, coding assistants, and real-time pipelines — where users abandon responses that feel slow. Sub-second latency at multi-step agent depth requires speculative techniques." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Benefits" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Lower time-to-first-token (TTFT) and lower time-per-output-token (TPOT) without changing model weights or quality — the output distribution of speculative decoding is mathematically identical to the target model alone.", "marks": [{ "type": "text" }] }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Throughput multiplier scales with draft acceptance rate. At acceptance rate alpha=0.8, expected output tokens per target model call rises to 1/(1-0.8) = 5, providing up to 5x effective throughput with the same serving infrastructure." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Better GPU utilization. Batching the verification of k draft tokens in a single target forward pass raises arithmetic intensity, moving the workload toward compute-bound territory where GPUs are most efficient." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Agent pipeline latency reduction. Pre-fetching tool results for likely next steps eliminates sequential waiting. If the correct branch was pre-fetched, response time collapses from sum-of-steps to max-of-parallel-steps." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quality-neutral. The statistical rejection sampling scheme in speculative decoding guarantees that the output distribution of accepted tokens exactly matches the target model. No quality tradeoff is required." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Composable with other optimizations. Speculative decoding works alongside KV-cache reuse, quantization, and continuous batching. It addresses a different bottleneck (sequential token generation latency) than these orthogonal techniques." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Trade-offs & limitations" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Wasted compute on rejected branches. Every draft token rejected by the verifier represents a forward pass through the draft model that contributed nothing useful. When acceptance rate is low (alpha < 0.3), overhead from the draft model can exceed savings." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Draft model selection is workload-dependent. A draft model tuned for code completions degrades on prose generation, and vice versa. You may need different draft models for different agent task types, adding operational complexity." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Memory footprint increases. Loading both a draft model and a target model on the same hardware doubles the model memory. In constrained deployments this may require a smaller target model, offsetting quality gains." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Agent-level speculation wastes upstream compute if prediction accuracy is low. If an agent speculatively issues five tool calls but only one was needed, four compute units were wasted. Prediction accuracy must be tracked and speculation turned off when branches are too unpredictable." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Side effects from speculative tool calls are dangerous. Tool calls that write to a database, send an email, or charge a payment method cannot be speculatively executed — only read-safe, idempotent operations are candidates for prefetching." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Adds system complexity. You must manage draft model lifecycle, acceptance rate monitoring, fallback to non-speculative paths, and cancellation of inflight futures. Teams without observability infrastructure may find the added complexity hard to debug." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How it works" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Speculative decoding (Leviathan et al., 2023) works as follows. Let the target model be " },
+          { "type": "text", "text": "p", "marks": [{ "type": "italic" }] },
+          { "type": "text", "text": " and the draft model be " },
+          { "type": "text", "text": "q", "marks": [{ "type": "italic" }] },
+          { "type": "text", "text": ". Given a prompt prefix, the draft model autoregressively generates " },
+          { "type": "text", "text": "k", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " tokens sequentially, producing a candidate sequence " },
+          { "type": "text", "text": "[t1, t2, ..., tk]", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " along with the draft model's probability distribution at each step." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The target model then performs a single forward pass over the full sequence (prompt + all k draft tokens simultaneously), computing " },
+          { "type": "text", "text": "p(ti | prefix + t1..t_{i-1})", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " for every position in parallel. Each token " },
+          { "type": "text", "text": "ti", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " is accepted with probability " },
+          { "type": "text", "text": "min(1, p(ti) / q(ti))", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": ". This is a rejection sampling scheme — it accepts greedily when the draft probability was lower than the target's, resampling from a corrected distribution when not." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The key result is that the output distribution of this process is " },
+          { "type": "text", "text": "identical to sampling from the target model alone", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " — no quality is sacrificed. The speed gain comes from the fact that the target model's single parallel verification pass costs roughly the same as verifying one token, while producing up to k+1 accepted tokens." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "For agent-level speculative execution, the mechanism is different: a lightweight prediction model (often a small classifier or a shallow pass of the main model) scores the top-k most likely next actions. Those k actions are issued as concurrent async tasks. When the main model makes its decision, the result for the chosen action is already awaited, so it returns immediately." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Architecture overview" }]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDMwIiB2aWV3Qm94PSIwIDAgODIwIDQzMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjQzMCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1zaXplPSIxNCIgZm9udC13ZWlnaHQ9ImJvbGQiPlNwZWN1bGF0aXZlIEV4ZWN1dGlvbiDigJQgTExNIEluZmVyZW5jZSBQaXBlbGluZTwvdGV4dD4KCiAgPCEtLSBEcmFmdCBNb2RlbCAtLT4KICA8cmVjdCB4PSIyMCIgeT0iNTAiIHdpZHRoPSIxNDUiIGhlaWdodD0iNzAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iOTIiIHk9Ijc0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+RHJhZnQgTW9kZWw8L3RleHQ+CiAgPHRleHQgeD0iOTIiIHk9IjkwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjODZlZmFjIiBmb250LXNpemU9IjgiPihTbWFsbCAvIEZhc3QpPC90ZXh0PgogIDx0ZXh0IHg9IjkyIiB5PSIxMDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+ZS5nLiBIYWlrdSAvIGxvY2FsIDdCPC90ZXh0PgogIDx0ZXh0IHg9IjkyIiB5PSIxMTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+Z2VuZXJhdGVzIGsgZHJhZnQgdG9rZW5zPC90ZXh0PgoKICA8IS0tIEFycm93IERyYWZ0IC0+IFNwZWN1bGF0aXZlIFRva2VucyAtLT4KICA8bGluZSB4MT0iMTY1IiB5MT0iODUiIHgyPSIyMjUiIHkyPSI4NSIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhZykiLz4KCiAgPCEtLSBTcGVjdWxhdGl2ZSBUb2tlbnMgLS0+CiAgPHJlY3QgeD0iMjI1IiB5PSI1MCIgd2lkdGg9IjE3MCIgaGVpZ2h0PSI3MCIgcng9IjgiIGZpbGw9IiMxYTNkMmIiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMzEwIiB5PSI3NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg2ZWZhYyIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPlNwZWN1bGF0aXZlIFRva2VuczwvdGV4dD4KICA8dGV4dCB4PSIzMTAiIHk9IjkwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjgiPmRyYWZ0IHRva2VuczogW3QxLCB0MiwgdDMsIHQ0XTwvdGV4dD4KICA8dGV4dCB4PSIzMTAiIHk9IjEwNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JiZjdkMCIgZm9udC1zaXplPSI4Ij5nZW5lcmF0ZWQgaW4gYSBzaW5nbGUgcGFzczwvdGV4dD4KICA8dGV4dCB4PSIzMTAiIHk9IjExNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JiZjdkMCIgZm9udC1zaXplPSI4Ij53aXRob3V0IHdhaXRpbmcgZm9yIHZlcmlmaWVyPC90ZXh0PgoKICA8IS0tIEFycm93IFNwZWN1bGF0aXZlIFRva2VucyAtPiBWZXJpZmllciAtLT4KICA8bGluZSB4MT0iMzk1IiB5MT0iODUiIHgyPSI0NTUiIHkyPSI4NSIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhdikiLz4KCiAgPCEtLSBUYXJnZXQgLyBNYWluIE1vZGVsIGxhYmVsIGFib3ZlIHZlcmlmaWVyIC0tPgogIDxyZWN0IHg9IjIwIiB5PSIxNTUiIHdpZHRoPSIxNDUiIGhlaWdodD0iNzAiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iOTIiIHk9IjE3OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM4YmRmOCIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPlRhcmdldCBNb2RlbDwvdGV4dD4KICA8dGV4dCB4PSI5MiIgeT0iMTk0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjgiPihMYXJnZSAvIEFjY3VyYXRlKTwvdGV4dD4KICA8dGV4dCB4PSI5MiIgeT0iMjA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiPmUuZy4gY2xhdWRlLXNvbm5ldDwvdGV4dD4KICA8dGV4dCB4PSI5MiIgeT0iMjIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiPnZlcmlmaWVzIGFsbCBrIHRva2VuczwvdGV4dD4KCiAgPCEtLSBBcnJvdyBUYXJnZXQgLT4gVmVyaWZpZXIgLS0+CiAgPGxpbmUgeDE9IjE2NSIgeTE9IjE5MCIgeDI9IjQyMCIgeTI9IjE5MCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI0MjAiIHkxPSIxOTAiIHgyPSI0MjAiIHkyPSIxMTAiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iNDIwIiB5MT0iMTEwIiB4Mj0iNDU1IiB5Mj0iMTEwIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FiKSIvPgogIDx0ZXh0IHg9IjMxMCIgeT0iMTgyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjgiPm9uZSBmb3J3YXJkIHBhc3MgdmVyaWZpZXMgYWxsIGRyYWZ0czwvdGV4dD4KCiAgPCEtLSBWZXJpZmllciBib3ggLS0+CiAgPHJlY3QgeD0iNDU1IiB5PSI2MCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI4MCIgcng9IjgiIGZpbGw9IiMyYTFmM2QiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI1MzAiIHk9Ijg0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYzRiNWZkIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+VmVyaWZpZXI8L3RleHQ+CiAgPHRleHQgeD0iNTMwIiB5PSIxMDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlOWQ1ZmYiIGZvbnQtc2l6ZT0iOCI+Q29tcGFyZSBkcmFmdCB2cyB0YXJnZXQ8L3RleHQ+CiAgPHRleHQgeD0iNTMwIiB5PSIxMTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlOWQ1ZmYiIGZvbnQtc2l6ZT0iOCI+bG9naXQgZGlzdHJpYnV0aW9uczwvdGV4dD4KICA8dGV4dCB4PSI1MzAiIHk9IjEyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2U5ZDVmZiIgZm9udC1zaXplPSI4Ij5BY2NlcHQgLyBSZWplY3QgZWFjaCB0b2tlbjwvdGV4dD4KCiAgPCEtLSBBY2NlcHQgcGF0aCAtLT4KICA8bGluZSB4MT0iNjA1IiB5MT0iODAiIHgyPSI2NjAiIHkyPSI2MCIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhZykiLz4KICA8dGV4dCB4PSI2NDAiIHk9IjU1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjgiPmFjY2VwdDwvdGV4dD4KCiAgPCEtLSBSZWplY3QgcGF0aCAtLT4KICA8bGluZSB4MT0iNjA1IiB5MT0iMTIwIiB4Mj0iNjYwIiB5Mj0iMTQ1IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FhKSIvPgogIDx0ZXh0IHg9IjY0NyIgeT0iMTQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjU5ZTBiIiBmb250LXNpemU9IjgiPnJlamVjdDwvdGV4dD4KCiAgPCEtLSBBY2NlcHRlZCBvdXRwdXQgYm94IC0tPgogIDxyZWN0IHg9IjY2MCIgeT0iMzgiIHdpZHRoPSIxNDUiIGhlaWdodD0iNTUiIHJ4PSI4IiBmaWxsPSIjMWEzZDJiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNzMyIiB5PSI2MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg2ZWZhYyIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkFjY2VwdGVkIFRva2VuczwvdGV4dD4KICA8dGV4dCB4PSI3MzIiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjgiPmsrMSB0b2tlbnMgb3V0cHV0IHBlcjwvdGV4dD4KICA8dGV4dCB4PSI3MzIiIHk9Ijg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjgiPnRhcmdldCBtb2RlbCBjYWxsPC90ZXh0PgoKICA8IS0tIFJlamVjdGVkIC8gcmVzYW1wbGUgYm94IC0tPgogIDxyZWN0IHg9IjY2MCIgeT0iMTMwIiB3aWR0aD0iMTQ1IiBoZWlnaHQ9IjU1IiByeD0iOCIgZmlsbD0iIzNiMWYxZiIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI3MzIiIHk9IjE1MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZjZDM0ZCIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPlJlc2FtcGxlPC90ZXh0PgogIDx0ZXh0IHg9IjczMiIgeT0iMTY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjgiPnRhcmdldCBnZW5lcmF0ZXMgY29ycmVjdDwvdGV4dD4KICA8dGV4dCB4PSI3MzIiIHk9IjE4MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZkZTY4YSIgZm9udC1zaXplPSI4Ij50b2tlbjsgZGlzY2FyZCByZXN0PC90ZXh0PgoKICA8IS0tIEFjY2VwdGFuY2UgUmF0ZSBib3ggLS0+CiAgPHJlY3QgeD0iNDU1IiB5PSIxNjUiIHdpZHRoPSIxNTAiIGhlaWdodD0iNjUiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjUzMCIgeT0iMTg1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmJiZjI0IiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5BY2NlcHRhbmNlIFJhdGU8L3RleHQ+CiAgPHRleHQgeD0iNTMwIiB5PSIyMDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmZGU2OGEiIGZvbnQtc2l6ZT0iOCI+YWxwaGEgPSBQKGFjY2VwdCBkcmFmdCB0b2tlbik8L3RleHQ+CiAgPHRleHQgeD0iNTMwIiB5PSIyMTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmZGU2OGEiIGZvbnQtc2l6ZT0iOCI+RXhwZWN0ZWQgdG9rZW5zID0gMS8oMS1hbHBoYSk8L3RleHQ+CiAgPHRleHQgeD0iNTMwIiB5PSIyMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmZGU2OGEiIGZvbnQtc2l6ZT0iOCI+YWxwaGE9MC43IOKGkiB+My4zeCB0aHJvdWdocHV0PC90ZXh0PgoKICA8IS0tIEFnZW50IFBpcGVsaW5lIHNlY3Rpb24gLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjI1NSIgd2lkdGg9Ijc4MCIgaGVpZ2h0PSIxNTUiIHJ4PSI4IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iMjc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+QWdlbnQtTGV2ZWwgU3BlY3VsYXRpdmUgRXhlY3V0aW9uPC90ZXh0PgoKICA8IS0tIFN0ZXAgMSAtLT4KICA8cmVjdCB4PSIzNSIgeT0iMjg1IiB3aWR0aD0iMTI1IiBoZWlnaHQ9IjU1IiByeD0iNiIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI5NyIgeT0iMzA1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5QbGFubmVyPC90ZXh0PgogIDx0ZXh0IHg9Ijk3IiB5PSIzMjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iNyI+UHJlZGljdHMgdG9wLWsgbGlrZWx5PC90ZXh0PgogIDx0ZXh0IHg9Ijk3IiB5PSIzMzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iNyI+bmV4dCB0b29sIGNhbGxzPC90ZXh0PgoKICA8IS0tIEFycm93IC0tPgogIDxsaW5lIHgxPSIxNjAiIHkxPSIzMTIiIHgyPSIxODUiIHkyPSIzMTIiIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYWcyKSIvPgoKICA8IS0tIFN0ZXAgMiAtLT4KICA8cmVjdCB4PSIxODUiIHk9IjI4NSIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI1NSIgcng9IjYiIGZpbGw9IiMwZjE3MmEiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMjU1IiB5PSIzMDUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4NmVmYWMiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9ImJvbGQiPlNwZWN1bGF0aXZlIEZldGNoPC90ZXh0PgogIDx0ZXh0IHg9IjI1NSIgeT0iMzIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjciPkV4ZWN1dGUgdG9wLWsgYnJhbmNoZXM8L3RleHQ+CiAgPHRleHQgeD0iMjU1IiB5PSIzMzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iNyI+Y29uY3VycmVudGx5IChhc3luYyk8L3RleHQ+CgogIDwhLS0gQXJyb3cgLS0+CiAgPGxpbmUgeDE9IjMyNSIgeTE9IjMxMiIgeDI9IjM1MCIgeTI9IjMxMiIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhZzIpIi8+CgogIDwhLS0gU3RlcCAzIC0tPgogIDxyZWN0IHg9IjM1MCIgeT0iMjg1IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjU1IiByeD0iNiIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0MjAiIHk9IjMwNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2M0YjVmZCIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+Q29uZmlybSBEZWNpc2lvbjwvdGV4dD4KICA8dGV4dCB4PSI0MjAiIHk9IjMyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5NYWluIG1vZGVsIHBpY2tzIGJyYW5jaDwvdGV4dD4KICA8dGV4dCB4PSI0MjAiIHk9IjMzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5yZXN1bHQgaXMgYWxyZWFkeSByZWFkeTwvdGV4dD4KCiAgPCEtLSBBcnJvdyAtLT4KICA8bGluZSB4MT0iNDkwIiB5MT0iMzEyIiB4Mj0iNTE1IiB5Mj0iMzEyIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FnMikiLz4KCiAgPCEtLSBTdGVwIDQgLS0+CiAgPHJlY3QgeD0iNTE1IiB5PSIyODUiIHdpZHRoPSIxNDAiIGhlaWdodD0iNTUiIHJ4PSI2IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjU4NSIgeT0iMzA1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5EaXNjYXJkIFVudXNlZDwvdGV4dD4KICA8dGV4dCB4PSI1ODUiIHk9IjMyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5DYW5jZWwgaW5mbGlnaHQgZnV0dXJlczwvdGV4dD4KICA8dGV4dCB4PSI1ODUiIHk9IjMzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5mb3IgcmVqZWN0ZWQgYnJhbmNoZXM8L3RleHQ+CgogIDwhLS0gQXJyb3cgLS0+CiAgPGxpbmUgeDE9IjY1NSIgeTE9IjMxMiIgeDI9IjY4MCIgeTI9IjMxMiIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhZzIpIi8+CgogIDwhLS0gU3RlcCA1IC0tPgogIDxyZWN0IHg9IjY4MCIgeT0iMjg1IiB3aWR0aD0iMTA4IiBoZWlnaHQ9IjU1IiByeD0iNiIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI3MzQiIHk9IjMwNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkZDNmYyIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+UmVzcG9uZDwvdGV4dD4KICA8dGV4dCB4PSI3MzQiIHk9IjMyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5Mb3dlciBsYXRlbmN5IHZpYTwvdGV4dD4KICA8dGV4dCB4PSI3MzQiIHk9IjMzMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5wcmUtY29tcHV0ZWQgcmVzdWx0PC90ZXh0PgoKICA8IS0tIEJvdHRvbSBub3RlIC0tPgogIDx0ZXh0IHg9IjQxMCIgeT0iMzY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNjQ3NDhiIiBmb250LXNpemU9IjgiPlRyYWRlb2ZmOiB3YXN0ZWQgY29tcHV0ZSBvbiByZWplY3RlZCBicmFuY2hlcyB2cy4gbGF0ZW5jeSByZWR1Y3Rpb24gZnJvbSBwYXJhbGxlbGlzbTwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjM4MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzY0NzQ4YiIgZm9udC1zaXplPSI4Ij5CZXN0IHdoZW46IGJyYW5jaCBwcmVkaWN0aW9uIGFjY3VyYWN5IGlzIGhpZ2ggQU5EIGNvbXB1dGUgaXMgY2hlYXBlciB0aGFuIGxhdGVuY3k8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSIzOTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM2NDc0OGIiIGZvbnQtc2l6ZT0iOCI+QWNjZXB0YW5jZSByYXRlIGFscGhhIGRyaXZlcyBST0k6IGFscGhhPTAuNSDihpIgMnggdGhyb3VnaHB1dDsgYWxwaGE9MC44IOKGkiA1eCB0aHJvdWdocHV0PC90ZXh0PgoKICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImFnIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjMzRkMzk5Ii8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFiIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjMzhiZGY4Ii8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImF2IiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjYTc4YmZhIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFhIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjZjU5ZTBiIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFnMiIgbWFya2VyV2lkdGg9IjciIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iNSIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw3LDMgeiIgZmlsbD0iIzQ3NTU2OSIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgo8L3N2Zz4K",
+          "alt": "Speculative execution pipeline: draft model generates k tokens, target model verifies in one parallel pass, accepted tokens flow out, rejected tokens trigger resample. Lower panel shows agent-level prefetching flow."
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "When to use it" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Time-to-first-token is a hard SLA.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Interactive coding assistants, customer service agents, and real-time voice applications all need sub-second responses. Speculative decoding reduces TTFT by making early tokens available before the full autoregressive chain completes." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "You are bottlenecked on serving throughput, not model quality.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " If your serving infrastructure is already at capacity but users are demanding lower latency, speculative decoding lets you extract more effective tokens per GPU-second without changing hardware." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Multi-step agent pipelines with predictable branching.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " If your agent reliably follows a narrow set of tool call patterns given context, pre-fetching the results of likely next actions is high-yield. Use historical traces to measure branch prediction accuracy before adding speculation." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Read-only tool calls.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Speculative tool prefetching is only safe for idempotent, side-effect-free operations: database reads, knowledge base lookups, search queries, external API reads. Never prefetch writes, payments, or mutations." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "You have a lightweight draft model available.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Speculative decoding requires a domain-compatible draft model roughly 10-100x smaller than the target. If you run Haiku alongside Sonnet, or have a fine-tuned local model for your domain, the draft is essentially free at inference time." }
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How to implement" }]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Choose a draft model.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " The draft model must share the same tokenizer as the target model — otherwise token IDs are incompatible. For hosted LLMs, use the provider's own smaller variant (e.g., Haiku for Haiku-Sonnet pairs). For local deployments, a quantized version of the same family or a domain-tuned smaller model works well." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Determine the speculation window k.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " The draft generates k tokens ahead. Larger k increases parallelism but wastes more compute when acceptance rate is moderate. Start at k=4 and tune based on measured acceptance rate on your workload." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Implement rejection sampling.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " For each draft token ti, compute min(1, p(ti)/q(ti)). Accept with that probability; on rejection, resample from the residual distribution max(0, p - q) / sum(max(0, p - q)) to preserve the target distribution exactly. Libraries like vLLM and TGI implement this for you." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Add acceptance rate monitoring.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Track alpha per request type and prompt category. If alpha drops below 0.3 for a request class, speculation is adding more overhead than it saves — fall back to non-speculative generation for that class." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "For agent-level speculation: enumerate candidate next actions.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Use context from the conversation and tool call history to predict the top-k most likely next tool calls. Issue them as concurrent async futures before the orchestrating model produces its decision." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Cancel unused speculative futures promptly.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Once the main model's decision is known, cancel all inflight futures for branches not chosen. In Python use asyncio.Task.cancel(). In systems with external HTTP calls, propagate cancellation via request context or timeout." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Measure end-to-end latency, not just throughput.",  "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Speculative execution improves latency but can hurt throughput under high concurrency if GPU memory is shared. Profile under realistic load before promoting to production." }
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Examples" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Speculative decoding with a draft model" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [{ "type": "text", "text": "import asyncio\nimport anthropic\n\nclient = anthropic.Anthropic()\n\n\ndef draft_tokens(prompt: str, k: int = 4) -> list[str]:\n    \"\"\"\n    Generate k draft tokens using a small fast model.\n    In production this would use a local model (e.g. llama-3.2-1b) or\n    a much lighter API call. Here we use Haiku as a stand-in.\n    \"\"\"\n    response = client.messages.create(\n        model=\"claude-haiku-4-5\",\n        max_tokens=k,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    # Haiku returns the speculative k tokens\n    return response.content[0].text.split()[:k]\n\n\ndef verify_and_extend(\n    prompt: str,\n    draft: list[str],\n) -> tuple[list[str], str]:\n    \"\"\"\n    Target model verifies each draft token and produces the next correct token.\n    Returns (accepted_tokens, next_target_token).\n    \"\"\"\n    draft_text = \" \".join(draft)\n    full_prompt = f\"{prompt}{draft_text}\"\n\n    # The target model sees the full draft and continues from the first\n    # position where it disagrees. In practice, vLLM/TGI handle per-token\n    # acceptance internally; here we simulate a simplified accept-all or\n    # reject-first-mismatch scheme.\n    response = client.messages.create(\n        model=\"claude-sonnet-4-5\",\n        max_tokens=1,\n        messages=[{\"role\": \"user\", \"content\": full_prompt}],\n    )\n    next_token = response.content[0].text.strip()\n\n    # Simplified: accept all draft tokens, then add target's correction.\n    # A real implementation does per-token rejection sampling.\n    return draft, next_token\n\n\ndef speculative_generate(prompt: str, max_tokens: int = 40) -> str:\n    \"\"\"Illustrates the speculative generation loop.\"\"\"\n    output_tokens: list[str] = []\n    k = 4  # speculation window\n\n    while len(output_tokens) < max_tokens:\n        # Step 1: draft model generates k tokens ahead\n        draft = draft_tokens(prompt + \" \".join(output_tokens), k)\n\n        # Step 2: target model verifies and extends\n        accepted, correction = verify_and_extend(\n            prompt + \" \".join(output_tokens), draft\n        )\n\n        output_tokens.extend(accepted)\n        output_tokens.append(correction)\n\n        if correction in (\"<eos>\", \"\"):\n            break\n\n    return \" \".join(output_tokens[:max_tokens])\n\n\nif __name__ == \"__main__\":\n    prompt = \"Explain the concept of attention in transformer models:\"\n    result = speculative_generate(prompt, max_tokens=30)\n    print(result)\n" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Agent-level speculative tool prefetching" }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [{ "type": "text", "text": "import asyncio\nimport anthropic\nfrom dataclasses import dataclass\nfrom typing import Any\n\nclient = anthropic.Anthropic()\n\n\n@dataclass\nclass ToolResult:\n    tool_name: str\n    result: Any\n    hit: bool  # True if this branch was actually chosen\n\n\n# Simulated idempotent read-only tools\nasync def search_kb(query: str) -> str:\n    await asyncio.sleep(0.15)  # simulate 150ms knowledge base query\n    return f\"[KB result for: {query}]\"\n\n\nasync def fetch_user_profile(user_id: str) -> dict:\n    await asyncio.sleep(0.12)  # simulate 120ms DB read\n    return {\"user_id\": user_id, \"tier\": \"pro\", \"usage\": 4200}\n\n\nasync def lookup_pricing(plan: str) -> dict:\n    await asyncio.sleep(0.08)  # simulate 80ms pricing API\n    return {\"plan\": plan, \"monthly_usd\": 49}\n\n\ndef predict_next_tools(context: str) -> list[tuple[str, dict]]:\n    \"\"\"\n    Lightweight heuristic that predicts the top-k likely next tool calls\n    based on conversation context. In production, replace with a small\n    classifier trained on historical agent traces.\n    \"\"\"\n    predictions: list[tuple[str, dict]] = []\n    cl = context.lower()\n    if \"price\" in cl or \"cost\" in cl or \"plan\" in cl:\n        predictions.append((\"lookup_pricing\", {\"plan\": \"pro\"}))\n    if \"user\" in cl or \"account\" in cl or \"profile\" in cl:\n        predictions.append((\"fetch_user_profile\", {\"user_id\": \"u-1234\"}))\n    if \"explain\" in cl or \"how\" in cl or \"what\" in cl:\n        predictions.append((\"search_kb\", {\"query\": context[:60]}))\n    return predictions[:3]  # top-3 candidates\n\n\nasync def speculative_agent_turn(user_message: str) -> str:\n    \"\"\"\n    Issues speculative tool prefetches concurrently with the main model call,\n    then uses the pre-fetched result if the model chose that tool.\n    \"\"\"\n    tool_map = {\n        \"lookup_pricing\": lookup_pricing,\n        \"fetch_user_profile\": fetch_user_profile,\n        \"search_kb\": search_kb,\n    }\n\n    # Step 1: predict which tools the model is likely to call\n    predicted = predict_next_tools(user_message)\n    print(f\"Speculatively prefetching: {[t for t, _ in predicted]}\")\n\n    # Step 2: launch all predicted tool calls concurrently (they are read-only)\n    prefetch_tasks: dict[str, asyncio.Task] = {}\n    for tool_name, args in predicted:\n        fn = tool_map[tool_name]\n        # Pass args as keyword arguments based on the first parameter name\n        first_param = list(args.keys())[0]\n        prefetch_tasks[tool_name] = asyncio.create_task(\n            fn(**args),\n            name=f\"speculative-{tool_name}\",\n        )\n\n    # Step 3: simultaneously call the main model to decide which tool to use\n    # (In a real agent loop, this is the tool-calling turn.)\n    # We simulate the model's decision here for brevity.\n    await asyncio.sleep(0.20)  # simulate main model latency\n    model_choice = \"lookup_pricing\"  # the model's actual decision\n    model_args = {\"plan\": \"pro\"}\n\n    # Step 4: check if the speculative result is ready\n    result: Any\n    if model_choice in prefetch_tasks:\n        task = prefetch_tasks[model_choice]\n        if task.done():\n            result = task.result()\n            print(f\"Cache HIT for {model_choice} — result already available\")\n        else:\n            result = await task\n            print(f\"Cache NEAR-HIT for {model_choice} — waited for inflight task\")\n    else:\n        fn = tool_map[model_choice]\n        result = await fn(**model_args)\n        print(f\"Cache MISS for {model_choice} — had to fetch fresh\")\n\n    # Step 5: cancel unused speculative futures\n    for name, task in prefetch_tasks.items():\n        if name != model_choice and not task.done():\n            task.cancel()\n            print(f\"Cancelled unused speculative task: {name}\")\n\n    return f\"Tool result: {result}\"\n\n\nasync def main():\n    msg = \"What is the cost of the pro plan for my user account?\"\n    response = await speculative_agent_turn(msg)\n    print(f\"\\nAgent response: {response}\")\n\n\nasyncio.run(main())\n" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Real-world example" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Scenario:", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " A customer support agent receives tickets and needs to: (1) look up the customer's account, (2) search the knowledge base for relevant policies, and (3) draft a response. Each of these steps takes 100-200 ms sequentially, totaling 400-600 ms before the user sees any output. By pre-fetching the knowledge base lookup and account information as soon as the ticket arrives, the agent can reduce effective latency to the time of the single slowest call." }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [{ "type": "text", "text": "import asyncio\nimport anthropic\nfrom typing import Optional\n\nclient = anthropic.Anthropic()\n\n\nasync def lookup_account(email: str) -> dict:\n    \"\"\"Read-only: always safe to prefetch.\"\"\"\n    await asyncio.sleep(0.15)\n    return {\"email\": email, \"plan\": \"enterprise\", \"open_tickets\": 2, \"account_id\": \"acct-9988\"}\n\n\nasync def search_policies(topic: str) -> str:\n    \"\"\"Read-only: always safe to prefetch.\"\"\"\n    await asyncio.sleep(0.18)\n    return f\"Policy excerpt for '{topic}': Refunds are issued within 5 business days...\"\n\n\nasync def handle_support_ticket(ticket: str, customer_email: str) -> str:\n    \"\"\"\n    Speculative prefetch of account and policy data before\n    the LLM has decided which it actually needs.\n\n    Timeline without speculation:\n      fetch_account (150ms) -> search_policy (180ms) -> LLM draft (400ms) = 730ms\n\n    Timeline with speculation:\n      max(fetch_account, search_policy, LLM decision) + draft = ~400ms\n    \"\"\"\n    # Speculatively start both read-only fetches immediately\n    account_task = asyncio.create_task(lookup_account(customer_email))\n    # Extract topic keyword heuristically from ticket content\n    topic_hint = \"refund\" if \"refund\" in ticket.lower() else \"billing\"\n    policy_task = asyncio.create_task(search_policies(topic_hint))\n\n    # Meanwhile, ask the LLM what it needs (tool selection turn)\n    # In a real agent this would be a proper tool-call loop.\n    # We simulate a 200ms model response time here.\n    await asyncio.sleep(0.20)\n    # Model decides: it needs account + policy (our speculation was correct)\n\n    # Await pre-fetched results — likely already done\n    account = await account_task   # probably 0ms wait (already finished)\n    policy = await policy_task     # probably 0ms wait (already finished)\n\n    # Final LLM call to draft the response with pre-fetched context\n    response = client.messages.create(\n        model=\"claude-sonnet-4-5\",\n        max_tokens=300,\n        messages=[\n            {\n                \"role\": \"user\",\n                \"content\": (\n                    f\"Customer ticket: {ticket}\\n\\n\"\n                    f\"Account info: {account}\\n\\n\"\n                    f\"Relevant policy: {policy}\\n\\n\"\n                    \"Draft a concise, helpful reply.\"\n                ),\n            }\n        ],\n    )\n    return response.content[0].text\n\n\nasync def main():\n    ticket = \"I was charged twice for my subscription last month. Please refund the duplicate.\"\n    email = \"customer@example.com\"\n\n    import time\n    start = time.monotonic()\n    reply = await handle_support_ticket(ticket, email)\n    elapsed = time.monotonic() - start\n\n    print(f\"Response ({elapsed:.2f}s):\\n{reply}\")\n\n\nasyncio.run(main())\n" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Speculatively executing write operations.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Sending an email, writing to a database, or charging a card speculatively is not safe — if the main model chooses a different branch, the side effect has already happened. Only idempotent reads are valid targets for prefetching." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Ignoring acceptance rate monitoring.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Teams deploy speculative decoding and assume it always helps. If the draft model is poorly matched to your domain (e.g., a general-purpose model drafting SQL queries), acceptance rate can be below 0.2, making speculation net-negative. Continuously measure alpha per task type." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Not cancelling inflight futures.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Speculative tasks that are not cancelled continue consuming resources even after a different branch is confirmed. In high-throughput systems, this compounds — idle tasks pile up, consuming connections, threads, or API quota." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Using an incompatible tokenizer in speculative decoding.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " If the draft and target model use different vocabularies, token IDs from the draft cannot be directly verified by the target. The rejection sampling math breaks. Always verify tokenizer compatibility before pairing draft and target models." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Setting k too high without measuring acceptance rate.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " A speculation window of k=10 at acceptance rate alpha=0.4 generates on average 1/(1-0.4)=1.67 accepted tokens — but runs 10 draft forward passes to get there. The overhead of the extra draft tokens often outweighs the gain. Optimal k depends on the ratio of draft cost to target cost and the actual alpha." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Measuring throughput instead of latency when optimizing for users.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Speculative decoding improves per-request latency; under high concurrency with batching it may not improve throughput. Optimize the metric that actually affects user experience for your deployment scenario." }
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Profile your workload before choosing a draft model.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Run candidate draft models against a sample of real prompts and measure alpha. A domain-fine-tuned draft model nearly always outperforms a generic smaller model for specialized workloads like code, SQL, or customer support." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Start with k=4 and tune empirically.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " The optimal speculation window is a function of alpha, draft cost, and target cost. A simple grid search over k in {2, 4, 6, 8} on a held-out latency benchmark is faster and more reliable than theoretical estimates." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Tag tool calls as read-safe or write-unsafe in your agent schema.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Build a metadata layer that annotates every tool with its side-effect profile. Your speculation engine reads this at runtime to decide which candidates are safe to prefetch." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Fall back gracefully when prediction accuracy is low.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Track rolling accuracy of your branch predictor per user, per session, and per task category. When accuracy drops below a threshold, disable speculation for that category and switch to direct execution." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Emit structured telemetry for every speculative step.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Log: speculation window k, acceptance rate alpha, hit/miss per branch, latency before and after, cancelled task count. Without this data, debugging performance regressions is guesswork." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Keep speculation transparent to callers.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " The output of speculative decoding must be identical to direct target model sampling. Do not expose draft tokens to users unless verified; never let speculation change the semantic content of the response." }
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Performance & scalability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "The expected number of tokens produced per target model forward pass is " },
+          { "type": "text", "text": "1 / (1 - alpha)", "marks": [{ "type": "code" }] },
+          { "type": "text", "text": " where alpha is the per-token acceptance rate. At alpha=0.5 you get 2 tokens per pass; at alpha=0.75 you get 4; at alpha=0.9 you get 10. This is the theoretical ceiling on speedup and assumes the draft model is free — in practice, draft latency reduces this." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Real-world speedups depend on the draft-to-target cost ratio. If the draft model is 1/20th the cost of the target and k=4, the effective FLOP per token is roughly target_cost / accepted_tokens. At alpha=0.7, accepted_tokens ≈ 3.3, so effective cost per token drops by 3x. Measured wall-clock improvements of 2-4x are common for well-matched draft-target pairs on long-form generation." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Under high concurrency, the picture changes. GPU serving systems like vLLM use " },
+          { "type": "text", "text": "continuous batching", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " to saturate GPU compute with many requests simultaneously. Adding speculative decoding increases per-request memory footprint (two model states in KV cache) and can reduce batch size, hurting overall throughput. Speculative decoding is most beneficial at " },
+          { "type": "text", "text": "low concurrency or interactive traffic patterns", "marks": [{ "type": "bold" }] },
+          { "type": "text", "text": " where minimizing per-request latency matters more than maximizing aggregate throughput." }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "For agent-level speculation, scalability depends on the cost of prefetched operations. Prefetching ten database reads per agent step is cheap. Prefetching ten LLM sub-agent calls is expensive and should only be done when the branch predictor has high confidence. Use a confidence threshold to limit the number of speculative branches to those with estimated probability above a floor (e.g., top-k where cumulative probability > 0.8)." }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Tooling & ecosystem" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Tool / Library" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Type" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Speculative support" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Notes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "vLLM", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Open-source inference server" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Full speculative decoding built-in" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Set --speculative-model and --num-speculative-tokens" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "TGI (text-generation-inference)", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "HuggingFace serving" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Speculative decoding with n-gram draft" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Also supports medusa heads as draft" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "llama.cpp", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Local inference" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Draft model speculative decoding via --draft-model" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "CPU + GPU, good for local agent runtimes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medusa", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fine-tuning method" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Adds draft heads to the target model" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "No separate draft model needed; single model with parallel heads" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "asyncio (Python)", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Async runtime" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Agent-level speculation via async Tasks" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "asyncio.create_task + task.cancel() for branch management" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "anthropic SDK streaming", "marks": [{ "type": "bold" }] }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "API client" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Streaming reduces perceived latency" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Pairs with server-side speculative decoding for best TTFT" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Comparison with alternatives" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Technique" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Latency reduction" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quality tradeoff" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Extra cost" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Best for" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Speculative decoding" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "2-4x per request" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "None (identical distribution)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Draft model compute" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Long-form generation, interactive chat" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quantization (INT8/INT4)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "1.5-2x" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Small quality degradation" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quantization overhead" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Memory-constrained deployments" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "KV-cache reuse (prompt caching)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Up to 10x on repeated prefixes" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "None" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Cache storage" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Repeated system prompts, RAG with stable docs" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Smaller model (model cascade)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "5-20x" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Quality gap for hard tasks" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Routing logic complexity" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Mixed workloads with easy/hard split" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Agent-level prefetch" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "2-5x on multi-step agents" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "None" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Wasted tool call compute" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Multi-step agents with predictable patterns" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Security & reliability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          { "type": "text", "text": "Speculative execution in CPUs has famously led to timing-based side-channel attacks (Spectre, Meltdown). LLM and agent-level speculative execution does not share the same microarchitectural attack surface, but introduces its own reliability and safety concerns." }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Output correctness guarantee.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " The rejection sampling algorithm in speculative decoding is mathematically proven to preserve the target distribution. However, this proof holds only when the target model's forward pass uses the same context as the draft model. Implementations that truncate or modify the KV-cache between draft and verify steps can violate this guarantee silently." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Race conditions in agent prefetching.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " If a speculative tool call modifies shared state (violating the read-only rule), and the main model chooses a different branch, the state mutation persists while the agent proceeds as if it did not happen. This can produce inconsistent agent behavior that is difficult to reproduce. Enforce the read-only constraint at the type level with a safe tool registry." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Resource exhaustion from uncontrolled speculation.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " An agent under adversarial input (e.g., a user who crafts prompts to maximize branch fan-out) could trigger hundreds of speculative tool calls per turn. Bound the number of concurrent speculative tasks with a semaphore and set short timeouts on prefetch operations." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Audit trail completeness.", "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " Speculative tool calls that are later discarded still made network requests and may have logged data, incurred API costs, or left traces in external systems. Ensure your audit logging captures speculative calls separately and marks them as cancelled or discarded — not as confirmed agent actions." }
+            ]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [
+              { "type": "text", "text": "Draft model poisoning.",  "marks": [{ "type": "bold" }] },
+              { "type": "text", "text": " If a draft model is user-supplied or loaded from an untrusted source, a malicious draft could attempt to steer token generation toward high-acceptance-rate outputs that are adversarially crafted. In production, only use trusted, fixed draft models from controlled artifact registries." }
+            ]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Speculative execution reduces latency by starting likely future work before the current step is confirmed — then discarding unused results if the prediction was wrong." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Speculative decoding uses a small draft model to generate k tokens ahead; the large target model verifies them in a single parallel forward pass, producing up to k+1 tokens per call with no quality tradeoff." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "The expected speedup is 1/(1-alpha) where alpha is the token acceptance rate. Measure alpha on your actual workload — it varies dramatically by domain and draft model quality." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Agent-level speculative prefetching issues concurrent async tool calls for the top-k likely next actions before the orchestrating model has decided. Only safe for idempotent, read-only operations — never for writes, mutations, or side effects." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Always cancel unused speculative futures promptly; uncancelled tasks waste compute, connections, and API quota." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Monitor alpha continuously and fall back to non-speculative execution when prediction accuracy drops below the break-even threshold (roughly alpha < 0.3 for typical draft-to-target cost ratios)." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Speculative decoding is most valuable at low-to-medium concurrency where per-request latency matters more than aggregate throughput; under high batching loads, the memory and scheduling overhead may outweigh the gains." }] }]
+          }
+        ]
+      }
+    ]
+  }
+}
