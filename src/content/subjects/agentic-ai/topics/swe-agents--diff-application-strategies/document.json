@@ -1,0 +1,3171 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a software engineering agent analyzes a codebase and identifies the changes needed to resolve a bug or implement a feature, it must then physically apply those changes to the repository's files. The mechanism it uses to do so — unified diffs, search-and-replace edits, whole-file rewrites, or AST-level patches — is the diff application strategy. The choice of strategy determines reliability, reversibility, and how gracefully the system handles conflicts when the repository has changed since the agent read it."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Getting diff application right is one of the most operationally demanding parts of building a production SWE agent. An agent that plans the correct change but fails to land it cleanly has accomplished nothing useful."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Diff application is the process of materializing a planned code change onto the filesystem of a repository. A SWE agent first reads repository files, reasons about required modifications, then outputs those modifications in some encoded form. The diff applicator takes that encoded form and writes the result to disk."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The encoded form can take several shapes. A unified diff is the traditional representation used by GNU patch, git diff, and most version control tools — it encodes changes as context lines, removed lines (prefixed with -), and added lines (prefixed with +), grouped into hunks with positional headers of the form @@ -a,b +c,d @@. A search-and-replace edit is an instruction to locate a specific string or pattern and substitute a replacement. A whole-file rewrite is simply the complete new content of a file. An AST-level patch describes changes in terms of the program's syntax tree — add import, rename symbol, insert statement after node X — and is applied by a language-specific transform tool rather than a text patcher."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each strategy makes different assumptions about the current state of the file, tolerates different amounts of drift between the version the agent read and the version on disk, and carries different risks when things go wrong."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The correctness of a code change exists independently of the mechanism used to apply it. But in practice, diff application failures are among the most common sources of lost work in agentic coding systems. Understanding why they happen requires appreciating the gap between when the agent reads a file and when the patch is applied."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In a concurrent multi-agent setup — many agents working on the same repository in parallel — any given file may be modified by another agent between the read and the apply. The repository might also have been updated by a human push. Even in a single-agent workflow the file on disk may differ from the agent's memory if the agent operated on a cached copy. When the applicator encounters a hunk that does not match the current file content, it must decide whether to fail hard, try fuzzy matching, escalate to a merge, or re-prompt the LLM for a corrected patch."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The stakes are high because a partially-applied patch is usually worse than no patch at all. A file with three of four hunks applied is in an inconsistent state; compilation will fail and the agent cannot reliably recover without examining every hunk. This is why production SWE agents almost universally apply changes in an isolated git worktree, verify all hunks, and commit atomically only on full success — with a rollback to the original if any hunk fails."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Precision and minimal footprint: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Unified diffs and search-and-replace edits change only the lines they need to. The rest of the file is untouched, making the change easy to review in a pull request and easy to revert."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reviewability: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A diff is a compact, human-readable description of the change. It can be stored, logged, audited, and replayed. Whole-file rewrites carry more information but are harder to review for large files."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Composability: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Multiple diffs can be queued and applied sequentially. If each is small and focused, they are unlikely to interfere with each other. This enables pipelining and parallel execution across different parts of the codebase."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reversibility: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Any diff application strategy that works on a git worktree can be undone with a single git checkout or git reset. The original file is always recoverable as long as it was tracked."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Conflict detection: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Unified diffs carry context lines — lines that must match the current file for the patch to succeed. When they do not match, the failure is loud and immediate rather than silently corrupting the file."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Auditability: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "The patch itself is a record of what the agent intended to do, distinct from what it actually did. Storing patches alongside application results enables debugging, retraining, and forensic analysis."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Context sensitivity: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Unified diffs rely on context lines to locate the insertion point. If the surrounding code has changed — even in unrelated ways — the patch may fail to locate the hunk and reject. More context lines mean more reliable location but more fragile patches."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Line-number brittleness: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "The @@ headers contain line numbers that are advisory for display but not used by the applicator directly (it uses context instead). However, when context is absent or minimal, off-by-one errors in line counts can cause misapplication without a clean error."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Large rewrites are expensive to diff: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "A whole-file rewrite is always safe but transmits far more data through the LLM context than a targeted diff. For a 2,000-line file with a three-line change, the whole-file approach consumes the agent's output budget unnecessarily."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Whitespace and encoding sensitivity: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Standard unified diff is sensitive to trailing whitespace, indentation style, and line endings. A patch generated from a file with Unix line endings will fail on a Windows checkout unless the applicator normalizes line endings."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Partial failure risk: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Applying a multi-file diff file by file means the repository can enter a partially-patched state if the system crashes mid-way. This makes transactional isolation (git worktrees, staging areas) essential."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "AST patching requires language tooling: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "AST-level strategies need a parser and a code formatter for each target language. This adds dependency complexity and means the strategy is not portable across languages without additional integration work."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The unified diff format"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A unified diff consists of one or more hunks. Each hunk begins with a header line:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "diff"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "@@ -12,8 +12,9 @@ def calculate_score(items):"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The notation -12,8 means the hunk starts at line 12 of the original file and covers 8 lines. +12,9 means after the patch is applied, the same region starts at line 12 and covers 9 lines. Lines prefixed with a space are context lines (unchanged), lines prefixed with - are removed, and lines prefixed with + are added."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The applicator locates each hunk by searching for the context lines — not by using the line numbers directly. The standard GNU patch utility supports a fuzz factor F: if the context lines do not match at the stated position, the applicator searches up to F lines above and below. With -F 2, a hunk that does not match at line 12 will also try lines 10, 11, 13, and 14. A fuzz factor of 0 requires an exact match; the default is 2."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Three-way merge"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When context-line matching fails even with the maximum fuzz factor, a three-way merge is the next option. Three-way merge uses the common ancestor version (the version the agent read from), the current file version (what is on disk now), and the agent's intended result. It identifies which changes are from the agent and which are independent modifications to the same file. If no line overlaps, the merge succeeds and produces a combined file. If the same line was modified by both the agent and the concurrent change, a conflict is reported and requires human or LLM resolution."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Three-way merge is the correct tool when two agents or a human and an agent edit the same file concurrently. It is what git merge does internally and what rebasing does when replaying commits."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Search-and-replace semantics"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A search-and-replace edit specifies an old_string and a new_string. The applicator locates the first (or all) occurrences of old_string in the file and substitutes new_string. This approach is not sensitive to surrounding context or line numbers, making it robust when the file has grown or shrunk since the agent read it — as long as the target string is unique. The main risk is under-specification: if old_string matches multiple locations, the wrong occurrence may be replaced."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Search-and-replace is the preferred strategy for renaming a variable or function, changing a configuration value, or updating an import path — cases where the target string is a precise identifier that is unlikely to appear in multiple contexts."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture overview"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDgwIiB2aWV3Qm94PSIwIDAgODIwIDQ4MCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIj48cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjQ4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+PHRleHQgeD0iNDEwIiB5PSIzNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiPkRpZmYgQXBwbGljYXRpb24gUGlwZWxpbmUgLSBTV0UgQWdlbnQ8L3RleHQ+PHJlY3QgeD0iMjAiIHk9IjYwIiB3aWR0aD0iMTUwIiBoZWlnaHQ9Ijg4IiByeD0iOCIgZmlsbD0iIzFlM2E1ZiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjIiLz48dGV4dCB4PSI5NSIgeT0iOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzOGJkZjgiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtd2VpZ2h0PSJib2xkIj5MTE0gQWdlbnQ8L3RleHQ+PHRleHQgeD0iOTUiIHk9IjEwOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzkzYzVmZCIgZm9udC1zaXplPSI5Ij5yZWFkcyByZXBvIGNvbnRleHQ8L3RleHQ+PHRleHQgeD0iOTUiIHk9IjEyMSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzkzYzVmZCIgZm9udC1zaXplPSI5Ij5wcm9kdWNlcyBjaGFuZ2Ugc3BlYzwvdGV4dD48dGV4dCB4PSI5NSIgeT0iMTM0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTNjNWZkIiBmb250LXNpemU9IjkiPmVtaXRzIGRpZmYgLyBlZGl0czwvdGV4dD48cmVjdCB4PSIyNDAiIHk9IjUwIiB3aWR0aD0iMTY1IiBoZWlnaHQ9IjEwOCIgcng9IjgiIGZpbGw9IiMxYTNkMmIiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIyIi8+PHRleHQgeD0iMzIyIiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiPlN0cmF0ZWd5IFJvdXRlcjwvdGV4dD48dGV4dCB4PSIzMjIiIHk9Ijk1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjkiPlVuaWZpZWQgRGlmZiAoR05VIHBhdGNoKTwvdGV4dD48dGV4dCB4PSIzMjIiIHk9IjExMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JiZjdkMCIgZm9udC1zaXplPSI5Ij5TZWFyY2ggYW5kIFJlcGxhY2U8L3RleHQ+PHRleHQgeD0iMzIyIiB5PSIxMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiYmY3ZDAiIGZvbnQtc2l6ZT0iOSI+V2hvbGUtRmlsZSBSZXdyaXRlPC90ZXh0Pjx0ZXh0IHg9IjMyMiIgeT0iMTQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjkiPkFTVC1sZXZlbCBQYXRjaDwvdGV4dD48bGluZSB4MT0iMTcwIiB5MT0iMTA0IiB4Mj0iMjM4IiB5Mj0iMTA0IiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41Ii8+PHBvbHlnb24gcG9pbnRzPSIyMzQsMTAwIDI0MiwxMDQgMjM0LDEwOCIgZmlsbD0iIzY0NzQ4YiIvPjx0ZXh0IHg9IjIwNCIgeT0iOTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+ZGlmZiBvdXRwdXQ8L3RleHQ+PHJlY3QgeD0iMjQwIiB5PSIxOTAiIHdpZHRoPSIxNjUiIGhlaWdodD0iNjUiIHJ4PSI2IiBmaWxsPSIjMmMxYTBhIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41Ii8+PHRleHQgeD0iMzIyIiB5PSIyMTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSJib2xkIj5Db25mbGljdCBEZXRlY3RvcjwvdGV4dD48dGV4dCB4PSIzMjIiIHk9IjIyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZjZDM0ZCIgZm9udC1zaXplPSI5Ij5leGFjdCB0byBmdXp6eSB0byAzLXdheSBtZXJnZTwvdGV4dD48dGV4dCB4PSIzMjIiIHk9IjI0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZjZDM0ZCIgZm9udC1zaXplPSI5Ij5yZWplY3QgKyByZS1wcm9tcHQgb24gZmFpbDwvdGV4dD48bGluZSB4MT0iMzIyIiB5MT0iMTU4IiB4Mj0iMzIyIiB5Mj0iMTg2IiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41Ii8+PHBvbHlnb24gcG9pbnRzPSIzMTgsMTgzIDMyMiwxOTEgMzI2LDE4MyIgZmlsbD0iIzY0NzQ4YiIvPjxyZWN0IHg9IjQ4MCIgeT0iNTUiIHdpZHRoPSIxNTUiIGhlaWdodD0iMTc1IiByeD0iOCIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjYTc4YmZhIiBzdHJva2Utd2lkdGg9IjIiLz48dGV4dCB4PSI1NTciIHk9IjgyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTc4YmZhIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCI+UmVwb3NpdG9yeSBGUzwvdGV4dD48dGV4dCB4PSI1NTciIHk9IjEwMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2U5ZDVmZiIgZm9udC1zaXplPSI5Ij5zcmMvYWdlbnQucHk8L3RleHQ+PHRleHQgeD0iNTU3IiB5PSIxMTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlOWQ1ZmYiIGZvbnQtc2l6ZT0iOSI+dGVzdHMvdGVzdF9hZ2VudC5weTwvdGV4dD48dGV4dCB4PSI1NTciIHk9IjEyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2U5ZDVmZiIgZm9udC1zaXplPSI5Ij5jb25maWcvc2V0dGluZ3MueWFtbDwvdGV4dD48dGV4dCB4PSI1NTciIHk9IjE0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2U5ZDVmZiIgZm9udC1zaXplPSI5Ij5SRUFETUUubWQ8L3RleHQ+PHRleHQgeD0iNTU3IiB5PSIxNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+Z2l0IHdvcmt0cmVlIGlzb2xhdGlvbjwvdGV4dD48dGV4dCB4PSI1NTciIHk9IjE3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5hdG9taWMgY29tbWl0IG9uIHN1Y2Nlc3M8L3RleHQ+PHRleHQgeD0iNTU3IiB5PSIxOTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+cm9sbGJhY2sgb24gYW55IGZhaWx1cmU8L3RleHQ+PHRleHQgeD0iNTU3IiB5PSIyMTUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+bW9kaWZpZWQgaW4tcGxhY2U8L3RleHQ+PGxpbmUgeDE9IjQwNSIgeTE9IjEwNCIgeDI9IjQ3OCIgeTI9IjEwNCIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIvPjxwb2x5Z29uIHBvaW50cz0iNDc0LDEwMCA0ODIsMTA0IDQ3NCwxMDgiIGZpbGw9IiM2NDc0OGIiLz48dGV4dCB4PSI0NDEiIHk9Ijk4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiPmFwcGx5IHBhdGNoPC90ZXh0PjxsaW5lIHgxPSI0MDUiIHkxPSIyMjIiIHgyPSI0NzgiIHkyPSIyMjIiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjUsMyIvPjxwb2x5Z29uIHBvaW50cz0iNDc0LDIxOCA0ODIsMjIyIDQ3NCwyMjYiIGZpbGw9IiNmNTllMGIiLz48dGV4dCB4PSI0NDEiIHk9IjIxNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1zaXplPSI4Ij5mdXp6L3JldHJ5PC90ZXh0PjxyZWN0IHg9IjQ4MCIgeT0iMjY1IiB3aWR0aD0iMTU1IiBoZWlnaHQ9IjcwIiByeD0iNiIgZmlsbD0iIzFhM2QyYiIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIvPjx0ZXh0IHg9IjU1NyIgeT0iMjkyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCI+VmVyaWZpY2F0aW9uPC90ZXh0Pjx0ZXh0IHg9IjU1NyIgeT0iMzA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjkiPnN5bnRheCArIGxpbnQgKyB1bml0IHRlc3RzPC90ZXh0Pjx0ZXh0IHg9IjU1NyIgeT0iMzIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmJmN2QwIiBmb250LXNpemU9IjkiPmh1bmsgY291bnQgY2hlY2s8L3RleHQ+PGxpbmUgeDE9IjU1NyIgeTE9IjIzMCIgeDI9IjU1NyIgeTI9IjI2MyIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIvPjxwb2x5Z29uIHBvaW50cz0iNTUzLDI2MCA1NTcsMjY4IDU2MSwyNjAiIGZpbGw9IiM2NDc0OGIiLz48cmVjdCB4PSI2OTAiIHk9IjExOCIgd2lkdGg9IjExMCIgaGVpZ2h0PSI2NSIgcng9IjYiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48dGV4dCB4PSI3NDUiIHk9IjE0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM4YmRmOCIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiPlBSIC8gQ29tbWl0PC90ZXh0Pjx0ZXh0IHg9Ijc0NSIgeT0iMTYwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTNjNWZkIiBmb250LXNpemU9IjkiPmdpdCBkaWZmIHN0YWdpbmc8L3RleHQ+PHRleHQgeD0iNzQ1IiB5PSIxNzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5M2M1ZmQiIGZvbnQtc2l6ZT0iOSI+aHVtYW4gcmV2aWV3PC90ZXh0PjxsaW5lIHgxPSI2MzUiIHkxPSIxNDgiIHgyPSI2ODgiIHkyPSIxNTMiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48cG9seWdvbiBwb2ludHM9IjY4NCwxNTAgNjkyLDE1NCA2ODYsMTYwIiBmaWxsPSIjNjQ3NDhiIi8+PHJlY3QgeD0iNjkwIiB5PSIyNjUiIHdpZHRoPSIxMTAiIGhlaWdodD0iNjUiIHJ4PSI2IiBmaWxsPSIjMmMxYTBhIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI1LDMiLz48dGV4dCB4PSI3NDUiIHk9IjI5MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1zaXplPSIxMSIgZm9udC13ZWlnaHQ9ImJvbGQiPlJvbGxiYWNrPC90ZXh0Pjx0ZXh0IHg9Ijc0NSIgeT0iMzA3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjkiPnJlc3RvcmUgc25hcHNob3Q8L3RleHQ+PHRleHQgeD0iNzQ1IiB5PSIzMjEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmY2QzNGQiIGZvbnQtc2l6ZT0iOSI+cmUtcHJvbXB0IExMTTwvdGV4dD48bGluZSB4MT0iNjM1IiB5MT0iMzAwIiB4Mj0iNjg4IiB5Mj0iMzAwIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSI1LDMiLz48cG9seWdvbiBwb2ludHM9IjY4NCwyOTYgNjkyLDMwMCA2ODQsMzA0IiBmaWxsPSIjZjU5ZTBiIi8+PHRleHQgeD0iNjYwIiB5PSIyOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtc2l6ZT0iOCI+ZmFpbDwvdGV4dD48cmVjdCB4PSIyMCIgeT0iMzg1IiB3aWR0aD0iNzgwIiBoZWlnaHQ9Ijc1IiByeD0iNiIgZmlsbD0iIzFlMjkzYiIvPjx0ZXh0IHg9IjQxMCIgeT0iNDA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5TdHJhdGVneSBTZWxlY3Rpb24gR3VpZGU8L3RleHQ+PHRleHQgeD0iNDEwIiB5PSI0MjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOSI+VW5pZmllZCBEaWZmOiBzdXJnaWNhbCBsaW5lIGNoYW5nZXMsIHNtYWxsIGh1bmtzIHwgU2VhcmNoK1JlcGxhY2U6IHJlbmFtZXMsIGNvbmZpZyB8IFdob2xlLUZpbGU6IG5ldyBmaWxlcyBvciBmdWxsIHJld3JpdGVzPC90ZXh0Pjx0ZXh0IHg9IjQxMCIgeT0iNDM3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjkiPkFTVCBQYXRjaDogbGFuZ3VhZ2UtYXdhcmUgdHJhbnNmb3JtcyAoYWRkIGltcG9ydCwgcmVuYW1lIHN5bWJvbCkgfCBGdXp6OiArLy0gTiBsaW5lcyBjb250ZXh0IHRvbGVyYW5jZTwvdGV4dD48dGV4dCB4PSI0MTAiIHk9IjQ1MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI5Ij5Qcm9kdWN0aW9uOiBpc29sYXRlIGVhY2ggYWdlbnQgcnVuIGluIGZyZXNoIGdpdCB3b3JrdHJlZTsgY29tbWl0IGF0b21pY2FsbHkgYWZ0ZXIgYWxsIGh1bmtzIHN1Y2NlZWQ7IG5ldmVyIHBhcnRpYWxseSBhcHBseTwvdGV4dD48L3N2Zz4=",
+          "alt": "Diff Application Pipeline: LLM Agent produces diff, Strategy Router selects Unified Diff / Search+Replace / Whole-File / AST Patch, Conflict Detector handles fuzzy matching and 3-way merge, changes land on Repository FS (git worktree), Verification checks syntax and tests, success goes to PR/Commit, failure triggers Rollback and re-prompt"
+        }
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use it"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Unified diff"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unified diff is the right choice for small to medium surgical changes: adding or removing a few lines, modifying a function signature, fixing a conditional. It is also the natural output format when the agent is reasoning about changes in the same way a developer would — in terms of what to remove and what to add in context. Use it whenever the changes are narrowly scoped and the file is unlikely to have changed between read and apply."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Search and replace"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use search-and-replace when the change is a substitution: renaming an identifier, updating a URL, replacing a constant value. Also prefer it when the surrounding context is highly variable — for example, when the agent must apply the same logical change across many different files that were not all read in the same context window."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Whole-file rewrite"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Whole-file rewrite is the safest strategy for new files, heavily refactored files, or small files (under ~50 lines) where the entire content is within the agent's output window. It eliminates any risk of hunk mismatch. The downside is PR noise — reviewers see the full file rather than a focused diff."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "AST patching"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "AST-level patching is warranted for language-aware transforms that are difficult to express correctly as text diffs: adding an import to a Python module's import block regardless of where it currently sits, moving a function from one class to another, or applying a codemod across every file in a project. Tools like libcst, jscodeshift, and gopatch operate at this level. Reserve this strategy for refactors with well-defined structural semantics."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When not to use"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Do not use unified diff for generated files (protobuf outputs, lock files, auto-formatted code) — these files change in unpredictable ways and diffs stale immediately."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Do not use whole-file rewrite for files larger than a few hundred lines unless you have verified the LLM can reproduce the entire file accurately; LLMs hallucinate tokens when outputting very long, partially-unchanged files."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Do not use search-and-replace when the target string appears in more than one location and the agent's intent is to change only one of them — use a more targeted strategy or provide sufficient disambiguation context."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The minimal implementation of a diff applicator for an agentic system has five components: a patch generator (the LLM prompt that produces the diff), a conflict detector, an applicator (subprocess or library), a verifier, and a rollback handler."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1 — Read the file and generate the patch. The agent reads the current content of each file it intends to modify and includes it in context. The system prompt instructs the agent to produce output in unified diff format or in a structured edit format (old_string / new_string pairs)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2 — Parse and validate the diff. Before applying, parse the diff output to confirm it is syntactically valid (no malformed @@ headers, no missing newlines at end of file, correct +/- counts per hunk). Reject and re-prompt if the parse fails."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3 — Create an isolated worktree. Run git worktree add /tmp/agent-workspace-<uuid> to get a clean copy of the branch. Apply all changes within this worktree, never the main checkout. This prevents partial corruption of the working directory."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 4 — Apply with fallback. Attempt exact application first. On failure, retry with increasing fuzz factor. On fuzz failure, attempt a three-way merge using the version the agent read as the base. If all strategies fail, log the conflict, restore the worktree to its original state, and return a structured error to the orchestrator."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 5 — Verify. Run at minimum a syntax check (python -m py_compile for Python, tsc --noEmit for TypeScript, go build ./... for Go). If tests are available and fast, run them. Confirm that the number of hunks reported as applied matches the number of hunks in the patch."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 6 — Commit atomically. If all hunks applied and verification passed, create a git commit in the worktree. Then either push the worktree branch or merge it back into the agent's working branch."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example 1 — Applying a unified diff with the patch library"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import subprocess\nimport shutil\nimport tempfile\nimport textwrap\nfrom pathlib import Path\n\ndef apply_unified_diff(repo_path: str, unified_diff: str, fuzz: int = 2) -> dict:\n    \"\"\"\n    Apply a unified diff to a repository using GNU patch.\n    Returns a dict with keys: success (bool), applied_hunks (int), message (str).\n    \"\"\"\n    with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:\n        f.write(unified_diff)\n        patch_file = f.name\n\n    result = subprocess.run(\n        ['patch', '-p1', f'--fuzz={fuzz}', '--dry-run', '-i', patch_file],\n        cwd=repo_path,\n        capture_output=True,\n        text=True\n    )\n\n    if result.returncode != 0:\n        return {\n            'success': False,\n            'applied_hunks': 0,\n            'message': result.stderr or result.stdout\n        }\n\n    # Dry run succeeded — apply for real\n    result = subprocess.run(\n        ['patch', '-p1', f'--fuzz={fuzz}', '-i', patch_file],\n        cwd=repo_path,\n        capture_output=True,\n        text=True\n    )\n\n    applied = result.stdout.count('Hunk #')\n    return {\n        'success': result.returncode == 0,\n        'applied_hunks': applied,\n        'message': result.stdout\n    }\n\n\n# Example usage\ndiff = textwrap.dedent(\"\"\"\\\n    --- a/src/calculator.py\n    +++ b/src/calculator.py\n    @@ -10,6 +10,10 @@ def add(a, b):\n         return a + b\n\n     def divide(a, b):\n    -    return a / b\n    +    if b == 0:\n    +        raise ValueError(\"Cannot divide by zero\")\n    +    return a / b\n    +\n\"\"\")\n\nresult = apply_unified_diff('/path/to/repo', diff)\nprint(result)\n# {'success': True, 'applied_hunks': 1, 'message': 'patching file src/calculator.py\\n'}\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example 2 — Search-and-replace applicator with uniqueness guard"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pathlib import Path\nfrom dataclasses import dataclass\nfrom typing import Optional\n\n@dataclass\nclass SearchReplaceEdit:\n    file_path: str\n    old_string: str\n    new_string: str\n\nclass SearchReplaceApplicator:\n    def __init__(self, repo_root: str):\n        self.root = Path(repo_root)\n\n    def apply(self, edit: SearchReplaceEdit) -> dict:\n        path = self.root / edit.file_path\n        original = path.read_text(encoding='utf-8')\n\n        count = original.count(edit.old_string)\n\n        if count == 0:\n            return {\n                'success': False,\n                'message': f'old_string not found in {edit.file_path}'\n            }\n        if count > 1:\n            return {\n                'success': False,\n                'message': (\n                    f'old_string matches {count} locations in {edit.file_path}. '\n                    'Provide more context to make the target unique.'\n                )\n            }\n\n        updated = original.replace(edit.old_string, edit.new_string, 1)\n        path.write_text(updated, encoding='utf-8')\n        return {'success': True, 'message': f'Applied to {edit.file_path}'}\n\n\n# Apply a targeted function rename\napplicator = SearchReplaceApplicator('/workspace/repo')\nresult = applicator.apply(SearchReplaceEdit(\n    file_path='src/auth.py',\n    old_string='def check_token(token: str) -> bool:',\n    new_string='def validate_token(token: str) -> bool:',\n))\nprint(result)\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "SWE-bench is the standard benchmark for evaluating agentic repository-repair systems. Agents receive a GitHub issue description and the state of the repository at the time the issue was filed, then must produce a patch that resolves the issue — confirmed by running the repository's test suite."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In high-performing SWE-bench systems, the diff application stage is critical. The agent often reads dozens of files to locate the fault, then produces a targeted unified diff covering one to five hunks. Because the benchmark repositories have active histories, the file on disk when the evaluator runs the test may differ slightly from the version in the agent's context window. Well-performing systems use fuzz-tolerant application (fuzz factor 2) and fall back to a search-and-replace strategy when the unified diff's context lines do not match."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production deployments at scale — such as a system processing hundreds of issues per day — run each agent attempt in a dedicated git worktree to prevent cross-contamination. The worktree is created from the exact commit that the agent read, not from HEAD (which may have advanced). Verification runs the repository's test suite in a container, and the patch is committed only if all pre-existing passing tests still pass. The full cycle from issue ingestion to commit creation typically runs in under five minutes; diff application itself takes under one second — the bottleneck is test execution."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Simplified structure of a production SWE-bench agent patch applier\n\nimport subprocess\nfrom dataclasses import dataclass\n\n@dataclass\nclass PatchResult:\n    success: bool\n    commit_sha: str | None\n    failing_tests: list[str]\n    error: str | None\n\ndef run_swebench_patch(\n    repo_path: str,\n    base_commit: str,\n    patch_text: str,\n    test_cmd: str\n) -> PatchResult:\n    # 1. Create worktree at the exact base commit the agent saw\n    wt = f'/tmp/swebench-{base_commit[:8]}'\n    subprocess.run(\n        ['git', 'worktree', 'add', wt, base_commit],\n        cwd=repo_path, check=True, capture_output=True\n    )\n\n    try:\n        # 2. Apply patch with fuzz tolerance\n        result = subprocess.run(\n            ['patch', '-p1', '--fuzz=2', '--no-backup-if-mismatch'],\n            input=patch_text, text=True,\n            cwd=wt, capture_output=True\n        )\n        if result.returncode != 0:\n            return PatchResult(False, None, [], result.stderr)\n\n        # 3. Run test suite in container to avoid host contamination\n        test_result = subprocess.run(\n            ['python', '-m', 'pytest', '--tb=no', '-q', '--timeout=60'],\n            cwd=wt, capture_output=True, text=True, timeout=300\n        )\n\n        # 4. Parse failures\n        failing = [\n            line for line in test_result.stdout.splitlines()\n            if line.startswith('FAILED')\n        ]\n        if failing:\n            return PatchResult(False, None, failing, None)\n\n        # 5. Commit and return SHA\n        subprocess.run(['git', 'add', '-A'], cwd=wt, check=True)\n        subprocess.run(\n            ['git', 'commit', '-m', 'agent: apply patch'],\n            cwd=wt, check=True\n        )\n        sha = subprocess.check_output(\n            ['git', 'rev-parse', 'HEAD'], cwd=wt\n        ).decode().strip()\n        return PatchResult(True, sha, [], None)\n\n    finally:\n        subprocess.run(\n            ['git', 'worktree', 'remove', '--force', wt],\n            cwd=repo_path, capture_output=True\n        )\n"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Applying diffs to the working directory directly"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most common mistake is running patch against the main git working directory. If any hunk fails mid-way, the repository is in a partially-patched state. Some files have been modified; others have not. Recovery requires carefully identifying which hunks were applied, which were not, and manually undoing the partial changes. Always apply in an isolated worktree or on a temporary copy of the files, then merge the result back only on full success."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Forgetting to include enough context lines"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When asking an LLM to produce a unified diff, a common prompting mistake is to ask for only the changed lines with minimal context. A diff with zero context lines (patch -U 0) will fail on any file that has been reformatted or lightly edited. Include at least three context lines on each side of every change, and use the fuzz factor to absorb minor shifts."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Assuming the patch format is always valid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LLMs occasionally produce malformed diffs: @@ headers with incorrect line counts, missing newline indicators (No newline at end of file), or mixed up +/- line counts. Always validate the patch format before attempting application. A regex that counts + and - lines per hunk and compares to the header is sufficient for early rejection."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import re\n\ndef validate_unified_diff_hunk(hunk: str) -> bool:\n    \"\"\"\n    Validate that a unified diff hunk's @@ header counts match the actual content.\n    Returns True if valid, False otherwise.\n    \"\"\"\n    header_match = re.match(r'^@@ -\\d+(?:,(?P<orig>\\d+))? \\+\\d+(?:,(?P<new>\\d+))? @@', hunk)\n    if not header_match:\n        return False\n\n    orig_count = int(header_match.group('orig') or 1)\n    new_count = int(header_match.group('new') or 1)\n\n    lines = hunk.split('\\n')[1:]  # skip @@ line\n    actual_orig = sum(1 for l in lines if l.startswith(' ') or l.startswith('-'))\n    actual_new = sum(1 for l in lines if l.startswith(' ') or l.startswith('+'))\n\n    return actual_orig == orig_count and actual_new == new_count\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Not verifying after apply"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Applying a patch without running a syntax check is a false economy. A diff that applies cleanly at the text level may introduce a Python IndentationError, a JavaScript SyntaxError, or a Go compilation failure. These are cheap to catch immediately and expensive to discover later when the agent has moved on. At minimum, run python -m py_compile on every modified Python file before declaring success."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Re-generating a diff against the wrong base"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a patch fails and the agent is re-prompted to try again, it must read the current file content again — not reuse the content from its previous context window. Re-generating a diff against a stale version of the file will produce a patch that fails for the same reason as the first attempt."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always work in an isolated git worktree: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Create one per agent task with git worktree add. This gives you a clean filesystem view without touching the main checkout, and removal is a single command."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate patch structure before applying: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Parse the diff to confirm hunk counts match, line prefixes are consistent, and no malformed @@ headers are present. Reject immediately rather than letting the applicator produce a confusing error."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a retry cascade for conflict resolution: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Implement exact match, then fuzz factor 2, then three-way merge, then reject and re-prompt the LLM with the current file content. Each fallback should be logged so you can measure which level most failures hit — this reveals whether your diff generation or application logic needs tuning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Snapshot files before applying: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Store the original content of every file you are about to modify. This makes rollback O(1) and does not depend on git history being in a particular state."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Count applied hunks and compare to expected: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "The patch utility outputs 'patching file X' and 'Hunk #N succeeded at line Y' messages. Parse these to confirm that all hunks from the generated diff were actually applied. A mismatch means silent partial application."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Include newline normalization: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Before applying a patch, normalize the line endings of both the patch file and the target file to the same format (LF on Unix). A Windows-generated patch applied to a Unix file will fail on every context line."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For multi-file changes, apply all or none: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Apply every file's patch in the worktree before verifying any of them. Then run verification. If verification fails for any file, discard the entire worktree. Partial commits that apply half the planned changes and leave the rest unapplied create inconsistent states that are hard to recover from."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log the exact patch text alongside the result: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Store the patch text, the base commit, and the outcome (success/failure, hunk count, error message) in a structured log. This data is essential for diagnosing failures and for fine-tuning the LLM on diff generation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single diff application — even for a 10,000-line file — completes in milliseconds. The patch utility is line-by-line and O(n) in file size; the search-and-replace approach is also O(n). Performance is not a concern for individual operations."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At scale — hundreds of concurrent agent tasks — the bottleneck is worktree management and I/O. Creating a git worktree is fast (it shares object storage with the main repo via hardlinks), but if each worktree is on a network filesystem, the I/O for reading and writing large source files adds up. In high-throughput deployments, agents run on local NVMe storage and the worktree is created from a local clone, not a remote fetch."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The more significant scalability challenge is the test-verification step. Running the full test suite for every candidate patch is expensive. Production systems use a tiered approach: fast syntax-check immediately, run the subset of tests most likely affected by the changed files (using test impact analysis or coverage data), and run the full suite only for the final merge candidate."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For large repositories (millions of lines), reading the entire repository into context to decide what to change is impractical. Context engineering — selecting only the relevant files — is handled before diff generation, not during application. The applicator itself does not need to know about the repository size; it only touches the files listed in the patch."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tool / Library",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Language",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Strategy",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Key features",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GNU patch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "C (CLI)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified diff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fuzz factor, dry-run, three-way merge, batch file application"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "python-unidiff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified diff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Parse and inspect unified diffs as Python objects; does not apply"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "whatthepatch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified diff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Parse and apply unified diffs in pure Python without subprocess"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "libcst"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AST patch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Concrete syntax tree transforms for Python; preserves formatting"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "jscodeshift"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "JavaScript"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AST patch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "JavaScript/TypeScript AST transforms using ast-types; codemod API"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "gopatch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Go"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AST patch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Go-specific patch tool; supports structural matching of go/ast nodes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "git apply"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "C (CLI)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified diff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Applies patches with git-aware context; understands renames and mode changes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "difflib (stdlib)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Diff generation"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Generate unified diffs in Python; does not apply, only creates"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "patch (npm)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "JavaScript"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified diff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Apply unified diffs in Node.js without native dependencies"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Strategy",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LLM output size",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Conflict resilience",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Review clarity",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Language-aware",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified diff"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Small (changes only)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium (fuzz)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Surgical edits, most changes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Search and replace"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Small (two strings)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (no line numbers)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Identifier renames, config updates"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Whole-file rewrite"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Large (entire file)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (no merge needed)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (full file in PR)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "New files, small files, heavy refactors"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AST patch"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Small (structural spec)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (structural, not textual)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Structural transforms, codemods"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Three-way merge"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium (base + current + new)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Highest (concurrent edits)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (complex merge output)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Multi-agent concurrent edits"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and reliability"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Path traversal in patch files"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A malicious or malformed patch file can contain paths like ../../../../etc/passwd or absolute paths outside the repository. Always validate that every file path in the patch resolves within the repository root before applying. The git apply command does this by default; the subprocess patch call does not. Validate with Path(repo_root).resolve() in strict mode."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pathlib import Path\n\ndef safe_patch_paths(patch_text: str, repo_root: str) -> bool:\n    \"\"\"\n    Return True if all file paths in the patch resolve within repo_root.\n    Rejects paths with ../ components or absolute paths.\n    \"\"\"\n    root = Path(repo_root).resolve()\n    for line in patch_text.splitlines():\n        if line.startswith('+++ ') or line.startswith('--- '):\n            # Strip the a/ or b/ prefix added by git diff\n            raw_path = line[4:].split('\\t')[0].strip()\n            if raw_path in ('/dev/null', 'dev/null'):\n                continue\n            raw_path = raw_path.removeprefix('a/').removeprefix('b/')\n            resolved = (root / raw_path).resolve()\n            if not str(resolved).startswith(str(root)):\n                return False\n    return True\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Preventing code injection via patch content"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The content of a patch is arbitrary code. An agent that is tricked (via prompt injection in a file it reads) into applying a patch that inserts a backdoor into the codebase is a real threat. Mitigations include: running verification in a sandboxed container, requiring human approval for patches that modify security-sensitive paths (authentication modules, credential handling, CI configuration files), and scanning patch content for known dangerous patterns before applying."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Ensuring idempotency"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A diff application should be idempotent: applying the same patch twice to a repository that has already had it applied should produce no change (or a clean already-applied error). The patch utility reports 'Hunk #N FAILED -- already applied' in this case. Build your orchestrator to treat this as success, not failure, to handle retries gracefully without corrupting the file."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Worktree cleanup"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the agent process crashes during application, the worktree may be left in a modified state. Use a finally block or a context manager to ensure git worktree remove --force is called. Register the worktree path in persistent storage at creation time so a crash-recovery handler can clean up orphaned worktrees on restart."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Unified diff is the standard strategy for surgical changes; it uses context lines to locate hunks, tolerates minor file drift via fuzz factor, and fails loudly when context does not match, making problems visible rather than silent."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Search-and-replace edits are more robust than unified diffs when the surrounding file structure is variable, but require the target string to be unique — always guard against multi-match scenarios."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Whole-file rewrite is the safest strategy for new files and small files, but consumes LLM output budget proportional to file size and produces noisy pull request diffs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always apply patches in an isolated git worktree and commit atomically only after all hunks succeed and verification passes; partial application is worse than no application."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement a retry cascade: exact match, then fuzz factor, then three-way merge, then reject and re-prompt with the current file content — log at which stage each failure occurs to guide tuning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate patch structure (hunk counts, path safety, line-ending normalization) before applying; malformed patches cause confusing errors that are easier to prevent than diagnose."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Performance bottlenecks in diff application at scale are test verification and I/O, not the patch operation itself — use tiered test execution (syntax check, affected-test subset, full suite) to keep cycle times manageable."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Security hardening requires path traversal validation on every patch path, sandbox execution for verification, and human approval gating for security-sensitive file changes."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
