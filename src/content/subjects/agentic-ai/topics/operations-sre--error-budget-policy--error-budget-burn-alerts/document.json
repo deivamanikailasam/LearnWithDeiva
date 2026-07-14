@@ -1,0 +1,476 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "What it is" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Error budget burn alerts are a class of SLO-based alert that fires when a service is consuming its error budget at a rate fast enough to exhaust it before the measurement window closes. Rather than alerting on instantaneous error rates — which produces false positives from transient spikes — burn rate alerts measure the ratio of current error consumption to the steady-state rate that would exactly exhaust the budget at window end. A burn rate of 1x means the service is on a trajectory to use exactly 100% of its budget; a burn rate of 14x means it will exhaust the full monthly budget in about two days." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "This concept, popularized by Google's Site Reliability Engineering practice, is especially valuable for agentic AI services because LLM inference failures tend to cluster (a model endpoint goes down, every in-flight request fails) rather than arriving uniformly. A burn-rate alert detects this clustering pattern quickly without requiring the engineering team to hand-tune per-service error rate thresholds." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Why it matters" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Traditional threshold alerts on instantaneous error rates suffer from two failure modes: they fire too often during short spikes that do not actually threaten the SLO, and they fail to fire during slow-burn degradations that steadily erode the budget over days without ever crossing a high per-minute threshold. Both failure modes damage on-call quality — the first through alert fatigue, the second through missed incidents that cause SLO breaches." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "For agentic AI workloads, this matters doubly. Agent tasks often have long durations; a 10-minute task that fails at minute 9 represents a far larger customer impact than a 100ms API call failure, yet both register as a single error event. Error budget burn rate alerts surface the cumulative impact of these failures relative to the service's reliability commitment, giving the on-call engineer a signal that is proportional to actual SLO risk rather than raw event count." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Benefits" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Dramatically fewer false-positive pages compared to raw error rate thresholds, reducing alert fatigue without sacrificing detection." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Proportional urgency: the burn rate directly translates into remaining time before SLO breach, giving on-call engineers a clear sense of how quickly they must respond." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Catches slow degradations: a burn rate of 2x sustained over several days triggers a low-urgency alert even though no single minute crosses a high error rate threshold." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Works with any SLI: the burn rate formula applies equally to availability, latency, task completion rate, and quality SLIs — unifying the alerting model across heterogeneous signal types." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Incentivizes reliability investment: because the budget is finite and shared across the month, teams feel the cost of each incident as depleted budget rather than as an isolated event." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Trade-offs and limitations" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Detection lag: the multi-window approach requires the burn to be sustained over minutes or hours before a page fires, meaning a high-severity outage that resolves in under 5 minutes may not trigger a page even if it consumed significant budget." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Complex configuration: setting multi-window burn rate thresholds requires understanding the relationship between burn rate, window length, and budget consumption, which is less intuitive than a simple error rate percentage." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "SLI quality dependency: burn rate alerts are only as useful as the underlying SLI. A poorly instrumented SLI that undercounts errors will produce misleadingly low burn rates." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Early-month / late-month asymmetry: a given burn rate implies a shorter time to budget exhaustion later in the month when less budget remains — alert sensitivity is inherently time-varying within the measurement window." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low-traffic services: burn rate calculations become unreliable when request volumes are very low, as a single failure can appear as an extremely high burn rate due to statistical noise." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How it works" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "The core formula is straightforward. Define the error budget rate as the fraction of events that are allowed to fail while meeting the SLO. For a 99.9% availability SLO, the error budget rate is 0.001 (one in a thousand requests may fail). The burn rate is then:" }]
+      },
+      {
+        "type": "blockMath",
+        "attrs": { "latex": "\\text{burn\\_rate} = \\frac{\\text{actual\\_error\\_rate}}{\\text{error\\_budget\\_rate}}" }
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "A burn rate of 1 means the service is using the budget at exactly the steady-state rate. A burn rate of 14 means the budget will be exhausted in approximately 1/14 of the window length — about 2 days for a 30-day window, or about 1.7 hours for a 24-hour window." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "The key insight behind multi-window alerting is that a single short window produces too many false positives (a 5-minute spike fires the alert, then clears), while a single long window responds too slowly (a sustained outage isn't detected for hours). Pairing a short evaluation window with a long lookback window — and requiring both to exceed the threshold simultaneously — eliminates both failure modes. The short window provides detection speed; the long window provides confirmation that the burn is sustained." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "The Google SRE book defines four canonical alert windows for a 30-day SLO window: (1) 14x burn rate over both 1h and 5min windows, which fires if the budget would be exhausted in 2 days; (2) 6x burn rate over 6h and 30min windows; (3) 3x burn rate over 1d and 6h windows; (4) 1x burn rate check in the monthly budget report. For shorter SLO windows (7-day or 24-hour), the absolute window lengths must be scaled down proportionally." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Architecture" }]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgNDAwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjQwMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEzIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQwMCIgZmlsbD0iI2Y4ZjlmYSIgcng9IjgiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjI4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE2IiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFhMWEyZSI+RXJyb3IgQnVkZ2V0IEJ1cm4gUmF0ZSBBbGVydCBBcmNoaXRlY3R1cmU8L3RleHQ+CgogIDwhLS0gU0xPIC8gQnVkZ2V0IGJveCAtLT4KICA8cmVjdCB4PSIyMCIgeT0iNTAiIHdpZHRoPSIxODAiIGhlaWdodD0iMTIwIiByeD0iNiIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjExMCIgeT0iNzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxZTNhOGEiIGZvbnQtd2VpZ2h0PSJib2xkIiBmb250LXNpemU9IjEzIj5TTE8gRGVmaW5pdGlvbjwvdGV4dD4KICA8dGV4dCB4PSIxMTAiIHk9Ijk0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMWUzYThhIiBmb250LXNpemU9IjExIj5UYXJnZXQ6IDk5LjklPC90ZXh0PgogIDx0ZXh0IHg9IjExMCIgeT0iMTEyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMWUzYThhIiBmb250LXNpemU9IjExIj5CdWRnZXQ6IDQzLjggbWluL21vPC90ZXh0PgogIDx0ZXh0IHg9IjExMCIgeT0iMTMwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMWUzYThhIiBmb250LXNpemU9IjExIj5XaW5kb3c6IDMwIGRheXM8L3RleHQ+CiAgPHRleHQgeD0iMTEwIiB5PSIxNTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxZTNhOGEiIGZvbnQtc2l6ZT0iMTEiPlNMSTogYXZhaWxhYmlsaXR5PC90ZXh0PgoKICA8IS0tIEFycm93IC0tPgogIDxsaW5lIHgxPSIyMDAiIHkxPSIxMTAiIHgyPSIyMjgiIHkyPSIxMTAiIHN0cm9rZT0iIzZiNzI4MCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIEJ1cm4gcmF0ZSBjYWxjdWxhdG9yIC0tPgogIDxyZWN0IHg9IjIzMCIgeT0iNTAiIHdpZHRoPSIyMDAiIGhlaWdodD0iMTIwIiByeD0iNiIgZmlsbD0iI2ZlZjljMyIgc3Ryb2tlPSIjY2E4YTA0IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjMzMCIgeT0iNzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ODM1MGYiIGZvbnQtd2VpZ2h0PSJib2xkIiBmb250LXNpemU9IjEzIj5CdXJuIFJhdGUgQ2FsY3VsYXRvcjwvdGV4dD4KICA8dGV4dCB4PSIzMzAiIHk9Ijk0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNzgzNTBmIiBmb250LXNpemU9IjExIj5idXJuID0gYWN0dWFsX2Vycm9yX3JhdGUgLzwvdGV4dD4KICA8dGV4dCB4PSIzMzAiIHk9IjExMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzc4MzUwZiIgZm9udC1zaXplPSIxMSI+ZXJyb3JfYnVkZ2V0X3JhdGU8L3RleHQ+CiAgPHRleHQgeD0iMzMwIiB5PSIxMzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ODM1MGYiIGZvbnQtc2l6ZT0iMTEiPlNob3J0IHdpbmRvdzogMWggLyA1bWluPC90ZXh0PgogIDx0ZXh0IHg9IjMzMCIgeT0iMTUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNzgzNTBmIiBmb250LXNpemU9IjExIj5Mb25nIHdpbmRvdzogNmggLyAzMG1pbjwvdGV4dD4KCiAgPCEtLSBBcnJvdyAtLT4KICA8bGluZSB4MT0iNDMwIiB5MT0iMTEwIiB4Mj0iNDU4IiB5Mj0iMTEwIiBzdHJva2U9IiM2YjcyODAiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KCiAgPCEtLSBNdWx0aS13aW5kb3cgYWxlcnRzIC0tPgogIDxyZWN0IHg9IjQ2MCIgeT0iNDAiIHdpZHRoPSIzODAiIGhlaWdodD0iMjgwIiByeD0iNiIgZmlsbD0iI2YwZmRmNCIgc3Ryb2tlPSIjMTZhMzRhIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjY1MCIgeT0iNjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxNDUzMmQiIGZvbnQtd2VpZ2h0PSJib2xkIiBmb250LXNpemU9IjEzIj5NdWx0aS1XaW5kb3cgQWxlcnQgVGllcnM8L3RleHQ+CgogIDwhLS0gVGllciAxIC0tPgogIDxyZWN0IHg9IjQ3MiIgeT0iNzQiIHdpZHRoPSIzNTYiIGhlaWdodD0iNTQiIHJ4PSI0IiBmaWxsPSIjZmNlN2YzIiBzdHJva2U9IiNkYjI3NzciLz4KICA8dGV4dCB4PSI1NjAiIHk9Ijk0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjODMxODQzIiBmb250LXdlaWdodD0iYm9sZCIgZm9udC1zaXplPSIxMiI+VGllciAxIOKAlCBQYWdlIEltbWVkaWF0ZWx5PC90ZXh0PgogIDx0ZXh0IHg9IjY1MCIgeT0iMTEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjODMxODQzIiBmb250LXNpemU9IjEwIj5CdXJuIHJhdGUgJmd0OzE0eCBvdmVyIDFoIEFORCAmZ3Q7MTR4IG92ZXIgNW1pbiAgfCAgQnVkZ2V0IGV4aGF1c3RlZCBpbiAmbHQ7Mmg8L3RleHQ+CiAgPHRleHQgeD0iNjUwIiB5PSIxMjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4MzE4NDMiIGZvbnQtc2l6ZT0iMTAiPkFjdGlvbjogRHJvcCBldmVyeXRoaW5nOyBmdWxsIHRlYW0gcmVzcG9uc2U8L3RleHQ+CgogIDwhLS0gVGllciAyIC0tPgogIDxyZWN0IHg9IjQ3MiIgeT0iMTM2IiB3aWR0aD0iMzU2IiBoZWlnaHQ9IjU0IiByeD0iNCIgZmlsbD0iI2ZlZjljMyIgc3Ryb2tlPSIjY2E4YTA0Ii8+CiAgPHRleHQgeD0iNTYwIiB5PSIxNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ODM1MGYiIGZvbnQtd2VpZ2h0PSJib2xkIiBmb250LXNpemU9IjEyIj5UaWVyIDIg4oCUIFBhZ2UgT24tQ2FsbDwvdGV4dD4KICA8dGV4dCB4PSI2NTAiIHk9IjE3MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzc4MzUwZiIgZm9udC1zaXplPSIxMCI+QnVybiByYXRlICZndDs2eCBvdmVyIDZoIEFORCAmZ3Q7Nnggb3ZlciAzMG1pbiAgfCAgQnVkZ2V0IGV4aGF1c3RlZCBpbiAmbHQ7NWg8L3RleHQ+CiAgPHRleHQgeD0iNjUwIiB5PSIxODQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ODM1MGYiIGZvbnQtc2l6ZT0iMTAiPkFjdGlvbjogT24tY2FsbCBpbnZlc3RpZ2F0ZXMgd2l0aGluIDMwIG1pbjwvdGV4dD4KCiAgPCEtLSBUaWVyIDMgLS0+CiAgPHJlY3QgeD0iNDcyIiB5PSIxOTgiIHdpZHRoPSIzNTYiIGhlaWdodD0iNTQiIHJ4PSI0IiBmaWxsPSIjZWZmNmZmIiBzdHJva2U9IiMzYjgyZjYiLz4KICA8dGV4dCB4PSI1NjAiIHk9IjIxOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzFlM2E4YSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZvbnQtc2l6ZT0iMTIiPlRpZXIgMyDigJQgVGlja2V0ICsgU2xhY2s8L3RleHQ+CiAgPHRleHQgeD0iNjUwIiB5PSIyMzQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxZTNhOGEiIGZvbnQtc2l6ZT0iMTAiPkJ1cm4gcmF0ZSAmZ3Q7M3ggb3ZlciAxZCBBTkQgJmd0OzN4IG92ZXIgNmggIHwgIEJ1ZGdldCBleGhhdXN0ZWQgaW4gJmx0OzEwaDwvdGV4dD4KICA8dGV4dCB4PSI2NTAiIHk9IjI0NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzFlM2E4YSIgZm9udC1zaXplPSIxMCI+QWN0aW9uOiBGaXggaW4gbmV4dCBzcHJpbnQ7IG5vIHBhZ2U8L3RleHQ+CgogIDwhLS0gVGllciA0IC0tPgogIDxyZWN0IHg9IjQ3MiIgeT0iMjYwIiB3aWR0aD0iMzU2IiBoZWlnaHQ9IjUwIiByeD0iNCIgZmlsbD0iI2YxZjVmOSIgc3Ryb2tlPSIjOTRhM2I4Ii8+CiAgPHRleHQgeD0iNTYwIiB5PSIyODAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM0NzU1NjkiIGZvbnQtd2VpZ2h0PSJib2xkIiBmb250LXNpemU9IjEyIj5UaWVyIDQg4oCUIEJ1ZGdldCBSZXBvcnQgT25seTwvdGV4dD4KICA8dGV4dCB4PSI2NTAiIHk9IjI5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzQ3NTU2OSIgZm9udC1zaXplPSIxMCI+QnVybiByYXRlICZsdDszeCAgfCAgT24gdHJhY2s7IHJlcG9ydGVkIGluIHdlZWtseSByZXZpZXc8L3RleHQ+CiAgPHRleHQgeD0iNjUwIiB5PSIzMDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM0NzU1NjkiIGZvbnQtc2l6ZT0iMTAiPkFjdGlvbjogVHJlbmQgcmV2aWV3OyBubyBpbW1lZGlhdGUgYWN0aW9uPC90ZXh0PgoKICA8IS0tIERlZnMgLS0+CiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM2YjcyODAiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KCiAgPCEtLSBCb3R0b20gbm90ZSAtLT4KICA8cmVjdCB4PSIyMCIgeT0iMzUwIiB3aWR0aD0iODIwIiBoZWlnaHQ9IjM2IiByeD0iNiIgZmlsbD0iI2YxZjVmOSIgc3Ryb2tlPSIjY2JkNWUxIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIzNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM0NzU1NjkiIGZvbnQtc2l6ZT0iMTEiPk11bHRpLXdpbmRvdyBhbGVydHMgZWxpbWluYXRlIG1vc3QgZmFsc2UgcG9zaXRpdmVzOiBhIHN1c3RhaW5lZCBmYXN0IGJ1cm4gdHJpZ2dlcnMgYm90aCBzaG9ydCBhbmQgbG9uZyB3aW5kb3dzIHNpbXVsdGFuZW91c2x5LjwvdGV4dD4KICA8dGV4dCB4PSI0MzAiIHk9IjM4NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzQ3NTU2OSIgZm9udC1zaXplPSIxMSI+U2hvcnQgd2luZG93IGFsb25lID0gbm9pc3k7IGxvbmcgd2luZG93IGFsb25lID0gc2xvdyB0byByZXNwb25kLiBCb3RoIHJlcXVpcmVkIGZvciBwYWdlLXdvcnRoeSB0aWVycy48L3RleHQ+Cjwvc3ZnPgo=",
+          "alt": "Error budget burn rate alert tiers and multi-window architecture"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "An SLO definition feeds a burn rate calculator that computes the ratio of current error rate to the budget-exhaustion rate across multiple window pairs. The result flows into tiered alert rules that route differently based on urgency — from immediate page through ticket-only — with each tier requiring both windows in the pair to exceed the threshold simultaneously." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "When to use it" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Burn rate alerts are the right primary alerting mechanism for any service that has a defined SLO and sufficient request volume to make percentile-based calculations statistically meaningful. They replace or supplement raw threshold alerts on error rate, latency, and availability." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "They are particularly effective when the team has already experienced alert fatigue from too many low-severity pages, or when past incidents were discovered too late because slow degradations never crossed a static error rate threshold. For agentic AI services with long-running tasks, burn rate alerts based on task completion rate are more meaningful than per-request error rates because they account for the higher cost of each failed task." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Avoid burn rate alerts for very low-traffic services (fewer than a few hundred requests per evaluation window) where statistical noise dominates. In those cases, count-based alerts or absolute downtime thresholds are more reliable. Similarly, avoid burn rate alerts without established SLOs — the burn rate is meaningless without a defined target." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "How to implement" }]
+      },
+      {
+        "type": "orderedList",
+        "attrs": { "start": 1 },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Define the SLO precisely: specify the SLI (what signal), the target (e.g., 99.9%), and the measurement window (e.g., 30 days rolling)." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Compute the error budget rate: for a 99.9% SLO, the error budget rate is 0.001." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Choose window pairs: for a 30-day SLO window, use (1h / 5min), (6h / 30min), and (1d / 6h) as the fast/slow pairs for tiers 1, 2, and 3 respectively." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Compute burn rate thresholds: tier 1 uses 14x because 1/14 of 30 days is ~2 days (the urgency threshold); tier 2 uses 6x (5-day exhaustion); tier 3 uses 3x (10-day exhaustion)." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Write alert rules: in Prometheus, create recording rules for the burn rate on each window, then alert rules that check both windows simultaneously." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Configure routing: tier 1 pages the on-call immediately; tier 2 pages during business hours or with a 30-minute delay; tier 3 creates a Jira ticket and posts to Slack." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Write runbooks: each alert tier should link to a runbook with specific investigation steps for the service, not generic SLO advice." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Test with synthetic load: verify that injecting errors at a known rate produces the expected burn rate signal before relying on the alerts in production." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Examples" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Prometheus recording rules and alert definitions for a 30-day availability SLO at 99.9%." }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "yaml" },
+        "content": [{ "type": "text", "text": "# prometheus/rules/slo-burn-rate.yaml\n# SLO: 99.9% availability over 30 days\n# Error budget rate: 0.001\n\ngroups:\n  - name: slo_burn_rate_recording\n    interval: 1m\n    rules:\n      # Short evaluation windows\n      - record: slo:agent_availability:error_rate5m\n        expr: |\n          1 - (\n            sum(rate(http_requests_total{service=\"agent-api\",code!~\"5..\"}[5m]))\n            /\n            sum(rate(http_requests_total{service=\"agent-api\"}[5m]))\n          )\n\n      - record: slo:agent_availability:error_rate1h\n        expr: |\n          1 - (\n            sum(rate(http_requests_total{service=\"agent-api\",code!~\"5..\"}[1h]))\n            /\n            sum(rate(http_requests_total{service=\"agent-api\"}[1h]))\n          )\n\n      # Longer evaluation windows\n      - record: slo:agent_availability:error_rate30m\n        expr: |\n          1 - (\n            sum(rate(http_requests_total{service=\"agent-api\",code!~\"5..\"}[30m]))\n            /\n            sum(rate(http_requests_total{service=\"agent-api\"}[30m]))\n          )\n\n      - record: slo:agent_availability:error_rate6h\n        expr: |\n          1 - (\n            sum(rate(http_requests_total{service=\"agent-api\",code!~\"5..\"}[6h]))\n            /\n            sum(rate(http_requests_total{service=\"agent-api\"}[6h]))\n          )\n\n  - name: slo_burn_rate_alerts\n    rules:\n      # Tier 1: 14x burn rate on both 5min and 1h windows\n      # Exhausts 30-day budget in ~2 days\n      - alert: AgentSLOBurnRateTier1\n        expr: |\n          slo:agent_availability:error_rate5m  > (14 * 0.001)\n          and\n          slo:agent_availability:error_rate1h  > (14 * 0.001)\n        for: 2m\n        labels:\n          severity: critical\n          team: platform-sre\n        annotations:\n          summary: \"Agent API SLO: tier-1 burn rate ({{ $value | humanizePercentage }} error rate)\"\n          description: >-\n            Burn rate >14x detected. Current error rate {{ $value | humanizePercentage }}.\n            At this rate the 30-day error budget will be exhausted in ~2 days.\n            Runbook: https://wiki/sre/agent-slo-runbook#tier1\n\n      # Tier 2: 6x burn rate on both 30min and 6h windows\n      # Exhausts 30-day budget in ~5 days\n      - alert: AgentSLOBurnRateTier2\n        expr: |\n          slo:agent_availability:error_rate30m > (6 * 0.001)\n          and\n          slo:agent_availability:error_rate6h  > (6 * 0.001)\n        for: 15m\n        labels:\n          severity: warning\n          team: platform-sre\n        annotations:\n          summary: \"Agent API SLO: tier-2 burn rate\"\n          description: >-\n            Burn rate >6x sustained. Error budget will exhaust in ~5 days if not resolved.\n            Runbook: https://wiki/sre/agent-slo-runbook#tier2\n" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "The following Python function computes the burn rate from raw time-series data and can be used in custom reporting pipelines or in testing burn rate alert logic." }]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [{ "type": "text", "text": "from typing import List, Tuple\nfrom datetime import datetime, timedelta\n\ndef compute_burn_rate(\n    events: List[Tuple[datetime, bool]],  # (timestamp, success)\n    window: timedelta,\n    slo_target: float,                    # e.g. 0.999\n    as_of: datetime = None,\n) -> float:\n    \"\"\"\n    Compute the error budget burn rate over the given rolling window.\n\n    burn_rate = actual_error_rate / error_budget_rate\n    error_budget_rate = 1 - slo_target\n\n    Returns:\n        burn_rate (float): 1.0 = on-track; 14.0 = budget exhausted in 1/14 of window.\n    \"\"\"\n    if as_of is None:\n        as_of = datetime.utcnow()\n\n    window_start = as_of - window\n    windowed = [(ts, ok) for ts, ok in events if window_start <= ts <= as_of]\n\n    if not windowed:\n        return 0.0\n\n    total = len(windowed)\n    errors = sum(1 for _, ok in windowed if not ok)\n    actual_error_rate = errors / total\n    error_budget_rate = 1 - slo_target\n\n    if error_budget_rate == 0:\n        raise ValueError(\"SLO target of 1.0 implies zero error budget\")\n\n    return actual_error_rate / error_budget_rate\n\n\ndef time_to_budget_exhaustion(\n    burn_rate: float,\n    remaining_budget_fraction: float,\n    window: timedelta,\n) -> timedelta:\n    \"\"\"\n    Given current burn rate and remaining budget, estimate time to exhaustion.\n\n    If burn_rate <= 0 or remaining_budget_fraction <= 0, returns infinity.\n    \"\"\"\n    if burn_rate <= 0 or remaining_budget_fraction <= 0:\n        return timedelta.max\n    # At burn rate B, we consume B * (1/window) of the budget per unit time.\n    # Time to exhaust = remaining_budget / (burn_rate / window_length)\n    window_seconds = window.total_seconds()\n    time_seconds = (remaining_budget_fraction * window_seconds) / burn_rate\n    return timedelta(seconds=time_seconds)\n\n\nif __name__ == \"__main__\":\n    import random\n    from datetime import timezone\n\n    now = datetime.now(timezone.utc)\n    # Simulate a 5% error rate (50x burn rate on a 99.9% SLO)\n    events = [\n        (now - timedelta(minutes=i), random.random() > 0.05)\n        for i in range(120)  # 2 hours of 1-per-minute events\n    ]\n\n    burn = compute_burn_rate(events, window=timedelta(hours=1), slo_target=0.999)\n    remaining = 0.8  # 80% of monthly budget still available\n    tte = time_to_budget_exhaustion(burn, remaining, window=timedelta(days=30))\n\n    print(f\"Burn rate: {burn:.1f}x\")\n    print(f\"Budget exhaustion in: {tte}\")\n    print(f\"Page-worthy (>14x): {burn > 14}\")\n" }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Real-world example" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "An agentic document processing service running at approximately 50,000 agent tasks per day has a 99.5% task completion SLO over a 30-day window. The error budget rate is 0.005, corresponding to 7,500 allowed task failures per month (250 per day at steady state)." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "On a Tuesday morning, a new model deployment introduces a regression in the tool-call serialization layer. Over a 45-minute window, 8% of tasks fail — a burn rate of 16x (0.08 / 0.005). This triggers both the 5-minute and 1-hour burn rate windows simultaneously, firing a tier-1 page. The on-call engineer is notified within 3 minutes of alert onset, rolls back the deployment at the 52-minute mark, and the service recovers. Total budget consumed: approximately 3,600 task failures, or about 48% of the monthly budget." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Without burn rate alerting, the team's previous threshold-based alert (fire when error rate > 5% for 10 minutes) would also have triggered, but with two key differences: it would have fired slightly later (at the 10-minute sustained threshold), and it would have provided no information about the budget impact of the incident. The burn rate alert immediately contextualizes the incident — 16x burn means the team should treat this as a critical incident, not just an elevated error rate." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Common mistakes" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Using only a single window for burn rate calculation, producing either false positives (short window) or slow detection (long window)." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Setting burn rate thresholds without grounding them in the SLO window length, leading to arbitrary numbers that don't map to meaningful time-to-exhaustion values." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Applying burn rate alerting to low-traffic services where a single error can appear as a 100x burn rate, causing constant false-positive pages." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Forgetting to also alert on slow (sub-1x) burns that don't page but compound over time: a 0.8x burn consumes 80% of the budget without ever triggering an alert." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Not accounting for agent task duration in the SLI: counting a failed 10-minute task the same as a failed 100ms request understates the customer impact." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Failing to test alert rules before relying on them; burn rate expressions are complex enough to have bugs that only surface during a real incident." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Best practices" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Always use paired windows: each alert tier should require both a fast (sensitive) window and a slow (confirmatory) window to exceed the threshold simultaneously." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Link burn rate tier to response time expectation in runbooks: tier 1 means 'respond now', tier 2 means 'respond within 30 minutes', tier 3 means 'fix this sprint'." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Scale window lengths proportionally if using a 7-day or 24-hour SLO window instead of 30 days." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Include remaining budget in alert annotations: on-call engineers should know immediately whether they have 80% of the budget left (low urgency) or 5% (extremely high urgency)." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Review alert firing history monthly: calibrate burn rate thresholds based on actual incident patterns, not just the theoretical Google SRE defaults." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "For agentic AI services, define separate burn rate alerts for latency, task completion rate, and model error rate — different degradation patterns require different SLIs." }] }]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Performance and scalability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Burn rate recording rules compute over rolling windows that can span 6 hours or more of raw metric data. At high cardinality (many service instances, many label dimensions), these queries can become expensive. The standard mitigation is to pre-aggregate with recording rules at a coarser granularity (e.g., compute per-minute success counts first, then use those pre-aggregated series in the burn rate window queries) rather than computing burn rates directly from high-cardinality raw metrics." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "For multi-region deployments, compute per-region burn rates as well as the aggregate. A region-local outage at 30x burn may be masked in the aggregate if other regions compensate, but it still represents a severe SLO risk for customers in that region. Include region as a label in all SLI metrics to enable both aggregate and per-region alert rules." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Tooling and ecosystem" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Tool" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Burn rate support" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Notes" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Prometheus + Alertmanager" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Native via recording + alert rules" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Requires manual rule writing; sloth or pyrra generate rules from SLO specs." }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Datadog" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Built-in SLO burn rate alerts UI" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Configurable directly in the SLO dashboard; supports multi-window." }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Google Cloud Monitoring" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Native SLO burn rate alerts" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Integrated with Cloud SLO objects; supports time-series-based and request-based SLIs." }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Nobl9" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Dedicated SLO platform with burn rate alerting" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Multi-data-source SLIs; composites from multiple signal types." }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "sloth (open-source)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Generates Prometheus rules from SLO YAML" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Outputs recording + alert rule files with correct multi-window burn rate expressions." }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Comparison with alternatives" }]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Approach" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "False positive rate" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Detection speed" }] }] },
+              { "type": "tableHeader", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Slow burn detection" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Static error rate threshold" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "High" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fast" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Poor" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Single-window burn rate" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medium" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Medium" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Depends on window" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Multi-window burn rate (this topic)" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fast for high-severity" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Good (tier 3 catches 3x burns)" }] }] }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Anomaly detection" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Low to medium" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Variable" }] }] },
+              { "type": "tableCell", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Good but opaque" }] }] }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Security and reliability" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "The reliability of the burn rate alerting system itself is a reliability concern. If the Prometheus scrape job or Alertmanager routing pipeline goes down, burn rate alerts stop firing — and the team may not notice until a major incident is underway. Implement a 'dead man's switch' alert that fires when the alerting pipeline stops producing any output, and treat alert pipeline health as a first-class operational concern." }]
+      },
+      {
+        "type": "paragraph",
+        "content": [{ "type": "text", "text": "Alert rule changes should go through the same review process as production code changes. An incorrect burn rate threshold change could suppress legitimate pages or cause alert fatigue — either failure mode reduces the team's ability to protect the SLO. Maintain alert rules in version control and require peer review before deployment." }]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Key takeaways" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Error budget burn rate alerts replace raw error rate thresholds with a signal proportional to SLO risk: burn rate 14x means the monthly budget exhausts in 2 days." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Multi-window alerting requires both a fast (short) window and a slow (long) window to exceed the threshold simultaneously, eliminating most false positives without sacrificing detection speed." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Three actionable tiers map burn rates to response expectations: page immediately (tier 1), page on-call (tier 2), create ticket (tier 3)." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "For agentic AI services, define burn rate alerts on task completion rate and quality SLIs in addition to availability — these reflect the actual customer impact of model failures more accurately than raw error rates." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Burn rate alerting only works if the underlying SLI instrumentation accurately counts all customer-visible failures; instrument at the right point in the request path." }] }]
+          },
+          {
+            "type": "listItem",
+            "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "The alerting pipeline is itself a reliability dependency — monitor it with a dead man's switch and treat alert rule changes with the same care as production code changes." }] }]
+          }
+        ]
+      }
+    ]
+  }
+}
