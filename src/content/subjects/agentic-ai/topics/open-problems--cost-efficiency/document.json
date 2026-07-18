@@ -1,0 +1,1837 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost and efficiency determine whether an agent that works in a demo can be afforded in production. Agents are token-hungry: they loop, call tools, carry long contexts, and often run many trajectories per task, so a naive design can cost orders of magnitude more than a single model call for the same outcome."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost efficiency for agents is the practice of achieving a target quality at the lowest total cost of ownership — API spend, latency, and compute — across a full multi-step workload. It treats tokens and calls as a budget to be allocated deliberately, spending on the steps that need capability and economising everywhere else."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The problem is structurally different from single-call optimisation because agent cost is a product of several multiplying factors: turns per task, tokens per turn (which grow as context accumulates), and trajectories per task when sampling or search is used. Small per-factor savings compound, and small per-factor bloat compounds just as fast."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unit economics decide which agent products are viable. A support agent that costs more per resolution than a human agent cannot be deployed at scale; a research agent whose every query costs dollars limits its own adoption. Efficiency is not a nicety — it is frequently the gate between a promising prototype and a shippable product."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "It also matters for latency and throughput. A long chain of large-context calls is slow, and slow agents lose users. Under load, inefficient token use throttles how many concurrent sessions a fixed budget can serve. Cost, latency, and scale are the same problem viewed from three angles."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prerequisites"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Token pricing",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — how input and output tokens are billed, and why output is usually costlier."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — reusing computed prefixes to avoid re-billing static context."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model tiers",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the capability/cost spectrum from small to frontier models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency vs. cost",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — the trade-offs between batching, streaming, and parallelism."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core concepts"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The cost equation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Total agent cost per task is approximately the number of turns times the average tokens per turn times the per-token price, summed over trajectories. Because context accumulates, tokens per turn tend to grow across a task, making later turns disproportionately expensive."
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "C_{\\text{task}} \\approx \\sum_{j=1}^{T}\\Big( c_{\\text{in}}\\, t^{\\text{in}}_j + c_{\\text{out}}\\, t^{\\text{out}}_j \\Big)"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Model routing / cascades"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Not every step needs a frontier model. Routing sends easy sub-tasks to a cheap, fast model and reserves the expensive model for the hard ones. A cascade tries the cheap model first and escalates only when its answer fails a confidence check, capturing most of the savings while preserving quality."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt caching"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Agents re-send large, static prefixes — system prompts, tool schemas, retrieved documents — on every turn. Caching the computed prefix means those tokens are billed at a steep discount on subsequent turns, which is one of the highest-leverage optimisations for looped agents."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Context management"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Left unmanaged, context grows every turn and cost grows with it. Summarising or pruning history keeps the working context small, trading a little information for large, compounding savings on every remaining turn."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4NjAgMjQwIiB3aWR0aD0iODYwIiBoZWlnaHQ9IjI0MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIiPjxyZWN0IHdpZHRoPSI4NjAiIGhlaWdodD0iMjQwIiBmaWxsPSIjZjhmOWZhIiByeD0iOCIvPjx0ZXh0IHg9IjQzMC4wIiB5PSIyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPkNvc3QtYXdhcmUgYWdlbnQgcm91dGluZzwvdGV4dD48dGV4dCB4PSI0MzAuMCIgeT0iNDgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPm1vc3QgdHJhZmZpYyBpcyBzZXJ2ZWQgY2hlYXBseTsgb25seSBoYXJkIGNhc2VzIHBheSBmcm9udGllciBwcmljZXM8L3RleHQ+PHJlY3QgeD0iMjAiIHk9IjkwIiB3aWR0aD0iMTUwIiBoZWlnaHQ9IjkwIiByeD0iNiIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjMWQ0ZWQ4IiBzdHJva2Utd2lkdGg9IjEuNSIvPjx0ZXh0IHg9Ijk1IiB5PSIxMjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWQ0ZWQ4IiBmb250LXNpemU9IjEyIj5DbGFzc2lmeTwvdGV4dD48dGV4dCB4PSI5NSIgeT0iMTQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEwIj5lc3RpbWF0ZSB0YXNrPC90ZXh0Pjx0ZXh0IHg9Ijk1IiB5PSIxNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTAiPmRpZmZpY3VsdHk8L3RleHQ+PGxpbmUgeDE9IjE3MyIgeTE9IjEzNS4wIiB4Mj0iMTg1IiB5Mj0iMTM1LjAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2FoKSIvPjxyZWN0IHg9IjE4OCIgeT0iOTAiIHdpZHRoPSIxNTAiIGhlaWdodD0iOTAiIHJ4PSI2IiBmaWxsPSIjZGNmY2U3IiBzdHJva2U9IiMxNmEzNGEiIHN0cm9rZS13aWR0aD0iMS41Ii8+PHRleHQgeD0iMjYyIiB5PSIxMjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMTZhMzRhIiBmb250LXNpemU9IjEyIj5Sb3V0ZTwvdGV4dD48dGV4dCB4PSIyNjIiIHk9IjE0MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzMzMyIgZm9udC1zaXplPSIxMCI+Y2hlYXAgbW9kZWwgdnMuPC90ZXh0Pjx0ZXh0IHg9IjI2MiIgeT0iMTU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEwIj5mcm9udGllcjwvdGV4dD48bGluZSB4MT0iMzQwIiB5MT0iMTM1LjAiIHgyPSIzNTIiIHkyPSIxMzUuMCIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYWgpIi8+PHJlY3QgeD0iMzU1IiB5PSI5MCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI5MCIgcng9IjYiIGZpbGw9IiNmZWY5YzMiIHN0cm9rZT0iI2NhOGEwNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48dGV4dCB4PSI0MzAiIHk9IjEyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiNjYThhMDQiIGZvbnQtc2l6ZT0iMTIiPkNhY2hlPC90ZXh0Pjx0ZXh0IHg9IjQzMCIgeT0iMTQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEwIj5yZXVzZSBzdGF0aWMgcHJlZml4PC90ZXh0Pjx0ZXh0IHg9IjQzMCIgeT0iMTU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEwIj50b2tlbnM8L3RleHQ+PGxpbmUgeDE9IjUwOCIgeTE9IjEzNS4wIiB4Mj0iNTIwIiB5Mj0iMTM1LjAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2FoKSIvPjxyZWN0IHg9IjUyMiIgeT0iOTAiIHdpZHRoPSIxNTAiIGhlaWdodD0iOTAiIHJ4PSI2IiBmaWxsPSIjZmVlMmUyIiBzdHJva2U9IiNkYzI2MjYiIHN0cm9rZS13aWR0aD0iMS41Ii8+PHRleHQgeD0iNTk4IiB5PSIxMjQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZGMyNjI2IiBmb250LXNpemU9IjEyIj5WZXJpZnk8L3RleHQ+PHRleHQgeD0iNTk4IiB5PSIxNDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTAiPmNvbmZpZGVuY2UgY2hlY2sgb248L3RleHQ+PHRleHQgeD0iNTk4IiB5PSIxNTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTAiPmNoZWFwIG91dHB1dDwvdGV4dD48bGluZSB4MT0iNjc1IiB5MT0iMTM1LjAiIHgyPSI2ODciIHkyPSIxMzUuMCIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYWgpIi8+PHJlY3QgeD0iNjkwIiB5PSI5MCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI5MCIgcng9IjYiIGZpbGw9IiNlZGU5ZmUiIHN0cm9rZT0iIzdjM2FlZCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz48dGV4dCB4PSI3NjUiIHk9IjEyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM3YzNhZWQiIGZvbnQtc2l6ZT0iMTIiPkVzY2FsYXRlPC90ZXh0Pjx0ZXh0IHg9Ijc2NSIgeT0iMTQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEwIj5vbmx5IGhhcmQgY2FzZXMgaGl0PC90ZXh0Pjx0ZXh0IHg9Ijc2NSIgeT0iMTU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzMzIiBmb250LXNpemU9IjEwIj50aGUgZXhwZW5zaXZlIG1vZGVsPC90ZXh0PjxkZWZzPjxtYXJrZXIgaWQ9ImFoIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDYsMyBMMCw2IFoiIGZpbGw9IiM2NDc0OGIiLz48L21hcmtlcj48L2RlZnM+PC9zdmc+",
+          "alt": "Cost-aware routing: classify, route, cache, verify, escalate"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The architecture concentrates spend where it buys quality and strips it everywhere else. A difficulty classifier and a confidence-gated cascade let the system serve the bulk of traffic on cheap models while still meeting quality on the hard tail."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A cascade's expected cost is a weighted sum: every task pays for the cheap model, and only the fraction "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "q"
+            }
+          },
+          {
+            "type": "text",
+            "text": " that escalates additionally pays for the expensive one. If the cheap model handles a fraction "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "1-q"
+            }
+          },
+          {
+            "type": "text",
+            "text": " acceptably, expected cost is"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\mathbb{E}[C] = C_{\\text{cheap}} + q\\,\\big(C_{\\text{expensive}} + C_{\\text{verify}}\\big)"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "q"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is small — most tasks are easy — the cascade approaches the cheap model's cost while retaining the expensive model's quality on the hard minority. The escalation rate "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "q"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the key lever, controlled by the confidence threshold."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A cost-aware cascade tries a cheap model, verifies, and escalates only on low confidence. Caching the static prefix cuts the recurring token cost of the agent loop."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nclient = anthropic.Anthropic()\n\nCHEAP = \"claude-haiku-4-5-20251001\"\nSTRONG = \"claude-sonnet-4-5-20250929\"\n\ndef cascade(prompt, verify, system, tools=None):\n    \"\"\"Try the cheap model; escalate to the strong model only if verification fails.\"\"\"\n    cheap = client.messages.create(\n        model=CHEAP, max_tokens=1024, system=system,\n        tools=tools or [], messages=[{\"role\": \"user\", \"content\": prompt}])\n    answer = \"\".join(b.text for b in cheap.content if hasattr(b, \"text\"))\n    ok, _ = verify(answer)\n    if ok:\n        return {\"answer\": answer, \"model\": CHEAP}\n    strong = client.messages.create(\n        model=STRONG, max_tokens=1024, system=system,\n        tools=tools or [], messages=[{\"role\": \"user\", \"content\": prompt}])\n    answer = \"\".join(b.text for b in strong.content if hasattr(b, \"text\"))\n    return {\"answer\": answer, \"model\": STRONG}\n"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Prompt caching: mark the large static prefix so it is billed at a discount\n# on every subsequent turn of the agent loop.\ndef cached_system_blocks(system_text, tool_schema_text):\n    return [\n        {\"type\": \"text\", \"text\": system_text},\n        {\"type\": \"text\", \"text\": tool_schema_text,\n         \"cache_control\": {\"type\": \"ephemeral\"}},   # cache the heavy, static part\n    ]\n\ndef trim_context(messages, keep_recent=6, summariser=None):\n    \"\"\"Bound context growth: summarise old turns, keep the recent window verbatim.\"\"\"\n    if len(messages) <= keep_recent or summariser is None:\n        return messages\n    old, recent = messages[:-keep_recent], messages[-keep_recent:]\n    summary = summariser(old)                       # one compact summary turn\n    return [{\"role\": \"user\", \"content\": f\"Summary of earlier turns: {summary}\"}] + recent\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of an agent's budget like a household's electricity bill. The total is not one big appliance but many small draws running many hours: lights left on (accumulating context), a space heater used when a sweater would do (frontier model for easy tasks), and paying full rate at peak when off-peak caching was available. Nobody saving on power buys a smaller house; they turn off what is not needed and right-size each appliance to its job. Agent cost control is the same discipline applied to tokens and calls."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to optimise"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Optimise when",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " a workload runs at volume — savings multiply across every request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Route to cheap models when",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " a measurable fraction of tasks are easy and a confidence check is available."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache when",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " the agent re-sends large static prefixes across many turns."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trim context when",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " tasks are long and later turns carry history they no longer need."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Do not over-optimise when",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " volume is low — engineering effort can exceed the spend it saves."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "High-volume support and document-processing agents live or die on unit cost. A realistic deployment routes the majority of routine tickets to a small model, caches the system prompt and knowledge base across the conversation, and escalates only ambiguous cases to a frontier model, cutting cost per resolution by a large factor while holding quality steady. The measured escalation rate becomes a first-class operational metric, watched as closely as accuracy."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The three levers — routing, caching, and context management — compound multiplicatively, so combined they often reduce cost by an order of magnitude relative to a naive frontier-only loop. Latency improves alongside cost, since cheap models are faster and cached prefixes skip recomputation. The main risk is quality regression from over-aggressive routing or trimming, which is why every optimisation must be paired with a quality gate measured on a held-out set."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — native provider features that discount repeated static context."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Routing frameworks",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — libraries and gateways that direct requests across model tiers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cost observability",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — dashboards that attribute spend to tasks, tools, and turns."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batch APIs",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — discounted asynchronous processing for latency-tolerant workloads."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost controls interact with reliability and must not be applied blindly."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Quality floors",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — gate every cost optimisation on a measured quality threshold so savings never silently degrade output."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Budget guards",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — hard caps on tokens and spend per task prevent a runaway loop from causing a cost incident."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache correctness",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — ensure cached context cannot leak between users or serve stale data."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Graceful degradation",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — under budget pressure, degrade predictably (shorter answers) rather than failing outright."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Where the tokens go"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4MjAgNDEwIiB3aWR0aD0iODIwIiBoZWlnaHQ9IjQxMCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIiPjxyZWN0IHdpZHRoPSI4MjAiIGhlaWdodD0iNDEwIiBmaWxsPSIjZjhmOWZhIiByeD0iOCIvPjx0ZXh0IHg9IjQxMC4wIiB5PSIzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxYTFhMmUiPlRoZSBtdWx0aXBseWluZyBmYWN0b3JzIG9mIGFnZW50IGNvc3Q8L3RleHQ+PHJlY3QgeD0iMjQiIHk9IjUyIiB3aWR0aD0iNzcyIiBoZWlnaHQ9IjU2IiByeD0iNiIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjMWQ0ZWQ4IiBzdHJva2Utd2lkdGg9IjEuNSIvPjx0ZXh0IHg9IjQ0IiB5PSI3NiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxZDRlZDgiIGZvbnQtc2l6ZT0iMTMiPlRyYWplY3RvcmllczwvdGV4dD48dGV4dCB4PSI0NCIgeT0iOTQiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTEiPnNhbXBsZXMgb3Igc2VhcmNoIHdpZHRoIHBlciB0YXNrPC90ZXh0PjxyZWN0IHg9IjI0IiB5PSIxMjAiIHdpZHRoPSI3NzIiIGhlaWdodD0iNTYiIHJ4PSI2IiBmaWxsPSIjZGNmY2U3IiBzdHJva2U9IiMxNmEzNGEiIHN0cm9rZS13aWR0aD0iMS41Ii8+PHRleHQgeD0iNDQiIHk9IjE0NCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMxNmEzNGEiIGZvbnQtc2l6ZT0iMTMiPlR1cm5zPC90ZXh0Pjx0ZXh0IHg9IjQ0IiB5PSIxNjIiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTEiPmxvb3AgaXRlcmF0aW9ucyBhbmQgdG9vbCBjYWxscyBwZXIgdHJhamVjdG9yeTwvdGV4dD48cmVjdCB4PSIyNCIgeT0iMTg4IiB3aWR0aD0iNzcyIiBoZWlnaHQ9IjU2IiByeD0iNiIgZmlsbD0iI2ZlZjljMyIgc3Ryb2tlPSIjY2E4YTA0IiBzdHJva2Utd2lkdGg9IjEuNSIvPjx0ZXh0IHg9IjQ0IiB5PSIyMTIiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjY2E4YTA0IiBmb250LXNpemU9IjEzIj5Ub2tlbnMgcGVyIHR1cm48L3RleHQ+PHRleHQgeD0iNDQiIHk9IjIzMCIgZmlsbD0iIzMzMyIgZm9udC1zaXplPSIxMSI+Z3Jvd3MgYXMgY29udGV4dCBhY2N1bXVsYXRlczwvdGV4dD48cmVjdCB4PSIyNCIgeT0iMjU2IiB3aWR0aD0iNzcyIiBoZWlnaHQ9IjU2IiByeD0iNiIgZmlsbD0iI2VkZTlmZSIgc3Ryb2tlPSIjN2MzYWVkIiBzdHJva2Utd2lkdGg9IjEuNSIvPjx0ZXh0IHg9IjQ0IiB5PSIyODAiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjN2MzYWVkIiBmb250LXNpemU9IjEzIj5TdGF0aWMgcHJlZml4PC90ZXh0Pjx0ZXh0IHg9IjQ0IiB5PSIyOTgiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTEiPnN5c3RlbSArIHRvb2xzICsgZG9jcyByZS1zZW50IGVhY2ggdHVybiAtPiBjYWNoZSBpdDwvdGV4dD48cmVjdCB4PSIyNCIgeT0iMzI0IiB3aWR0aD0iNzcyIiBoZWlnaHQ9IjU2IiByeD0iNiIgZmlsbD0iI2ZlZTJlMiIgc3Ryb2tlPSIjZGMyNjI2IiBzdHJva2Utd2lkdGg9IjEuNSIvPjx0ZXh0IHg9IjQ0IiB5PSIzNDgiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjZGMyNjI2IiBmb250LXNpemU9IjEzIj5Nb2RlbCB0aWVyPC90ZXh0Pjx0ZXh0IHg9IjQ0IiB5PSIzNjYiIGZpbGw9IiMzMzMiIGZvbnQtc2l6ZT0iMTEiPnByaWNlIHBlciB0b2tlbjsgcm91dGUgZWFzeSB3b3JrIHRvIGNoZWFwIG1vZGVsczwvdGV4dD48L3N2Zz4=",
+          "alt": "The multiplying factors that determine total agent cost per task"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost is a product, not a sum, so the biggest wins come from attacking the largest factor. For looped agents the static prefix re-sent every turn is often dominant, which is why caching frequently beats model choice; for sampling-heavy tasks the trajectory count dominates. Profiling reveals which factor to cut first."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Budgeting and difficulty routing"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A difficulty classifier decides how much to spend before work begins, allocating cheap models and small budgets to easy tasks and reserving frontier models for the hard tail."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def estimate_difficulty(task, classifier) -> float:\n    \"\"\"Cheap upfront score (0..1) used to allocate model tier and budget.\"\"\"\n    return classifier.score(task)                 # a small model or heuristic\n\ndef allocate(task, classifier):\n    d = estimate_difficulty(task, classifier)\n    if d < 0.3:\n        return {\"model\": \"cheap\", \"max_tokens\": 512, \"samples\": 1}\n    if d < 0.7:\n        return {\"model\": \"cheap\", \"max_tokens\": 1024, \"samples\": 1, \"escalate\": True}\n    return {\"model\": \"frontier\", \"max_tokens\": 2048, \"samples\": 3}   # verify-and-vote\n\ndef expected_cost(escalation_rate, c_cheap, c_expensive, c_verify):\n    \"\"\"Cascade cost: everyone pays cheap; only the escalating fraction pays more.\"\"\"\n    return c_cheap + escalation_rate * (c_expensive + c_verify)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Technique"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Savings"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quality risk"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Frontier-only loop"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Baseline (none)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low volume, hardest tasks"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Model routing / cascade"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium (needs gate)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Mixed-difficulty, high volume"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Prompt caching"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High on long loops"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Agents with large static prefixes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Context trimming"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium–high"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Long-horizon conversations"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits and trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost optimisation is often the difference between a viable product and an unshippable one, but aggressive optimisation can quietly erode quality if not gated."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Benefit: viable unit economics",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — routing and caching can cut cost per task by an order of magnitude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Benefit: lower latency",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — cheap models and cached prefixes are faster, improving user experience."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Benefit: higher throughput",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — a fixed budget serves far more concurrent sessions when tokens are used efficiently."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trade-off: quality risk",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — over-aggressive routing or trimming can degrade output if not gated on quality."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trade-off: complexity",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — cascades, classifiers, and cache management add moving parts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trade-off: tuning burden",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — thresholds like the escalation rate must be tuned and re-tuned as traffic shifts."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Frontier model everywhere",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — paying top price for easy tasks that a small model handles is the most common waste."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring the static prefix",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — re-sending un-cached system prompts and tool schemas every turn silently dominates cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Unbounded context growth",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — letting history accumulate makes every later turn more expensive."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Routing without a gate",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — escalating on no signal either over-escalates (no savings) or under-escalates (quality loss)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No budget cap",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — a runaway loop without a hard token/spend limit turns a bug into a cost incident."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Profile the cost factors first and attack the largest — often the cached prefix or trajectory count."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Route easy tasks to cheap models with a confidence gate; reserve frontier models for the hard tail."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache large static prefixes and trim or summarise old context on long tasks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Gate every optimisation on a held-out quality metric so savings never silently degrade output."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enforce hard per-task token and spend budgets to bound worst-case cost."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common misconceptions"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Myth: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "agent cost is just the price of one model call. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Reality: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "It is a product of turns, growing tokens per turn, and trajectories; naive designs cost orders of magnitude more than a single call."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Myth: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "using the most capable model everywhere is safest. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Reality: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Most sub-tasks are easy; routing them to cheap models with a confidence gate preserves quality at a fraction of the cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Myth: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "optimising cost necessarily hurts quality. "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Reality: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Caching and context management cut cost with little quality risk, and routing preserves quality when paired with a verification gate."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Agent cost is multiplicative — turns times growing tokens-per-turn times trajectories — so inefficiency compounds fast."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model routing and cascades serve easy tasks cheaply and escalate only the hard minority, controlled by the escalation rate."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching discounts the large static prefixes that looped agents re-send every turn — a top-leverage saving."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Context management bounds token growth, cutting cost on every remaining turn of a long task."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pair every cost optimisation with a quality gate; savings must never silently degrade output."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
