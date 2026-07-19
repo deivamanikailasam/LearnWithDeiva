@@ -1502,6 +1502,191 @@
       },
       {
         "type": "heading",
+        "attrs": { "level": 2 },
+        "content": [{ "type": "text", "text": "Testing network isolation" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Configuration drift and infrastructure changes can silently weaken isolation. The only way to trust that your sandbox is actually isolated is to test it — both at deployment time and as part of ongoing CI checks. The goal is to verify that connections that "
+          },
+          {
+            "type": "text",
+            "text": "should",
+            "marks": [{ "type": "italic" }]
+          },
+          {
+            "type": "text",
+            "text": " be blocked are blocked, and that connections that should be allowed still succeed."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "What to verify" }]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Blocked egress to arbitrary internet hosts",
+                    "marks": [{ "type": "bold" }]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — a TCP connection attempt to an external IP on port 80/443 must fail."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Blocked DNS to external resolvers",
+                    "marks": [{ "type": "bold" }]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — a UDP/TCP query to 8.8.8.8:53 must be dropped, not just redirected."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Allowed egress to the proxy",
+                    "marks": [{ "type": "bold" }]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — an HTTP CONNECT to the proxy IP succeeds, confirming the proxy path is intact."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Allowed domains pass through the proxy",
+                    "marks": [{ "type": "bold" }]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — an HTTPS request to an allowlisted domain returns a 2xx response."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Non-allowlisted domains are denied",
+                    "marks": [{ "type": "bold" }]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — a request to a domain not on the allowlist returns a proxy 403/407 or a connection error."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Isolation test harness" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Run these checks from inside the sandbox container to confirm that enforcement works from the perspective of code the agent would actually execute."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "python" },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"\"\"network_isolation_tests.py\n\nRun this script INSIDE the sandboxed container to validate that network\nisolation is actually enforced. Designed to be part of a CI smoke-test\nrun after every infrastructure change.\n\"\"\"\nimport socket\nimport urllib.request\nimport urllib.error\nimport os\nimport sys\n\nPROXY_HOST = os.environ.get(\"HTTPS_PROXY\", \"http://proxy:3128\")\nALLOWED_DOMAIN = \"api.anthropic.com\"\nBLOCKED_DOMAIN = \"example.com\"          # not on the allowlist\nEXTERNAL_DNS = \"8.8.8.8\"\n\n\ndef assert_blocked(description: str, fn):\n    \"\"\"Assert that fn() raises a network error (connection refused/timeout).\"\"\"\n    try:\n        fn()\n        print(f\"  FAIL  {description} — connection succeeded (should be blocked)\")\n        return False\n    except (OSError, urllib.error.URLError):\n        print(f\"  PASS  {description}\")\n        return True\n\n\ndef assert_allowed(description: str, fn):\n    \"\"\"Assert that fn() succeeds without a network error.\"\"\"\n    try:\n        fn()\n        print(f\"  PASS  {description}\")\n        return True\n    except (OSError, urllib.error.URLError) as e:\n        print(f\"  FAIL  {description} — {e}\")\n        return False\n\n\ndef test_direct_egress_blocked():\n    \"\"\"Direct TCP to 1.1.1.1:443 must be unreachable.\"\"\"\n    def connect():\n        with socket.create_connection((\"1.1.1.1\", 443), timeout=3):\n            pass\n    return assert_blocked(\"Direct TCP egress to 1.1.1.1:443\", connect)\n\n\ndef test_external_dns_blocked():\n    \"\"\"DNS query to external resolver 8.8.8.8 must be dropped.\"\"\"\n    def query():\n        # Raw UDP DNS query for 'example.com' (minimal wire format)\n        payload = (\n            b\"\\xaa\\xbb\"  # transaction ID\n            b\"\\x01\\x00\"  # standard query\n            b\"\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\"  # QDCOUNT=1\n            b\"\\x07example\\x03com\\x00\"\n            b\"\\x00\\x01\\x00\\x01\"\n        )\n        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n        sock.settimeout(3)\n        sock.sendto(payload, (EXTERNAL_DNS, 53))\n        sock.recv(512)  # should timeout / fail\n    return assert_blocked(\"UDP DNS to external resolver 8.8.8.8:53\", query)\n\n\ndef test_blocked_domain_denied():\n    \"\"\"Proxy must deny requests to domains not on the allowlist.\"\"\"\n    def fetch():\n        proxy_handler = urllib.request.ProxyHandler({\"https\": PROXY_HOST})\n        opener = urllib.request.build_opener(proxy_handler)\n        opener.open(f\"https://{BLOCKED_DOMAIN}/\", timeout=5)\n    return assert_blocked(f\"Proxy denies {BLOCKED_DOMAIN}\", fetch)\n\n\ndef test_allowed_domain_reachable():\n    \"\"\"Proxy must forward requests to allowlisted domains.\"\"\"\n    def fetch():\n        proxy_handler = urllib.request.ProxyHandler({\"https\": PROXY_HOST})\n        opener = urllib.request.build_opener(proxy_handler)\n        # HEAD request to avoid downloading a response body\n        req = urllib.request.Request(\n            f\"https://{ALLOWED_DOMAIN}/\",\n            method=\"HEAD\"\n        )\n        opener.open(req, timeout=10)\n    return assert_allowed(f\"Proxy allows {ALLOWED_DOMAIN}\", fetch)\n\n\nif __name__ == \"__main__\":\n    print(\"Network isolation smoke tests\")\n    print(\"-\" * 40)\n    results = [\n        test_direct_egress_blocked(),\n        test_external_dns_blocked(),\n        test_blocked_domain_denied(),\n        test_allowed_domain_reachable(),\n    ]\n    passed = sum(results)\n    total = len(results)\n    print(\"-\" * 40)\n    print(f\"{passed}/{total} tests passed\")\n    sys.exit(0 if passed == total else 1)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": { "level": 3 },
+        "content": [{ "type": "text", "text": "Integrating into CI" }]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Package the test harness as a Docker image that your pipeline spins up in the same network configuration as your production sandbox. Run it as a post-deployment gate — if any \"should be blocked\" test passes (meaning traffic leaked through), the deployment fails and the old configuration is preserved."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": { "language": "yaml" },
+        "content": [
+          {
+            "type": "text",
+            "text": "# .github/workflows/network-isolation-check.yml\njobs:\n  isolation-smoke-test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Start egress proxy\n        run: docker compose up -d proxy\n\n      - name: Run sandbox with isolation tests\n        run: |\n          docker run \\\n            --network agent-sandbox \\\n            --env HTTPS_PROXY=http://proxy:3128 \\\n            --rm \\\n            my-sandbox-image \\\n            python network_isolation_tests.py\n        # Non-zero exit code (from sys.exit(1)) fails the workflow\n"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running these checks in CI catches two common failure modes: a misconfigured iptables rule that opens egress after a kernel upgrade, and a NetworkPolicy rollback that happens when Kubernetes nodes are replaced during a cluster upgrade."
+          }
+        ]
+      },
+      {
+        "type": "heading",
         "attrs": {
           "level": 2
         },
