@@ -1,0 +1,2821 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Rate limit handling",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is the set of techniques that keep an AI agent operating smoothly when the upstream LLM API enforces request-per-minute or token-per-minute ceilings. Without it, a burst of agent activity produces a cascade of 429 errors, stalls the pipeline, and can permanently degrade quality by causing retries that arrive out-of-order or exhaust an exponential backoff budget."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What is Rate Limit Handling?"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A rate limit is an API server-side policy that caps how many requests (or tokens) a client may send in a fixed window. When the cap is hit, the server returns "
+          },
+          {
+            "type": "text",
+            "text": "HTTP 429 Too Many Requests",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and optionally a "
+          },
+          {
+            "type": "text",
+            "text": "retry-after",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " header signalling how long to wait. Rate limit "
+          },
+          {
+            "type": "text",
+            "text": "handling",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " is the client-side logic that detects this condition and responds gracefully: queuing pending requests, sleeping for the right duration, re-dispatching in priority order, and surfacing structured errors to the caller when retries are exhausted."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LLM providers enforce two independent dimensions simultaneously: "
+          },
+          {
+            "type": "text",
+            "text": "requests per minute (RPM)",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "text": "tokens per minute (TPM)",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". An agent that sends few large requests can exhaust the token budget long before the request count ceiling is reached, so effective handling must track both."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Agent loops amplify traffic.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " A single user request can fan out into dozens of LLM calls (tool selection, tool result summarisation, re-planning). The aggregate easily exceeds a modest API tier."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Naive error propagation breaks UX.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " If a 429 surfaces as an unhandled exception, the user sees an opaque failure rather than a brief wait."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Thundering-herd retries worsen the problem.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " When all workers retry simultaneously after a 429, they generate another burst — increasing the wait rather than reducing it. Jitter breaks the synchrony."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Token limits are not uniform.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Different models and tiers have different ceilings. A system that works in development on a small tier routinely hits limits in production on a different model."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limits are a cost signal.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Consistently hitting limits is a sign the traffic pattern needs architectural changes — batching, caching, or tier upgrades — not just more retries."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Transparent degradation:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " requests complete with some extra latency rather than failing outright."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Deterministic throughput:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " a token bucket or sliding window limiter shapes traffic to exactly the tier ceiling, eliminating 429s under steady load."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Priority preservation:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " a queue lets interactive requests (user-facing) preempt background batch jobs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cost visibility:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " tracking tokens consumed per request surfaces expensive prompts before they generate invoices."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Observability:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " parsing rate-limit response headers gives real-time insight into headroom, enabling proactive throttling before the server enforces it."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs & Limitations"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency cost:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " every wait or retry adds wall-clock time. A tight SLA may not tolerate a 30-second retry-after delay."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Queue memory:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " an unbounded queue accumulates request objects (including prompt text) in memory. Cap the queue depth and drop or reject excess requests early."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Token estimation is approximate:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " client-side token counting (e.g., via "
+                  },
+                  {
+                    "type": "text",
+                    "text": "tiktoken",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ") diverges slightly from server-side billing. Buffer by 5–10% to avoid false confidence."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Distributed rate limiting is hard:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " a per-process token bucket is correct for a single process but allows over-use when multiple workers share the same API key. Centralise the limiter in Redis or a sidecar for multi-process deployments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Retry storms on cold start:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " when a service restarts after an outage, all delayed retries may fire simultaneously. Add startup jitter."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A complete rate-limit handler has three layers that work in sequence:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pre-flight throttle (proactive).",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Before sending a request, the client checks its local token bucket. If the bucket is empty, it waits until refilled. This eliminates most 429s under steady traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reactive retry on 429 (reactive).",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " When a 429 arrives despite the pre-flight check (e.g., due to a burst from a sibling process), the handler reads the "
+                  },
+                  {
+                    "type": "text",
+                    "text": "retry-after",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "text": "x-ratelimit-reset-requests",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " header, sleeps for that duration (plus jitter), then retries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Header feedback loop (adaptive).",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Every API response carries "
+                  },
+                  {
+                    "type": "text",
+                    "text": "x-ratelimit-remaining-requests",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "text": "x-ratelimit-remaining-tokens",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". A smart client adjusts its local token bucket to stay in sync with the server's view, catching drift caused by concurrent workers on the same key."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The backoff formula for reactive retries is:"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "wait = min(max_wait, base * 2^attempt) * random(0.5, 1.5)",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "text": "random(0.5, 1.5)",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " factor is "
+          },
+          {
+            "type": "text",
+            "text": "full jitter",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ". It spreads retries across a window, avoiding the thundering-herd effect where all clients retry at the identical moment after a shared server-side reset."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture Overview"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDYwIiB2aWV3Qm94PSIwIDAgODIwIDQ2MCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjQ2MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIyOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1zaXplPSIxNCIgZm9udC13ZWlnaHQ9ImJvbGQiPlJhdGUgTGltaXQgSGFuZGxpbmcgQXJjaGl0ZWN0dXJlPC90ZXh0PgoKICA8IS0tIEFnZW50IC0tPgogIDxyZWN0IHg9IjE1IiB5PSI1MCIgd2lkdGg9IjEzMCIgaGVpZ2h0PSI4MCIgcng9IjgiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI4MCIgeT0iNzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ZGQzZmMiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIj5BSSBBZ2VudDwvdGV4dD4KICA8dGV4dCB4PSI4MCIgeT0iODgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiYWU2ZmQiIGZvbnQtc2l6ZT0iOCI+R2VuZXJhdGVzIEFQSTwvdGV4dD4KICA8dGV4dCB4PSI4MCIgeT0iMTAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPnJlcXVlc3RzPC90ZXh0PgogIDx0ZXh0IHg9IjgwIiB5PSIxMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtc2l6ZT0iOCI+YnVyc3QgdHJhZmZpYzwvdGV4dD4KCiAgPCEtLSBSYXRlIExpbWl0ZXIgYm94IC0tPgogIDxyZWN0IHg9IjE5MCIgeT0iMzgiIHdpZHRoPSIxNjUiIGhlaWdodD0iMzU1IiByeD0iOCIgZmlsbD0iIzEyMjMyOSIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSIyNzIiIHk9IjU4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmJiZjI0IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCI+UmF0ZSBMaW1pdGVyPC90ZXh0PgoKICA8IS0tIFRva2VuIGJ1Y2tldCAtLT4KICA8cmVjdCB4PSIyMDQiIHk9IjY4IiB3aWR0aD0iMTM3IiBoZWlnaHQ9IjgwIiByeD0iNiIgZmlsbD0iIzFjMmQ0MCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIyNzIiIHk9Ijg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5Ub2tlbiBCdWNrZXQ8L3RleHQ+CiAgPHRleHQgeD0iMjcyIiB5PSIxMDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiYWU2ZmQiIGZvbnQtc2l6ZT0iOCI+Q2FwYWNpdHk6IDYwIHJlcS9taW48L3RleHQ+CiAgPHRleHQgeD0iMjcyIiB5PSIxMTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiYWU2ZmQiIGZvbnQtc2l6ZT0iOCI+UmVmaWxsOiAxIHRva2VuL3NlYzwvdGV4dD4KICA8dGV4dCB4PSIyNzIiIHk9IjEzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1zaXplPSI4Ij4zOCB0b2tlbnMgYXZhaWxhYmxlPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMTQzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjU5ZTBiIiBmb250LXNpemU9IjgiPkNvbnN1bWUgb24gZGlzcGF0Y2g8L3RleHQ+CgogIDwhLS0gUmVxdWVzdCBxdWV1ZSAtLT4KICA8cmVjdCB4PSIyMDQiIHk9IjE1OCIgd2lkdGg9IjEzNyIgaGVpZ2h0PSI3MiIgcng9IjYiIGZpbGw9IiMxYzJkNDAiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMjcyIiB5PSIxNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNjNGI1ZmQiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9ImJvbGQiPlJlcXVlc3QgUXVldWU8L3RleHQ+CiAgPHRleHQgeD0iMjcyIiB5PSIxOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkZGQ2ZmUiIGZvbnQtc2l6ZT0iOCI+UGVuZGluZzogW3JlcTQsIHJlcTVdPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMjA2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZGRkNmZlIiBmb250LXNpemU9IjgiPk1heCBkZXB0aDogMTAwPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMjIwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZGRkNmZlIiBmb250LXNpemU9IjgiPkZJRk8gb3JkZXJpbmc8L3RleHQ+CgogIDwhLS0gUmV0cnkgbG9naWMgLS0+CiAgPHJlY3QgeD0iMjA0IiB5PSIyNDAiIHdpZHRoPSIxMzciIGhlaWdodD0iNzIiIHJ4PSI2IiBmaWxsPSIjMWMyZDQwIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI3MiIgeT0iMjU4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNmVlN2I3IiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5CYWNrb2ZmIExvZ2ljPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMjc0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTdmM2QwIiBmb250LXNpemU9IjgiPkV4cG9uZW50aWFsICsgaml0dGVyPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMjg4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTdmM2QwIiBmb250LXNpemU9IjgiPndhaXQgPSAyXm4gKiByYW5kKDAuNS0xLjUpPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMzAyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTdmM2QwIiBmb250LXNpemU9IjgiPk1heCByZXRyaWVzOiA1PC90ZXh0PgoKICA8IS0tIEhlYWRlciBwYXJzZXIgLS0+CiAgPHJlY3QgeD0iMjA0IiB5PSIzMjIiIHdpZHRoPSIxMzciIGhlaWdodD0iNTgiIHJ4PSI2IiBmaWxsPSIjMWMyZDQwIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI3MiIgeT0iMzQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjkiIGZvbnQtd2VpZ2h0PSJib2xkIj5IZWFkZXIgUGFyc2VyPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMzU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjgiPngtcmF0ZWxpbWl0LXJlbWFpbmluZzwvdGV4dD4KICA8dGV4dCB4PSIyNzIiIHk9IjM3MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZkZTY4YSIgZm9udC1zaXplPSI4Ij5yZXRyeS1hZnRlcjwvdGV4dD4KCiAgPCEtLSBBcnJvdzogQWdlbnQgdG8gUmF0ZSBMaW1pdGVyIC0tPgogIDxsaW5lIHgxPSIxNDUiIHkxPSI5MCIgeDI9IjE4OCIgeTI9IjkwIiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSIxNjYiIHk9IjgzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjciPnJlcXVlc3RzPC90ZXh0PgoKICA8IS0tIExMTSBBUEkgYm94IC0tPgogIDxyZWN0IHg9IjQxNSIgeT0iNTAiIHdpZHRoPSIxNjUiIGhlaWdodD0iMjIwIiByeD0iOCIgZmlsbD0iIzFhMWYzNSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI0OTciIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjN2RkM2ZjIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCI+TExNIEFQSTwvdGV4dD4KCiAgPCEtLSAyMDAgT0sgLS0+CiAgPHJlY3QgeD0iNDI5IiB5PSI4MiIgd2lkdGg9IjEzNyIgaGVpZ2h0PSI0OCIgcng9IjYiIGZpbGw9IiMxYTNkMmIiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDk3IiB5PSIxMDEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4NmVmYWMiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9ImJvbGQiPjIwMCBPSzwvdGV4dD4KICA8dGV4dCB4PSI0OTciIHk9IjExOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JiZjdkMCIgZm9udC1zaXplPSI4Ij5SZXNwb25zZSArIHRva2VuIHVzYWdlPC90ZXh0PgoKICA8IS0tIDQyOSAtLT4KICA8cmVjdCB4PSI0MjkiIHk9IjE0MCIgd2lkdGg9IjEzNyIgaGVpZ2h0PSI1OCIgcng9IjYiIGZpbGw9IiMzYjFmMmEiIHN0cm9rZT0iI2Y0M2Y1ZSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDk3IiB5PSIxNTkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmYjcxODUiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9ImJvbGQiPjQyOSBUb28gTWFueSBSZXEuPC90ZXh0PgogIDx0ZXh0IHg9IjQ5NyIgeT0iMTc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRhNGFmIiBmb250LXNpemU9IjgiPnJldHJ5LWFmdGVyOiAzMDwvdGV4dD4KICA8dGV4dCB4PSI0OTciIHk9IjE4OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZkYTRhZiIgZm9udC1zaXplPSI4Ij54LXJhdGVsaW1pdC1yZW1haW5pbmc6IDA8L3RleHQ+CgogIDwhLS0gNTAzIC0tPgogIDxyZWN0IHg9IjQyOSIgeT0iMjA4IiB3aWR0aD0iMTM3IiBoZWlnaHQ9IjUwIiByeD0iNiIgZmlsbD0iIzJkMWYwYSIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0OTciIHk9IjIyNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZiYmYyNCIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+NTAzIE92ZXJsb2FkZWQ8L3RleHQ+CiAgPHRleHQgeD0iNDk3IiB5PSIyNDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmZGU2OGEiIGZvbnQtc2l6ZT0iOCI+VHJhbnNpZW50IC0gcmV0cnkgdy8gYmFja29mZjwvdGV4dD4KCiAgPCEtLSBBcnJvdzogUmF0ZSBMaW1pdGVyIHRvIEFQSSAoZGlzcGF0Y2gpIC0tPgogIDxsaW5lIHgxPSIzNTciIHkxPSIxNzUiIHgyPSI0MTMiIHkyPSIxNzUiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDx0ZXh0IHg9IjM4NSIgeT0iMTY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjciPmRpc3BhdGNoPC90ZXh0PgoKICA8IS0tIEFycm93OiAyMDAgYmFjayAtLT4KICA8bGluZSB4MT0iNDEzIiB5MT0iMTEwIiB4Mj0iMzU3IiB5Mj0iMTEwIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycjIpIi8+CiAgPHRleHQgeD0iMzg1IiB5PSIxMDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNGQzOTkiIGZvbnQtc2l6ZT0iNyI+c3VjY2VzczwvdGV4dD4KCiAgPCEtLSBBcnJvdzogNDI5IGJhY2sgdG8gYmFja29mZiAtLT4KICA8cGF0aCBkPSJNIDQxMyAxNjkgUSAzOTAgMzEwIDM1NyAyODAiIHN0cm9rZT0iI2Y0M2Y1ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIGZpbGw9Im5vbmUiIHN0cm9rZS1kYXNoYXJyYXk9IjUsMyIgbWFya2VyLWVuZD0idXJsKCNhcnIzKSIvPgogIDx0ZXh0IHg9IjM3OCIgeT0iMjQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjQzZjVlIiBmb250LXNpemU9IjciPjQyOTogd2FpdCtyZXRyeTwvdGV4dD4KCiAgPCEtLSBNb25pdG9yaW5nIGJveCAtLT4KICA8cmVjdCB4PSI2MTgiIHk9IjUwIiB3aWR0aD0iMTg1IiBoZWlnaHQ9IjIyMCIgcng9IjgiIGZpbGw9IiMxZTFhMzUiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI3MTAiIHk9IjcwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYzRiNWZkIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iYm9sZCI+TW9uaXRvcmluZzwvdGV4dD4KCiAgPHJlY3QgeD0iNjMwIiB5PSI4MCIgd2lkdGg9IjE2MCIgaGVpZ2h0PSI0NSIgcng9IjUiIGZpbGw9IiMxYzJkNDAiIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzEwIiB5PSI5NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2RkZDZmZSIgZm9udC1zaXplPSI4IiBmb250LXdlaWdodD0iYm9sZCI+TWV0cmljczwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjExMSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2M0YjVmZCIgZm9udC1zaXplPSI3Ij40MjkgcmF0ZSDCtyBxdWV1ZSBkZXB0aCDCtyByZXRyeSBjb3VudDwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjEyMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2M0YjVmZCIgZm9udC1zaXplPSI3Ij50b2tlbnMvbWluIMK3IHA5OSBsYXRlbmN5PC90ZXh0PgoKICA8cmVjdCB4PSI2MzAiIHk9IjEzMiIgd2lkdGg9IjE2MCIgaGVpZ2h0PSI2MCIgcng9IjUiIGZpbGw9IiMxYzJkNDAiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzEwIiB5PSIxNDkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4NmVmYWMiIGZvbnQtc2l6ZT0iOCIgZm9udC13ZWlnaHQ9ImJvbGQiPkFsZXJ0czwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjE2MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2E3ZjNkMCIgZm9udC1zaXplPSI3Ij40MjkgcmF0ZSAmZ3Q7IDUlIOKGkiB0aHJvdHRsZSBhZ2VudDwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjE3NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2E3ZjNkMCIgZm9udC1zaXplPSI3Ij5xdWV1ZSAmZ3Q7IDgwJSDihpIgc2hlZCBsb2FkPC90ZXh0PgogIDx0ZXh0IHg9IjcxMCIgeT0iMTg3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTdmM2QwIiBmb250LXNpemU9IjciPnJldHJpZXMgJmd0OyAzIOKGkiBhbGVydCBvbi1jYWxsPC90ZXh0PgoKICA8cmVjdCB4PSI2MzAiIHk9IjIwMCIgd2lkdGg9IjE2MCIgaGVpZ2h0PSI2MiIgcng9IjUiIGZpbGw9IiMxYzJkNDAiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzEwIiB5PSIyMTciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmY2QzNGQiIGZvbnQtc2l6ZT0iOCIgZm9udC13ZWlnaHQ9ImJvbGQiPkFQSSBIZWFkZXJzPC90ZXh0PgogIDx0ZXh0IHg9IjcxMCIgeT0iMjMxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjciPngtcmF0ZWxpbWl0LWxpbWl0LXJlcXVlc3RzPC90ZXh0PgogIDx0ZXh0IHg9IjcxMCIgeT0iMjQzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjciPngtcmF0ZWxpbWl0LXJlbWFpbmluZy1yZXF1ZXN0czwvdGV4dD4KICA8dGV4dCB4PSI3MTAiIHk9IjI1NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZkZTY4YSIgZm9udC1zaXplPSI3Ij54LXJhdGVsaW1pdC1yZXNldC1yZXF1ZXN0czwvdGV4dD4KCiAgPCEtLSBBcnJvdzogQVBJIHRvIE1vbml0b3JpbmcgLS0+CiAgPGxpbmUgeDE9IjU4MiIgeTE9IjEzNSIgeDI9IjYxNSIgeTI9IjEzNSIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPHRleHQgeD0iNTk4IiB5PSIxMjciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iNyI+aGVhZGVyczwvdGV4dD4KCiAgPCEtLSBTdHJhdGVnaWVzIGJveCAtLT4KICA8cmVjdCB4PSIxNSIgeT0iMjkwIiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEwNSIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iOTUiIHk9IjMwOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkZDNmYyIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+S2V5IFN0cmF0ZWdpZXM8L3RleHQ+CiAgPHRleHQgeD0iOTUiIHk9IjMyMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JhZTZmZCIgZm9udC1zaXplPSI4Ij5QcmUtZW1wdGl2ZSB0aHJvdHRsaW5nPC90ZXh0PgogIDx0ZXh0IHg9Ijk1IiB5PSIzMzciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiYWU2ZmQiIGZvbnQtc2l6ZT0iOCI+RXhwb25lbnRpYWwgYmFja29mZiArIGppdHRlcjwvdGV4dD4KICA8dGV4dCB4PSI5NSIgeT0iMzUxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPlJlcXVlc3QgYmF0Y2hpbmc8L3RleHQ+CiAgPHRleHQgeD0iOTUiIHk9IjM2NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JhZTZmZCIgZm9udC1zaXplPSI4Ij5UaWVyIHJvdXRpbmc8L3RleHQ+CiAgPHRleHQgeD0iOTUiIHk9IjM3OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1zaXplPSI4Ij5IZWFkZXItYXdhcmUgcGFjaW5nPC90ZXh0PgoKICA8IS0tIFN0cmF0ZWdpZXMgdmlzdWFsIG5vdGUgLS0+CiAgPHJlY3QgeD0iNDE1IiB5PSIyOTAiIHdpZHRoPSIzODUiIGhlaWdodD0iMTA1IiByeD0iOCIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2MDciIHk9IjMwOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkZDNmYyIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+QmFja29mZiBQcm9ncmVzc2lvbiAoRXhhbXBsZSk8L3RleHQ+CiAgPHRleHQgeD0iNjA3IiB5PSIzMjUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+QXR0ZW1wdCAxOiB3YWl0IDFzIOKGkiAyOiAycyDihpIgMzogNHMg4oaSIDQ6IDhzIOKGkiA1OiAxNnM8L3RleHQ+CiAgPHRleHQgeD0iNjA3IiB5PSIzNDIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+V2l0aCBqaXR0ZXI6IG11bHRpcGx5IGJ5IHJhbmQoMC41LCAxLjUpIHRvIHNwcmVhZCBsb2FkPC90ZXh0PgogIDx0ZXh0IHg9IjYwNyIgeT0iMzYwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjU5ZTBiIiBmb250LXNpemU9IjgiPlRvdGFsIGJ1ZGdldDogJmx0OyA2MHMgYmVmb3JlIHJhaXNpbmcgdG8gY2FsbGVyPC90ZXh0PgogIDx0ZXh0IHg9IjYwNyIgeT0iMzc4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzRkMzk5IiBmb250LXNpemU9IjgiPkFsd2F5cyBob25vdXIgcmV0cnktYWZ0ZXIgaGVhZGVyIGlmIHByZXNlbnQ8L3RleHQ+CgogIDwhLS0gQm90dG9tIGxlZ2VuZCAtLT4KICA8cmVjdCB4PSIxNSIgeT0iNDA4IiB3aWR0aD0iNzg4IiBoZWlnaHQ9IjM4IiByeD0iNiIgZmlsbD0iIzFlMjkzYiIvPgogIDx0ZXh0IHg9IjQwOSIgeT0iNDIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiIGZvbnQtd2VpZ2h0PSJib2xkIj5GbG93OjwvdGV4dD4KICA8dGV4dCB4PSI0MDkiIHk9IjQzNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5BZ2VudCDihpIgUmF0ZSBMaW1pdGVyICh0b2tlbiBidWNrZXQgKyBxdWV1ZSkg4oaSIExMTSBBUEkgwrcgT24gNDI5OiBwYXJzZSByZXRyeS1hZnRlciwgc2xlZXAsIHJlLWVucXVldWUgwrcgTW9uaXRvciBhbGwgaGVhZGVycyBwcm9hY3RpdmVseTwvdGV4dD4KCiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI3IiBtYXJrZXJIZWlnaHQ9IjciIHJlZlg9IjUiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMNywzIHoiIGZpbGw9IiM2NDc0OGIiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyMiIgbWFya2VyV2lkdGg9IjciIG1hcmtlckhlaWdodD0iNyIgcmVmWD0iNSIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw3LDMgeiIgZmlsbD0iIzM0ZDM5OSIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnIzIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjZjQzZjVlIi8+CiAgICA8L21hcmtlcj4KICA8L2RlZnM+Cjwvc3ZnPgo=",
+          "alt": "Rate limit handling architecture: AI Agent → Rate Limiter (token bucket, request queue, backoff logic, header parser) → LLM API (200 OK / 429 / 503) with monitoring panel showing metrics, alerts, and response headers"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Requests flow left-to-right. The Rate Limiter is a local object (or a shared Redis-backed service) that holds the token bucket, a FIFO queue, and the backoff state for each in-flight or pending request. The monitoring panel (right) receives a copy of every response header and updates dashboards and alerts in real time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use It"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Any production agent that calls an LLM API more than a few times per minute."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batch-processing pipelines where many documents are processed concurrently by a pool of workers sharing one API key."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Multi-agent systems where sub-agents are spawned dynamically — the aggregate rate is unpredictable without coordination."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Integrations during API tier transitions — after upgrading a plan, the new limits may not be provisioned immediately; handling must cope with stale limits."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Any scenario where the user-facing SLA requires progress rather than failure — e.g., a long-running research workflow that must complete even if it takes longer than planned."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Know your limits.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Read your API tier's RPM and TPM ceilings from the provider's documentation. For Anthropic, these appear on the "
+                  },
+                  {
+                    "type": "text",
+                    "text": "Limits",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " page in the console. Budget 80% of the ceiling to leave headroom for spikes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Wrap every API call.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Create a thin client class that wraps the SDK and intercepts all calls through a single rate-limit-aware method."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement a token bucket.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " The bucket has a capacity equal to the per-minute ceiling and refills at 1 token/second (or 1/60 of capacity per second). Acquire a token before each request; if none are available, wait."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Catch 429 and 529 responses.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Parse "
+                  },
+                  {
+                    "type": "text",
+                    "text": "retry-after",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " from the header first. If missing, use your backoff formula. Sleep, then re-submit the request (not a new one)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Add jitter.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Multiply the computed wait by "
+                  },
+                  {
+                    "type": "text",
+                    "text": "random.uniform(0.5, 1.5)",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " to avoid synchronised retries across concurrent workers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Feed back response headers.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " After every successful response, read "
+                  },
+                  {
+                    "type": "text",
+                    "text": "x-ratelimit-remaining-requests",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "text": "x-ratelimit-remaining-tokens",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": ". If remaining < 10% of limit, slow down proactively even if the local bucket still has capacity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set a retry budget.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Do not retry indefinitely. After 5 attempts (or exceeding a total wait of 60 seconds), raise an exception to the caller with full context."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Emit metrics.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Count 429s, queue depth, retry count, and tokens consumed per minute. Alert when 429 rate exceeds 5%."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Basic Retry with Exponential Backoff"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\nimport random\nimport anthropic\nfrom anthropic import RateLimitError, APIStatusError\n\nclient = anthropic.Anthropic()\n\ndef call_with_backoff(\n    messages: list[dict],\n    model: str = \"claude-opus-4-5\",\n    max_tokens: int = 1024,\n    max_retries: int = 5,\n    base_wait: float = 1.0,\n    max_wait: float = 60.0,\n) -> anthropic.types.Message:\n    \"\"\"Call the Anthropic API with exponential backoff on rate-limit errors.\"\"\"\n    for attempt in range(max_retries):\n        try:\n            return client.messages.create(\n                model=model,\n                max_tokens=max_tokens,\n                messages=messages,\n            )\n        except RateLimitError as e:\n            if attempt == max_retries - 1:\n                raise  # exhausted retries\n\n            # Honour server's retry-after header if present\n            retry_after = float(\n                e.response.headers.get(\"retry-after\", 0)\n            ) if e.response else 0\n\n            # Exponential backoff with full jitter\n            computed = min(max_wait, base_wait * (2 ** attempt))\n            wait = max(retry_after, computed) * random.uniform(0.5, 1.5)\n\n            print(f\"Rate limited (attempt {attempt + 1}/{max_retries}). \"\n                  f\"Waiting {wait:.1f}s …\")\n            time.sleep(wait)\n        except APIStatusError as e:\n            if e.status_code in (500, 503) and attempt < max_retries - 1:\n                wait = base_wait * (2 ** attempt) * random.uniform(0.5, 1.5)\n                time.sleep(wait)\n                continue\n            raise\n\n    raise RuntimeError(\"Unreachable\")\n\n\n# Usage\nresponse = call_with_backoff(\n    messages=[{\"role\": \"user\", \"content\": \"Summarise quantum computing in 3 sentences.\"}],\n    max_retries=5,\n)\nprint(response.content[0].text)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Token Bucket Rate Limiter"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\nimport threading\nimport anthropic\n\nclass TokenBucketRateLimiter:\n    \"\"\"\n    Pre-emptive token-bucket limiter for Anthropic API requests.\n    Tracks both requests-per-minute (RPM) and tokens-per-minute (TPM).\n    \"\"\"\n\n    def __init__(self, rpm: int = 60, tpm: int = 100_000):\n        self.rpm = rpm\n        self.tpm = tpm\n        self._req_tokens = float(rpm)      # available request slots\n        self._tok_tokens = float(tpm)      # available token capacity\n        self._last_refill = time.monotonic()\n        self._lock = threading.Lock()\n\n    def _refill(self) -> None:\n        now = time.monotonic()\n        elapsed = now - self._last_refill\n        self._last_refill = now\n        # Refill proportionally to elapsed time (per-second rate)\n        self._req_tokens = min(self.rpm, self._req_tokens + elapsed * self.rpm / 60)\n        self._tok_tokens = min(self.tpm, self._tok_tokens + elapsed * self.tpm / 60)\n\n    def acquire(self, estimated_tokens: int = 0) -> None:\n        \"\"\"Block until one request slot AND estimated_tokens are available.\"\"\"\n        while True:\n            with self._lock:\n                self._refill()\n                if self._req_tokens >= 1 and self._tok_tokens >= estimated_tokens:\n                    self._req_tokens -= 1\n                    self._tok_tokens -= estimated_tokens\n                    return\n            # Sleep for 100ms then retry\n            time.sleep(0.1)\n\n    def record_response(self, headers: dict) -> None:\n        \"\"\"Sync local bucket from server-reported remaining headroom.\"\"\"\n        try:\n            remaining_req = int(headers.get(\"x-ratelimit-remaining-requests\", self.rpm))\n            remaining_tok = int(headers.get(\"x-ratelimit-remaining-tokens\", self.tpm))\n        except (ValueError, TypeError):\n            return\n        with self._lock:\n            # Trust server's view when it shows less headroom than our local estimate\n            self._req_tokens = min(self._req_tokens, float(remaining_req))\n            self._tok_tokens = min(self._tok_tokens, float(remaining_tok))\n\n\nlimiter = TokenBucketRateLimiter(rpm=50, tpm=80_000)\nclient = anthropic.Anthropic()\n\ndef rate_limited_call(prompt: str, est_tokens: int = 500) -> str:\n    limiter.acquire(estimated_tokens=est_tokens)\n    response = client.messages.create(\n        model=\"claude-opus-4-5\",\n        max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": prompt}],\n    )\n    # Feed back actual headers so local bucket stays calibrated\n    if hasattr(response, \"_response\") and response._response:\n        limiter.record_response(dict(response._response.headers))\n    return response.content[0].text\n\n\nresult = rate_limited_call(\"What is a transformer model?\", est_tokens=600)\nprint(result)\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Async Rate Limiter for Concurrent Agents"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nimport random\nimport time\nimport anthropic\n\nclass AsyncRateLimiter:\n    \"\"\"Async token bucket — safe for concurrent coroutines in one event loop.\"\"\"\n\n    def __init__(self, rpm: int = 60, tpm: int = 100_000):\n        self.rpm = rpm\n        self.tpm = tpm\n        self._req_tokens = float(rpm)\n        self._tok_tokens = float(tpm)\n        self._last_refill = time.monotonic()\n        self._lock = asyncio.Lock()\n\n    async def _refill(self) -> None:\n        now = time.monotonic()\n        elapsed = now - self._last_refill\n        self._last_refill = now\n        self._req_tokens = min(self.rpm, self._req_tokens + elapsed * self.rpm / 60)\n        self._tok_tokens = min(self.tpm, self._tok_tokens + elapsed * self.tpm / 60)\n\n    async def acquire(self, estimated_tokens: int = 0) -> None:\n        while True:\n            async with self._lock:\n                await self._refill()\n                if self._req_tokens >= 1 and self._tok_tokens >= estimated_tokens:\n                    self._req_tokens -= 1\n                    self._tok_tokens -= estimated_tokens\n                    return\n            await asyncio.sleep(0.1)\n\n\n_limiter = AsyncRateLimiter(rpm=50, tpm=80_000)\n_client = anthropic.AsyncAnthropic()\n\nasync def agent_call(task: str, max_retries: int = 4) -> str:\n    \"\"\"Rate-limited async call with exponential backoff.\"\"\"\n    await _limiter.acquire(estimated_tokens=600)\n    for attempt in range(max_retries):\n        try:\n            response = await _client.messages.create(\n                model=\"claude-opus-4-5\",\n                max_tokens=512,\n                messages=[{\"role\": \"user\", \"content\": task}],\n            )\n            return response.content[0].text\n        except anthropic.RateLimitError as e:\n            if attempt == max_retries - 1:\n                raise\n            retry_after = float(\n                e.response.headers.get(\"retry-after\", 0)\n            ) if e.response else 0\n            wait = max(retry_after, 1.0 * (2 ** attempt)) * random.uniform(0.5, 1.5)\n            await asyncio.sleep(wait)\n    return \"\"\n\n\nasync def main() -> None:\n    tasks = [\n        \"Explain a transformer in one sentence.\",\n        \"What is gradient descent?\",\n        \"Define an embedding vector.\",\n    ]\n    results = await asyncio.gather(*[agent_call(t) for t in tasks])\n    for task, result in zip(tasks, results):\n        print(f\"Q: {task}\\nA: {result[:120]}\\n\")\n\n\nasyncio.run(main())\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Scenario: a document-processing pipeline ingests 500 research PDFs overnight. Each document triggers 4 LLM calls (extract metadata, summarise, generate tags, evaluate quality). The API key is on an Anthropic Tier 2 plan: 1,000 RPM and 80,000 TPM. Running 500 × 4 = 2,000 calls without throttling would trigger 429s within the first two minutes."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nimport random\nimport time\nimport anthropic\n\nclass DocumentProcessor:\n    \"\"\"\n    Processes a batch of documents against the Anthropic API,\n    respecting tier limits via a token bucket + backoff strategy.\n    \"\"\"\n    RPM_LIMIT = 900          # 90% of Tier 2 ceiling (1000 RPM)\n    TPM_LIMIT = 72_000       # 90% of Tier 2 ceiling (80k TPM)\n    TOKENS_PER_DOC_CALL = 1_200   # estimated per LLM call\n\n    def __init__(self, concurrency: int = 10):\n        self.client = anthropic.AsyncAnthropic()\n        self._semaphore = asyncio.Semaphore(concurrency)\n        self._req_tokens = float(self.RPM_LIMIT)\n        self._tok_tokens = float(self.TPM_LIMIT)\n        self._last_refill = time.monotonic()\n        self._lock = asyncio.Lock()\n        self.stats = {\"ok\": 0, \"retries\": 0, \"errors\": 0}\n\n    async def _refill(self) -> None:\n        now = time.monotonic()\n        elapsed = now - self._last_refill\n        self._last_refill = now\n        self._req_tokens = min(self.RPM_LIMIT,\n                               self._req_tokens + elapsed * self.RPM_LIMIT / 60)\n        self._tok_tokens = min(self.TPM_LIMIT,\n                               self._tok_tokens + elapsed * self.TPM_LIMIT / 60)\n\n    async def _acquire(self) -> None:\n        while True:\n            async with self._lock:\n                await self._refill()\n                if (self._req_tokens >= 1 and\n                        self._tok_tokens >= self.TOKENS_PER_DOC_CALL):\n                    self._req_tokens -= 1\n                    self._tok_tokens -= self.TOKENS_PER_DOC_CALL\n                    return\n            await asyncio.sleep(0.05)\n\n    async def _call(self, prompt: str, max_retries: int = 5) -> str:\n        await self._acquire()\n        for attempt in range(max_retries):\n            try:\n                response = await self.client.messages.create(\n                    model=\"claude-haiku-4-5\",   # cheaper model for bulk processing\n                    max_tokens=512,\n                    messages=[{\"role\": \"user\", \"content\": prompt}],\n                )\n                self.stats[\"ok\"] += 1\n                return response.content[0].text\n            except anthropic.RateLimitError as e:\n                self.stats[\"retries\"] += 1\n                if attempt == max_retries - 1:\n                    self.stats[\"errors\"] += 1\n                    raise\n                retry_after = float(\n                    e.response.headers.get(\"retry-after\", 0)\n                ) if e.response else 0\n                wait = max(retry_after, 2.0 * (2 ** attempt)) * random.uniform(0.8, 1.2)\n                await asyncio.sleep(wait)\n        return \"\"\n\n    async def process_document(self, doc_text: str, doc_id: str) -> dict:\n        async with self._semaphore:\n            metadata  = await self._call(f\"Extract: title, authors, year from:\\n{doc_text[:500]}\")\n            summary   = await self._call(f\"Summarise in 3 sentences:\\n{doc_text[:2000]}\")\n            tags      = await self._call(f\"List 5 keyword tags for:\\n{doc_text[:500]}\")\n            quality   = await self._call(f\"Rate quality 1-10 with one reason:\\n{doc_text[:500]}\")\n            return {\"id\": doc_id, \"metadata\": metadata, \"summary\": summary,\n                    \"tags\": tags, \"quality\": quality}\n\n    async def run(self, documents: list[tuple[str, str]]) -> list[dict]:\n        results = await asyncio.gather(\n            *[self.process_document(text, did) for text, did in documents],\n            return_exceptions=True,\n        )\n        print(f\"Done. Stats: {self.stats}\")\n        return [r for r in results if not isinstance(r, Exception)]\n\n\n# Example usage (with placeholder documents)\nasync def demo():\n    docs = [(f\"Document {i} about machine learning …\", f\"doc-{i}\")\n            for i in range(20)]\n    processor = DocumentProcessor(concurrency=10)\n    results = await processor.run(docs)\n    print(f\"Processed {len(results)} documents successfully\")\n\nasyncio.run(demo())\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Retrying immediately on 429.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Sending the same request again without any wait just generates another 429 and wastes the retry budget."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring the retry-after header.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " A computed backoff may be far shorter than the server's rate-limit reset window. Always take "
+                  },
+                  {
+                    "type": "text",
+                    "text": "max(retry_after, computed_wait)",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No jitter.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Pure exponential backoff without randomness causes all workers sharing an API key to retry at the same instant, generating a thundering herd."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Per-process buckets in multi-worker deployments.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Five workers each with a 60-RPM bucket collectively send 300 RPM on a 60-RPM key. Centralise the bucket in Redis or use a sidecar."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treating 429 and 500 identically.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " A 500 is a server error — the request likely reached the model and may have partial state. A 429 is a policy response — the request was never processed. They need different retry semantics."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Forgetting token-limit 429s.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " You can be far under the RPM ceiling but still get 429s if a few very long prompts exhaust the TPM limit. Always count and track tokens, not just requests."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use full jitter (not equal jitter).",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "text",
+                    "text": "random.uniform(0, wait)",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " spreads load more uniformly than multiplying by "
+                  },
+                  {
+                    "type": "text",
+                    "text": "random.uniform(0.5, 1.5)",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " when many workers collide at once."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Budget at 80%.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Configure the local rate limiter to 80% of the documented ceiling to absorb estimation error and concurrent workers you don't fully control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prioritise interactive over batch.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Put user-facing requests in a high-priority queue and background batch jobs in a low-priority queue. Serve the high queue first when both are waiting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use the cheapest capable model for bulk tasks.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Routing bulk processing to claude-haiku-4-5 reduces both cost and token usage, leaving TPM headroom for interactive claude-opus-4-5 calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache repeated prompts.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " If multiple agents generate the same or similar prompt (e.g., a shared system-prompt prefix), use prompt caching to reduce net token consumption. Anthropic Prompt Caching charges only 10% of the normal input-token rate for cached prefixes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log every 429 with context.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Include the model, estimated token count, RPM/TPM headroom at time of call, and the retry-after value. This is the diagnostic data needed to tune the rate limiter."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test rate limit handling in CI.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Inject a mock 429 response on the first call in unit tests to verify the retry path runs correctly and that the call eventually succeeds."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single-process async token bucket (as shown above) handles tens of concurrent coroutines efficiently because the bucket state is accessed under "
+          },
+          {
+            "type": "text",
+            "text": "asyncio.Lock",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " and refill is O(1). The main scalability constraint appears when multiple processes or hosts share a single API key."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Redis-backed limiter:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " use a Lua script inside Redis to implement the token bucket atomically. Libraries such as "
+                  },
+                  {
+                    "type": "text",
+                    "text": "limits",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " (Python) provide this out of the box with multiple storage backends."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sliding window vs fixed window:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " most LLM APIs use a fixed 60-second window that resets on a clock boundary. A sliding-window limiter on the client side is more conservative (never allows more than N requests in any 60-second span) and eliminates cliff-edge 429s at window resets."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Request coalescing:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " for agents that issue many short prompts, batch them into a single multi-turn conversation or use the Batch API (Anthropic Message Batches) which processes up to 10,000 requests asynchronously at 50% cost and does not count against synchronous rate limits."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tier upgrade triggers:",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " automate a PagerDuty alert or Slack message when the 7-day 429 rate exceeds 1%. That is the signal to request a rate-limit increase from the provider — typically granted within 24 hours with justification."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tool"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Purpose"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Notes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "limits",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python rate limiting with Redis/memcached/memory storage"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Supports fixed-window, sliding-window, token-bucket algorithms"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "tenacity",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Retry library with decorator syntax"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Composable retry conditions; integrates with asyncio"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LiteLLM",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unified LLM proxy with built-in rate limiting, load balancing, and fallbacks"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Handles multiple API keys and routing via a configuration file"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Anthropic SDK (built-in)",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Automatic retries via max_retries param"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Handles 429/529 with backoff; does not pre-emptively throttle"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Prometheus + Grafana"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Observability for rate limit metrics"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Expose 429_total, queue_depth, tokens_consumed counters"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Anthropic Message Batches API"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Async bulk processing at 50% cost"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Exempt from synchronous RPM/TPM limits; results delivered via polling"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Mechanism"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Drawback"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Token bucket (pre-emptive)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Local counter, refill at fixed rate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single-process steady traffic"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Drifts in multi-process without centralisation"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Exponential backoff (reactive)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Retry after 429 with increasing delay"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Occasional bursts, low traffic"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Adds unpredictable latency; thundering herd without jitter"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "SDK built-in retries"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "max_retries in Anthropic client"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Simple integrations, low volume"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No pre-emptive throttle, no queue, no metrics"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LiteLLM proxy"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sidecar with per-key limits, load balancing"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Multi-model, multi-key deployments"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Extra infrastructure; adds ~5 ms latency per call"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Batch API"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Async queue; results polled later"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High-volume offline processing"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Not suitable for interactive, latency-sensitive calls"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & Reliability"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Avoid logging full prompts in retry logs.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Retry context records may land in log aggregators accessible to many engineers. Log only the request ID, model, and token estimate — not the prompt content."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate-limit your own callers too.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " An upstream service that calls your agent without limits can cause your agent to exhaust the API quota for all downstream users. Apply your own ingress rate limiting before forwarding to the LLM."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treat retry-after as an upper bound, not exact.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " The server's quota window may reset slightly before or after the stated time. Wait slightly longer (add 500 ms) to avoid sending too early."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Circuit breaker pattern.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " If 429s persist for more than N consecutive attempts, open a circuit breaker and fail fast for a fixed duration rather than tying up threads in long backoff sleeps."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rotate API keys under independent limits.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Anthropic supports multiple API keys per organisation; assign separate keys to separate services so a batch job exhausting its key does not block interactive users."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pre-empt 429s with a token bucket",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " set to 80% of your tier ceiling. Reactive backoff alone is not sufficient for predictable throughput."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always honour the retry-after header",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — take "
+                  },
+                  {
+                    "type": "text",
+                    "text": "max(retry_after, computed_backoff)",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " to avoid retrying before the server's window resets."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Add full jitter to every backoff",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " to prevent concurrent workers from forming a retry thundering herd after a shared rate-limit event."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Track both RPM and TPM.",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " Token exhaustion hits before request exhaustion for long-context or many-step agent workloads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Centralise the rate limiter",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " (Redis or sidecar) when more than one process shares an API key. Per-process buckets multiply the effective traffic by the worker count."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use the Batch API for offline, high-volume work",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " — it bypasses synchronous rate limits and costs 50% less than synchronous calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Persistent 429 rate > 1%",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " is a signal to request a tier upgrade, add caching, or route bulk work to the Batch API — not just to increase the retry count."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

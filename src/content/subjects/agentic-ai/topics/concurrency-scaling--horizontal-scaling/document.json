@@ -1,0 +1,2564 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running a single agent process handles one task at a time. Horizontal scaling removes that ceiling by deploying multiple stateless agent replicas behind a shared queue, allowing throughput to grow linearly with the number of workers while keeping each replica simple and replaceable."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What is Horizontal Scaling for Agents?"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Horizontal scaling means adding more identical agent processes (workers) to handle load, rather than giving a single process more CPU or RAM (vertical scaling). Each worker is stateless — it pulls a task from a shared queue, runs the agent loop, writes results to shared storage, and goes back to polling. Because no worker holds unique in-memory state, replicas are interchangeable: the scheduler can add, remove, or restart any of them without affecting in-flight work on other replicas."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In the context of AI agents the unit of work is typically an agent run: a sequence of LLM calls, tool invocations, and memory reads/writes that produces a final answer or completes an objective. When many such runs must happen concurrently — user-facing product features, batch pipelines, background automation — a single agent process serializes them. Horizontal scaling decouples throughput from the capacity of any single machine by fanning the workload across a fleet of identical workers."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The pattern is the same one web servers, message consumers, and worker pools have used for decades. What makes it interesting for agents is that agent runs tend to be long-lived (seconds to minutes), LLM API calls are the bottleneck rather than CPU, and external state (conversation context, memory, in-progress tool results) must survive process boundaries."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single agent process, even an async one with many concurrent coroutines, is still bounded by the GIL in CPython and by the number of in-flight connections the process can manage. More importantly, it represents a single point of failure: a crash, a memory leak, or an OS update takes the entire agent service offline."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world agent workloads have bursty demand. A product that lets users trigger research tasks will see spikes when the workday begins, when a newsletter is sent, or when an automated pipeline fires. A fixed-size single process cannot absorb those spikes without queuing work internally, which means latency climbs without bound. With horizontal scaling, an autoscaler detects the queue depth growing and launches new replicas within seconds, keeping latency stable across the spike."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Horizontal scaling also enables zero-downtime deploys. Because each worker is stateless and pulls work from a shared queue, a rolling update can drain one replica at a time, replace it, and move to the next — all while the remaining replicas keep serving requests. This is operationally far simpler than coordinating state migrations on a monolithic process."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Linear throughput growth: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "doubling the number of workers roughly doubles the number of agent runs completed per minute, provided the LLM API and downstream tools are not the bottleneck."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fault isolation: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "a worker crash only loses the tasks it was executing (which the queue can redeliver); other workers continue unaffected."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Zero-downtime updates: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "rolling deploys remove one replica at a time, keeping total capacity online throughout the update."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Elastic cost: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "an autoscaler can scale the fleet to zero during idle periods and spin it back up on demand, paying only for compute that is actually executing work."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Simplified workers: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "each replica contains only agent logic. Queue management, load distribution, and health checks live in the infrastructure layer, keeping the worker code small and testable."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cross-region deployment: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "worker replicas can be deployed in multiple regions while sharing a global queue, reducing latency for geographically distributed users."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs & Limitations"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "State management complexity: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "stateless workers require all shared state (conversation history, tool results, memory) to live in an external store. Naively storing context in process memory silently breaks when work migrates to a different worker."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "LLM API rate limits: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "all workers share a single API key's token-per-minute budget. Scaling workers without raising the LLM rate limit does not improve throughput — it just causes more 429 errors that must be retried."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Queue becomes a bottleneck: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "a single queue broker is now in the critical path. It must be deployed with replication and persistence to avoid task loss."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Duplicate task execution: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "at-least-once delivery semantics in most queues mean a task can be delivered to two workers if the first worker is slow to acknowledge. Agent logic must be idempotent or the queue must use exactly-once semantics."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Observability gap: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "a distributed fleet is harder to debug. Logs from a single agent run span multiple processes; tracing context must be threaded through the queue message for correlation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cold-start latency: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "spinning up a new replica takes 5–30 seconds to load the model client, connect to the queue, and warm up any caches. Autoscaling reacts to load already present, not future load."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The fundamental mechanism is the competing-consumers pattern. A durable queue holds task messages. Many worker processes each run a polling loop: dequeue one message (with a visibility timeout or lock), execute the agent run, write results to shared storage, and then acknowledge (delete) the message. If the worker crashes before acknowledging, the queue re-delivers the message to another worker after the visibility timeout expires."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Worker count is controlled by an autoscaler that watches a scaling signal. The most direct signal is queue depth: if the queue has 1000 pending tasks and each worker processes 10 tasks per minute, the fleet needs at least 100 workers to clear the backlog in one minute. More sophisticated signals include queue depth divided by current processing rate (estimated time-to-empty), CPU utilization of existing workers, or a custom metric emitted by the workers themselves (e.g., tasks currently executing)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because agent runs involve LLM calls that block for 1–60 seconds, each worker typically runs an async event loop handling several concurrent agent runs at once. A single Python process with asyncio can handle 10–50 concurrent LLM-bound tasks without CPU contention. Horizontal scaling then multiplies that concurrency across replicas: 20 workers each handling 20 concurrent runs = 400 simultaneous agent runs per fleet."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Shared state is the critical design concern. Each agent run needs to read its conversation history, write tool results back as it progresses, and eventually store the final response. These operations must go through an external store (Redis for low-latency short-lived state, a relational database for durable long-term storage) so any worker can serve any task. The task message carries a session ID; the worker uses that ID to fetch and update state in the shared store."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture Overview"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iNDgwIiB2aWV3Qm94PSIwIDAgODIwIDQ4MCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjQ4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2UyZThmMCIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiPkhvcml6b250YWwgU2NhbGluZyBBcmNoaXRlY3R1cmUgZm9yIEFnZW50czwvdGV4dD4KCiAgPCEtLSBDbGllbnQgUmVxdWVzdHMgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjUwIiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjYwIiByeD0iOCIgZmlsbD0iIzFlMjkzYiIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9Ijg1IiB5PSI3NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM4YmRmOCIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkNsaWVudCBSZXF1ZXN0czwvdGV4dD4KICA8dGV4dCB4PSI4NSIgeT0iOTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iOCI+QVBJIC8gU0RLIC8gVUk8L3RleHQ+CiAgPHRleHQgeD0iODUiIHk9IjEwMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5jb25jdXJyZW50IHRhc2tzPC90ZXh0PgoKICA8IS0tIEFycm93OiBDbGllbnQgLT4gTEIgLS0+CiAgPGxpbmUgeDE9IjE1MCIgeTE9IjgwIiB4Mj0iMTk1IiB5Mj0iODAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIExvYWQgQmFsYW5jZXIgLS0+CiAgPHJlY3QgeD0iMTk1IiB5PSI1MCIgd2lkdGg9IjEzMCIgaGVpZ2h0PSI2MCIgcng9IjgiIGZpbGw9IiMxYzJkNDAiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iMjYwIiB5PSI3NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkxvYWQgQmFsYW5jZXI8L3RleHQ+CiAgPHRleHQgeD0iMjYwIiB5PSI5MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZjZDM0ZCIgZm9udC1zaXplPSI4Ij5BUEkgR2F0ZXdheSAvIE5naW54PC90ZXh0PgogIDx0ZXh0IHg9IjI2MCIgeT0iMTAzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjgiPlJvdXRlICsgQXV0aCArIFJhdGUtbGltaXQ8L3RleHQ+CgogIDwhLS0gQXJyb3c6IExCIC0+IFRhc2sgUXVldWUgLS0+CiAgPGxpbmUgeDE9IjMyNSIgeTE9IjgwIiB4Mj0iMzY1IiB5Mj0iODAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIFRhc2sgUXVldWUgLS0+CiAgPHJlY3QgeD0iMzY1IiB5PSI1MCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI2MCIgcng9IjgiIGZpbGw9IiMxYTNkMmIiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iNDM1IiB5PSI3MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM0ZDM5OSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPlRhc2sgUXVldWU8L3RleHQ+CiAgPHRleHQgeD0iNDM1IiB5PSI4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg2ZWZhYyIgZm9udC1zaXplPSI4Ij5SZWRpcyAvIFJhYmJpdE1RIC8gU1FTPC90ZXh0PgogIDx0ZXh0IHg9IjQzNSIgeT0iMTAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjODZlZmFjIiBmb250LXNpemU9IjgiPmJ1ZmZlcmluZyArIGJhY2twcmVzc3VyZTwvdGV4dD4KCiAgPCEtLSBBcnJvdzogVFEgLT4gV29ya2VycyAtLT4KICA8bGluZSB4MT0iNDM1IiB5MT0iMTEwIiB4Mj0iNDM1IiB5Mj0iMTQ1IiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8dGV4dCB4PSI0NTIiIHk9IjEzMiIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5kaXNwYXRjaDwvdGV4dD4KCiAgPCEtLSBXb3JrZXIgUG9vbCBsYWJlbCAtLT4KICA8cmVjdCB4PSI2MCIgeT0iMTUwIiB3aWR0aD0iNjkwIiBoZWlnaHQ9IjE2NSIgcng9IjgiIGZpbGw9IiMxMTE4MjciIHN0cm9rZT0iI2E3OGJmYSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjYsMyIvPgogIDx0ZXh0IHg9IjQwNSIgeT0iMTY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTc4YmZhIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+QWdlbnQgV29ya2VyIFBvb2wgIChob3Jpem9udGFsbHkgc2NhbGVkIOKAlCBOIHJlcGxpY2FzKTwvdGV4dD4KCiAgPCEtLSBXb3JrZXIgMSAtLT4KICA8cmVjdCB4PSI4MCIgeT0iMTc4IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjEyMCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIxNDUiIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkZDNmYyIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+V29ya2VyIDE8L3RleHQ+CiAgPHJlY3QgeD0iOTIiIHk9IjIwMyIgd2lkdGg9IjEwNiIgaGVpZ2h0PSIyMiIgcng9IjQiIGZpbGw9IiMwZjE3MmEiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMTQ1IiB5PSIyMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiYWU2ZmQiIGZvbnQtc2l6ZT0iOCI+UGxhbiArIFJlYXNvbjwvdGV4dD4KICA8cmVjdCB4PSI5MiIgeT0iMjMyIiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjIyIiByeD0iNCIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIxNDUiIHk9IjI0NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JhZTZmZCIgZm9udC1zaXplPSI4Ij5Ub29sIENhbGxzPC90ZXh0PgogIDxyZWN0IHg9IjkyIiB5PSIyNjEiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjE0NSIgeT0iMjc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPkVtaXQgUmVzdWx0PC90ZXh0PgoKICA8IS0tIFdvcmtlciAyIC0tPgogIDxyZWN0IHg9IjIzMCIgeT0iMTc4IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjEyMCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyOTUiIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkZDNmYyIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+V29ya2VyIDI8L3RleHQ+CiAgPHJlY3QgeD0iMjQyIiB5PSIyMDMiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI5NSIgeT0iMjE4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPlBsYW4gKyBSZWFzb248L3RleHQ+CiAgPHJlY3QgeD0iMjQyIiB5PSIyMzIiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI5NSIgeT0iMjQ3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPlRvb2wgQ2FsbHM8L3RleHQ+CiAgPHJlY3QgeD0iMjQyIiB5PSIyNjEiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjI5NSIgeT0iMjc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPkVtaXQgUmVzdWx0PC90ZXh0PgoKICA8IS0tIFdvcmtlciAzIC0tPgogIDxyZWN0IHg9IjM4MCIgeT0iMTc4IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjEyMCIgcng9IjYiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0NDUiIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzdkZDNmYyIgZm9udC1zaXplPSI5IiBmb250LXdlaWdodD0iYm9sZCI+V29ya2VyIDM8L3RleHQ+CiAgPHJlY3QgeD0iMzkyIiB5PSIyMDMiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ0NSIgeT0iMjE4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPlBsYW4gKyBSZWFzb248L3RleHQ+CiAgPHJlY3QgeD0iMzkyIiB5PSIyMzIiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ0NSIgeT0iMjQ3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPlRvb2wgQ2FsbHM8L3RleHQ+CiAgPHJlY3QgeD0iMzkyIiB5PSIyNjEiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjIiIHJ4PSI0IiBmaWxsPSIjMGYxNzJhIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ0NSIgeT0iMjc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmFlNmZkIiBmb250LXNpemU9IjgiPkVtaXQgUmVzdWx0PC90ZXh0PgoKICA8IS0tIFdvcmtlciBOIGRvdHMgLS0+CiAgPHRleHQgeD0iNTQ4IiB5PSIyNTAiIGZpbGw9IiM2NDc0OGIiIGZvbnQtc2l6ZT0iMjIiIGZvbnQtd2VpZ2h0PSJib2xkIj7CtyDCtyDCtzwvdGV4dD4KCiAgPCEtLSBXb3JrZXIgTiAtLT4KICA8cmVjdCB4PSI2MDAiIHk9IjE3OCIgd2lkdGg9IjEzMCIgaGVpZ2h0PSIxMjAiIHJ4PSI2IiBmaWxsPSIjMWUyOTNiIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjY1IiB5PSIxOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM3ZGQzZmMiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9ImJvbGQiPldvcmtlciBOPC90ZXh0PgogIDxyZWN0IHg9IjYxMiIgeT0iMjAzIiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjIyIiByeD0iNCIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2NjUiIHk9IjIxOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JhZTZmZCIgZm9udC1zaXplPSI4Ij5QbGFuICsgUmVhc29uPC90ZXh0PgogIDxyZWN0IHg9IjYxMiIgeT0iMjMyIiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjIyIiByeD0iNCIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2NjUiIHk9IjI0NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JhZTZmZCIgZm9udC1zaXplPSI4Ij5Ub29sIENhbGxzPC90ZXh0PgogIDxyZWN0IHg9IjYxMiIgeT0iMjYxIiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjIyIiByeD0iNCIgZmlsbD0iIzBmMTcyYSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI2NjUiIHk9IjI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JhZTZmZCIgZm9udC1zaXplPSI4Ij5FbWl0IFJlc3VsdDwvdGV4dD4KCiAgPCEtLSBTaGFyZWQgTWVtb3J5IC8gU3RhdGUgYXJyb3cgdXAgZnJvbSB3b3JrZXJzIC0tPgogIDxsaW5lIHgxPSIxNDUiIHkxPSIyOTgiIHgyPSIxNDUiIHkyPSIzNDAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxIiBzdHJva2UtZGFzaGFycmF5PSI0LDIiLz4KICA8bGluZSB4MT0iMjk1IiB5MT0iMjk4IiB4Mj0iMjk1IiB5Mj0iMzQwIiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwyIi8+CiAgPGxpbmUgeDE9IjQ0NSIgeTE9IjI5OCIgeDI9IjQ0NSIgeTI9IjM0MCIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEiIHN0cm9rZS1kYXNoYXJyYXk9IjQsMiIvPgogIDxsaW5lIHgxPSI2NjUiIHkxPSIyOTgiIHgyPSI2NjUiIHkyPSIzNDAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxIiBzdHJva2UtZGFzaGFycmF5PSI0LDIiLz4KCiAgPCEtLSBTaGFyZWQgU3RhdGUgcm93IC0tPgogIDxyZWN0IHg9IjYwIiB5PSIzNDAiIHdpZHRoPSIzMDAiIGhlaWdodD0iNjAiIHJ4PSI4IiBmaWxsPSIjMWEzZDJiIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMjEwIiB5PSIzNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNGQzOTkiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIj5TaGFyZWQgTWVtb3J5IC8gU3RhdGU8L3RleHQ+CiAgPHRleHQgeD0iMjEwIiB5PSIzNzgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM4NmVmYWMiIGZvbnQtc2l6ZT0iOCI+UmVkaXMgKHNob3J0LXRlcm0pIOKAoiBQb3N0Z3JlcyAobG9uZy10ZXJtKTwvdGV4dD4KICA8dGV4dCB4PSIyMTAiIHk9IjM5MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg2ZWZhYyIgZm9udC1zaXplPSI4Ij5WZWN0b3IgREIgKGVtYmVkZGluZ3MpIOKAoiBwZXItc2Vzc2lvbiBjb250ZXh0PC90ZXh0PgoKICA8IS0tIExMTSBBUEkgLS0+CiAgPHJlY3QgeD0iMzkwIiB5PSIzNDAiIHdpZHRoPSIxODUiIGhlaWdodD0iNjAiIHJ4PSI4IiBmaWxsPSIjM2IxZjZlIiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDgyIiB5PSIzNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkOGI0ZmUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIj5MTE0gQVBJPC90ZXh0PgogIDx0ZXh0IHg9IjQ4MiIgeT0iMzc4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZTlkNWZmIiBmb250LXNpemU9IjgiPkNsYXVkZSAvIE9wZW5BSSAvIEJlZHJvY2s8L3RleHQ+CiAgPHRleHQgeD0iNDgyIiB5PSIzOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNlOWQ1ZmYiIGZvbnQtc2l6ZT0iOCI+c2hhcmVkIGJ5IGFsbCB3b3JrZXJzPC90ZXh0PgoKICA8IS0tIFRvb2wgU2VydmljZXMgLS0+CiAgPHJlY3QgeD0iNjAwIiB5PSIzNDAiIHdpZHRoPSIxODUiIGhlaWdodD0iNjAiIHJ4PSI4IiBmaWxsPSIjMWMyZDQwIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjkyIiB5PSIzNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmNTllMGIiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIj5Ub29sIFNlcnZpY2VzPC90ZXh0PgogIDx0ZXh0IHg9IjY5MiIgeT0iMzc4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjgiPldlYiBTZWFyY2gg4oCiIERCIOKAoiBBUElzPC90ZXh0PgogIDx0ZXh0IHg9IjY5MiIgeT0iMzkyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjgiPmNvZGUgZXhlYyDigKIgZmlsZSBvcHM8L3RleHQ+CgogIDwhLS0gQXV0b3NjYWxlciBsYWJlbCAtLT4KICA8cmVjdCB4PSI2MCIgeT0iNDE1IiB3aWR0aD0iNzIwIiBoZWlnaHQ9IjQ1IiByeD0iNiIgZmlsbD0iIzFlMjkzYiIvPgogIDx0ZXh0IHg9IjQxMCIgeT0iNDM0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTRhM2I4IiBmb250LXNpemU9IjgiIGZvbnQtd2VpZ2h0PSJib2xkIj5BdXRvc2NhbGVyIChLdWJlcm5ldGVzIEhQQSAvIEVDUyAvIENsb3VkIFJ1bik8L3RleHQ+CiAgPHRleHQgeD0iNDEwIiB5PSI0NTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM2NDc0OGIiIGZvbnQtc2l6ZT0iOCI+c2NhbGVzIFdvcmtlciByZXBsaWNhcyBiYXNlZCBvbiBxdWV1ZSBkZXB0aCwgQ1BVLCBvciBjdXN0b20gbWV0cmljcyAg4oCiICBzdGF0ZWxlc3Mgd29ya2VycyA9IHNhZmUgdG8gYWRkL3JlbW92ZSBhdCBhbnkgdGltZTwvdGV4dD4KCiAgPCEtLSBBcnJvd3MgZnJvbSB3b3JrZXJzIHRvIExMTSAtLT4KICA8bGluZSB4MT0iNDQ1IiB5MT0iMjk4IiB4Mj0iNDgyIiB5Mj0iMzM4IiBzdHJva2U9IiNhNzhiZmEiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iNCwyIiBtYXJrZXItZW5kPSJ1cmwoI2FycjIpIi8+CgogIDxkZWZzPgogICAgPG1hcmtlciBpZD0iYXJyIiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiByZWZYPSI1IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDcsMyB6IiBmaWxsPSIjNjQ3NDhiIi8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycjIiIG1hcmtlcldpZHRoPSI3IiBtYXJrZXJIZWlnaHQ9IjciIHJlZlg9IjUiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMNywzIHoiIGZpbGw9IiNhNzhiZmEiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+Cg==",
+          "alt": "Horizontal scaling architecture: client requests flow through a load balancer into a task queue, which feeds a horizontally scaled pool of stateless agent workers that share a memory/state store, LLM API, and tool services. An autoscaler adjusts worker count based on queue depth."
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Client requests enter through an API gateway or load balancer that enforces authentication and rate limits. The gateway enqueues a task message containing the session ID, task parameters, and any initial context. Worker replicas poll the queue using long-polling (blocking for up to 20 seconds) to minimize CPU waste on empty polls. Each worker checks out one or more tasks atomically, runs the agent loop, and periodically checkpoints progress to the shared state store so the task can be resumed if the worker is interrupted."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The autoscaler (Kubernetes HPA, AWS ECS Service Auto Scaling, or Google Cloud Run) monitors queue depth or a derived metric and adjusts the desired replica count. Workers are stateless enough that any replica can be terminated at any time — the only cost of termination is re-delivery of any in-progress but unacknowledged tasks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use It"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Horizontal scaling pays off when agent run volume consistently saturates a single worker process, when workload is bursty and vertical scaling would require permanent over-provisioning, or when availability requirements exceed what a single process can provide. Concrete triggers:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Queue depth is growing faster than a single worker can drain it during peak load."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "P95 agent run latency climbs during load spikes because tasks wait in queue longer than they take to execute."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Availability SLA requires that a single-process crash cannot cause downtime."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Agent tasks are user-facing (research, code generation, customer support) and latency is visible to end-users."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Do not reach for horizontal scaling prematurely. If a single async worker process can sustain the required throughput at acceptable latency, the extra operational complexity of a distributed fleet is not warranted. Start with a well-tuned async single-process deployment, instrument queue depth and latency, and scale out when the metrics demand it."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Horizontal scaling is also the wrong tool when the bottleneck is the LLM API rate limit rather than worker capacity. Adding more workers in that situation simply causes more 429 errors. The fix is raising the API rate limit, implementing adaptive throttling, or distributing traffic across multiple API keys."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Make workers stateless: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "move all per-session state (conversation history, tool results, intermediate outputs) out of process memory into Redis or a database. Key everything by session ID, which is passed in the queue message."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Choose a queue: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Redis Streams and LPOP/BRPOP, Amazon SQS, RabbitMQ, and Google Pub/Sub all support competing consumers with visibility timeouts. Pick one already in your infrastructure."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Write an async worker loop: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "use asyncio to run multiple agent runs concurrently within each process. A single Python process with 10–50 concurrent tasks amortizes queue overhead well."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement graceful shutdown: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "catch SIGTERM, stop accepting new tasks, let in-flight tasks complete (or checkpoint them), then exit. This prevents data loss on rolling deploys."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Configure an autoscaler: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "expose queue depth as a custom metric (e.g., via CloudWatch, Prometheus, or Datadog) and configure the autoscaler to target a queue-depth-per-replica ratio (e.g., keep fewer than 50 messages per worker)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set visibility timeouts conservatively: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "the visibility timeout must exceed the longest expected agent run duration. If agent runs can take up to 10 minutes, set a 15-minute timeout and extend it heartbeat-style from the worker every 60 seconds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Add distributed tracing: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "propagate a trace ID from the original request into the queue message. Workers initialize their tracing span as a child of that trace so logs from all workers for one agent run are correlated."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement dead-letter queues: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "tasks that fail repeatedly (e.g., after 3 retries) move to a dead-letter queue for human inspection rather than cycling forever and consuming worker capacity."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Simple: Async Worker with Redis Queue"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nimport json\nimport redis.asyncio as aioredis\nimport anthropic\n\nclient = anthropic.Anthropic()\n\nasync def run_agent(session_id: str, user_message: str, redis: aioredis.Redis) -> str:\n    \"\"\"Execute one agent turn and persist the result.\"\"\"\n    # Load history from Redis (shared state — any worker can continue this session)\n    raw = await redis.get(f\"session:{session_id}:history\")\n    history = json.loads(raw) if raw else []\n\n    history.append({\"role\": \"user\", \"content\": user_message})\n\n    response = client.messages.create(\n        model=\"claude-sonnet-4-5\",\n        max_tokens=1024,\n        system=\"You are a helpful research assistant.\",\n        messages=history,\n    )\n    assistant_text = response.content[0].text\n    history.append({\"role\": \"assistant\", \"content\": assistant_text})\n\n    # Write updated history back — the next turn can run on any worker\n    await redis.set(\n        f\"session:{session_id}:history\",\n        json.dumps(history),\n        ex=3600,  # expire after 1 hour of inactivity\n    )\n    return assistant_text\n\nasync def worker_loop(worker_id: int, concurrency: int = 10):\n    \"\"\"Poll Redis for tasks and execute up to `concurrency` runs in parallel.\"\"\"\n    redis = await aioredis.from_url(\"redis://localhost:6379\")\n    semaphore = asyncio.Semaphore(concurrency)\n    print(f\"Worker {worker_id} started, concurrency={concurrency}\")\n\n    while True:\n        # BLPOP blocks up to 5 s waiting for a new message\n        item = await redis.blpop(\"agent:task:queue\", timeout=5)\n        if item is None:\n            continue\n        _, raw_task = item\n        task = json.loads(raw_task)\n\n        async def handle(t):\n            async with semaphore:\n                result = await run_agent(t[\"session_id\"], t[\"message\"], redis)\n                # Write result for the API caller to pick up\n                await redis.set(f\"session:{t['session_id']}:result:{t['task_id']}\", result, ex=300)\n\n        asyncio.create_task(handle(task))\n\nif __name__ == \"__main__\":\n    asyncio.run(worker_loop(worker_id=1))\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Production: Worker with Graceful Shutdown and Heartbeating"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import asyncio\nimport json\nimport signal\nimport time\nimport boto3\nimport anthropic\n\nclient = anthropic.Anthropic()\nsqs = boto3.client(\"sqs\", region_name=\"us-east-1\")\nQUEUE_URL = \"https://sqs.us-east-1.amazonaws.com/123456789/agent-tasks\"\n\nshutdown_event = asyncio.Event()\n\ndef handle_sigterm(*_):\n    print(\"SIGTERM received — draining in-flight tasks...\")\n    shutdown_event.set()\n\nsignal.signal(signal.SIGTERM, handle_sigterm)\nsignal.signal(signal.SIGINT, handle_sigterm)\n\nasync def heartbeat(receipt_handle: str, interval: int = 60, timeout: int = 300):\n    \"\"\"Extend SQS visibility timeout every `interval` seconds to keep the message\n    invisible while the worker is still processing it.\"\"\"\n    while not shutdown_event.is_set():\n        await asyncio.sleep(interval)\n        try:\n            sqs.change_message_visibility(\n                QueueUrl=QUEUE_URL,\n                ReceiptHandle=receipt_handle,\n                VisibilityTimeout=timeout,\n            )\n        except Exception as e:\n            print(f\"Heartbeat failed: {e}\")\n\nasync def process_task(message: dict) -> None:\n    body = json.loads(message[\"Body\"])\n    session_id = body[\"session_id\"]\n    user_message = body[\"message\"]\n    receipt_handle = message[\"ReceiptHandle\"]\n\n    # Start heartbeating so SQS does not re-deliver while we work\n    hb_task = asyncio.create_task(heartbeat(receipt_handle))\n    try:\n        response = client.messages.create(\n            model=\"claude-sonnet-4-5\",\n            max_tokens=2048,\n            messages=[{\"role\": \"user\", \"content\": user_message}],\n        )\n        result = response.content[0].text\n        # Persist result (omitted for brevity — write to DB or Redis)\n        print(f\"[{session_id}] Done: {result[:80]}...\")\n        # Only delete after successful completion\n        sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt_handle)\n    except Exception as e:\n        print(f\"[{session_id}] Error: {e}\")\n        # Do NOT delete — SQS will redeliver after visibility timeout\n    finally:\n        hb_task.cancel()\n\nasync def worker_loop(concurrency: int = 20):\n    semaphore = asyncio.Semaphore(concurrency)\n    in_flight: set[asyncio.Task] = set()\n\n    while not shutdown_event.is_set():\n        msgs = sqs.receive_message(\n            QueueUrl=QUEUE_URL,\n            MaxNumberOfMessages=min(10, concurrency),\n            WaitTimeSeconds=20,  # long-poll\n        ).get(\"Messages\", [])\n\n        for msg in msgs:\n            async def run(m=msg):\n                async with semaphore:\n                    await process_task(m)\n            t = asyncio.create_task(run())\n            in_flight.add(t)\n            t.add_done_callback(in_flight.discard)\n\n    # Drain: wait for all in-flight tasks\n    if in_flight:\n        print(f\"Waiting for {len(in_flight)} in-flight tasks to complete...\")\n        await asyncio.gather(*in_flight, return_exceptions=True)\n    print(\"Worker shut down cleanly.\")\n\nif __name__ == \"__main__\":\n    asyncio.run(worker_loop())\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A legal-tech startup offers a contract review product. When a user uploads a contract, the frontend sends a task to an SQS queue containing the S3 URI of the document and the review criteria (jurisdiction, clause types to flag). The agent worker downloads the document, splits it into sections, issues LLM calls to evaluate each clause, and writes structured findings to a Postgres table keyed by document ID. The user's UI polls a read endpoint that queries that table."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "During business hours, the company processes 200–500 contracts per hour. Each contract requires 20–40 LLM calls averaging 8 seconds each, so a single async worker can process about 3–5 contracts per minute. Handling peak load requires 30–50 worker replicas. Off-hours, the autoscaler scales the ECS service to 2 replicas, cutting compute cost by 90 %."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Enqueue a contract review task (called by the web API when a user uploads a document)\nimport boto3, json, uuid\n\nsqs = boto3.client(\"sqs\", region_name=\"us-east-1\")\nQUEUE_URL = \"https://sqs.us-east-1.amazonaws.com/.../contract-review\"\n\ndef enqueue_review(document_s3_uri: str, user_id: str, criteria: list[str]) -> str:\n    task_id = str(uuid.uuid4())\n    sqs.send_message(\n        QueueUrl=QUEUE_URL,\n        MessageBody=json.dumps({\n            \"task_id\": task_id,\n            \"user_id\": user_id,\n            \"document_uri\": document_s3_uri,\n            \"criteria\": criteria,\n        }),\n        MessageGroupId=user_id,         # FIFO queue: one task per user at a time\n        MessageDeduplicationId=task_id,\n    )\n    return task_id\n\n# Worker excerpt: process one contract\nimport anthropic, boto3\n\ns3 = boto3.client(\"s3\")\nclient = anthropic.Anthropic()\n\ndef review_contract(document_uri: str, criteria: list[str]) -> list[dict]:\n    bucket, key = document_uri.replace(\"s3://\", \"\").split(\"/\", 1)\n    text = s3.get_object(Bucket=bucket, Key=key)[\"Body\"].read().decode()\n\n    # Split into ~2000-token chunks\n    chunks = [text[i:i+6000] for i in range(0, len(text), 6000)]\n    findings = []\n    for i, chunk in enumerate(chunks):\n        response = client.messages.create(\n            model=\"claude-sonnet-4-5\",\n            max_tokens=1024,\n            system=\"You are a contract analyst. Return JSON: [{clause, issue, severity}]\",\n            messages=[{\"role\": \"user\", \"content\": f\"Review criteria: {criteria}\\n\\n{chunk}\"}],\n        )\n        import json as _json\n        try:\n            chunk_findings = _json.loads(response.content[0].text)\n            findings.extend(chunk_findings)\n        except Exception:\n            pass  # malformed JSON from LLM — skip chunk\n    return findings\n"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Storing conversation state in process memory: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "this breaks silently when the next turn is handled by a different worker. The symptom is the agent seeming to \"forget\" earlier messages on every other request. Always externalize state to Redis or a database."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not handling SIGTERM: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "Kubernetes sends SIGTERM before killing a pod. Without a signal handler, in-flight agent runs are killed mid-execution, leaving partial results and un-acknowledged queue messages that get redelivered and re-processed. Implement graceful shutdown."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Setting visibility timeout equal to expected run time: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "if a run takes exactly as long as the timeout, any slight delay causes a duplicate delivery. Set the timeout to at least 2x the expected run time and extend it via heartbeat."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scaling on CPU rather than queue depth: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "LLM-bound workers spend most time waiting on network I/O; CPU stays low even when the worker is saturated. Scale on queue depth or tasks-in-flight, not CPU."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Non-idempotent agent side effects: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "if a task can be delivered twice (at-least-once delivery), an agent that sends an email or charges a card on each delivery causes double actions. Guard external side effects with idempotency keys."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Missing dead-letter queues: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "a poisoned message that always causes a worker crash cycles back into the main queue indefinitely, consuming capacity. Configure a dead-letter queue with a max receive count of 3–5."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not propagating trace context: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "when a single agent run spans multiple LLM calls on multiple workers, logs without a correlation ID are impossible to follow. Embed a trace ID in every queue message and initialize spans as children."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Design for idempotency first: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "make each agent task safe to run twice with the same outcome. Use task IDs as idempotency keys in the state store and in any external APIs that support them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tune concurrency per worker empirically: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "start at 10 concurrent tasks per process, load-test, and measure LLM API latency. Increase until latency degrades, then back off 20 %. A typical sweet spot is 20–40 for LLM-heavy agents."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Separate queue per priority: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "route interactive user requests to a high-priority queue and batch background tasks to a low-priority queue. Run dedicated worker replicas for each, preventing batch jobs from starving interactive users."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement circuit breakers for downstream tools: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "if a tool (web search, code executor) is degraded, workers should fail fast and move on rather than holding up capacity for slow calls. Use a circuit breaker library or implement a simple failure counter with timeout."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor queue-depth-to-worker ratio continuously: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "alert when the ratio exceeds your SLA threshold. An autoscaler reacts; an alert tells you whether the autoscaler reached its instance limit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Keep worker images small and fast to start: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "cold-start time limits autoscaling responsiveness. Preload model client libraries at image build time; avoid heavy initialization at runtime."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test chaos scenarios: ",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": "periodically kill a random worker pod in a staging environment to verify graceful shutdown, state recovery, and queue redelivery all work correctly under load."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The theoretical throughput ceiling of a horizontally scaled agent fleet is:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{throughput} = N_{workers} \\times C_{concurrency} \\times \\frac{1}{t_{avg\\_run}}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "where "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "N_{workers}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the number of worker replicas, "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "C_{concurrency}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the number of concurrent tasks per worker, and "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "t_{avg\\_run}"
+            }
+          },
+          {
+            "type": "text",
+            "text": " is the average agent run duration in seconds. For 20 workers, 20 concurrent tasks each, and a 10-second average run time: "
+          },
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "20 \\times 20 \\times \\frac{1}{10} = 40"
+            }
+          },
+          {
+            "type": "text",
+            "text": " agent runs per second = 144,000 per hour. The actual ceiling is limited by whichever bottleneck appears first: the LLM API rate limit, the shared state store throughput, or the queue broker."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue depth is the primary scaling signal. A well-tuned autoscaler targets fewer than a fixed number of messages per worker (e.g., 20). When depth rises above the threshold, it adds replicas; when it falls below, it removes them. Combining scale-up aggressiveness (add 50 % of replicas at once on rapid growth) with scale-down caution (remove 10 % at a time, with a 5-minute cooldown) prevents oscillation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The shared state store is frequently the latency bottleneck at scale. A Redis cluster with read replicas handles hundreds of thousands of operations per second, but naive designs that serialize the entire conversation history on every agent step hit the serialization cost. Shard history by session ID and keep individual writes small (append a single message, not the entire history) to keep Redis latency under 1 ms."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "LLM token-per-minute limits are the most common scaling wall. Anthropic, OpenAI, and AWS Bedrock all publish per-key limits. Strategies to work around them include: distributing traffic across multiple API keys (with appropriate account separation), requesting higher limits through the provider's quota increase form, batching parallel tool calls to reduce total call count, and implementing exponential backoff with jitter on 429 responses so retries spread out rather than colliding."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tool / Platform"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Role"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Notes"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Amazon SQS",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Task queue"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Managed, at-least-once, long-poll. FIFO variant for ordering/dedup."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Redis Streams",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Queue + state"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sub-millisecond, consumer groups, also used for shared session state."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RabbitMQ",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Task queue"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AMQP, rich routing (exchanges), acknowledgement, dead-letter support."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Celery",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Worker framework (Python)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Abstracts Redis/RabbitMQ; manages worker pool, retries, and scheduling."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Kubernetes HPA",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Autoscaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Scales Deployment replicas on CPU, memory, or custom metrics (KEDA for queue depth)."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "KEDA",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Event-driven autoscaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Scales to zero; direct SQS / Redis queue depth scaling signal."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWS ECS Auto Scaling",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Autoscaling (managed)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No cluster management; scales ECS tasks on SQS depth or CloudWatch metrics."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Google Cloud Run",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Serverless containers"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Auto-scales to zero; integrates with Pub/Sub push for queue-triggered runs."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Temporal / Celery + Redis",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Durable worker frameworks"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Add retry, checkpointing, and workflow state on top of raw queue workers."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "How it scales"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "State model"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Drawback"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Horizontal scaling (this topic)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Add identical worker replicas"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "External store (Redis/DB)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High-concurrency, bursty workloads"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Requires external state infrastructure"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Vertical scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bigger instance (more RAM/CPU)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "In-process"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Small fleets, simple state"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hard ceiling; SPOF; expensive at high end"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Async within one process"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "More coroutines per process"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "In-process"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "I/O-bound workloads, low concurrency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single SPOF; GIL limits CPU-bound tasks"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Serverless functions"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "One function invocation per task"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "External (must serialize all context)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Short-lived tasks, spiky demand"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cold-start penalty; timeout limits; cost at high volume"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Durable execution (Temporal)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Horizontal worker pool + server"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Server-managed event log"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Long-running, fault-tolerant workflows"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Additional server to operate; steeper learning curve"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & Reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Horizontally scaled agent fleets increase the attack surface in several ways. Each worker has credentials for the LLM API, the state store, and any tools the agent can invoke. A compromised worker can drain the API rate limit, corrupt shared state, or exfiltrate data from the state store. Mitigate this by granting each worker minimum necessary permissions: read/write only to its own session namespace in Redis, read-only access to reference data, and no direct database write access outside its designated table."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue messages are the attack vector between the API gateway and the workers. If an attacker can inject a malicious queue message, they can cause a worker to execute arbitrary tool calls. Validate and sanitize all input at the API gateway before enqueuing. Sign queue messages using HMAC or rely on the queue's IAM-level access control to prevent external injection."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reliability concerns at scale include partial fleet failures (some workers crash while others continue), queue stalls (the broker becomes unavailable), and state store degradation (Redis becomes a bottleneck or goes down). Use health checks and readiness probes on each worker so Kubernetes only routes work to healthy replicas. Configure the queue broker with multi-AZ replication. Use Redis Sentinel or Redis Cluster for the state store to avoid a single Redis instance as a SPOF."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Audit logging becomes essential at scale. Log every agent run start and finish (with session ID, task ID, worker ID, and duration) to a centralized logging system. When an incident occurs — a wave of failed runs, a runaway cost spike, a compliance question — the audit log is the first place to look. Structured JSON logs with a consistent schema allow filtering and aggregation without full-text search."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rotate LLM API keys on a schedule and store them in a secrets manager (AWS Secrets Manager, HashiCorp Vault). Workers should fetch the key at startup rather than baking it into the container image."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate-limit inbound requests at the API gateway to prevent a single user from monopolizing the worker fleet with a burst of tasks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement maximum run-time limits per task. An agent in an infinite loop will hold a queue slot and an async concurrency slot indefinitely. Cancel tasks that exceed a wall-clock timeout (e.g., 15 minutes) and move them to the dead-letter queue with a timeout reason code."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Horizontal scaling distributes agent runs across multiple stateless worker replicas that compete for tasks from a shared queue, enabling throughput to grow linearly with the number of workers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Statelessness is the prerequisite: all per-session state (conversation history, tool results, checkpoints) must live in an external store so any worker can handle any task."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scale on queue depth (or tasks-in-flight), not CPU: LLM-bound agents have low CPU utilization even when fully saturated; CPU-based autoscalers under-react."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The LLM API token-per-minute limit is frequently the real ceiling; adding workers beyond the point where 429 errors dominate does not improve throughput."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement graceful shutdown (catch SIGTERM, drain in-flight tasks) and heartbeating (extend queue visibility timeout) to avoid duplicate task execution and data loss during rolling deploys."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use dead-letter queues with a small max-receive-count (3–5) to prevent poisoned messages from cycling through the fleet indefinitely and consuming worker capacity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Security requires minimum-privilege credentials per worker, signed or access-controlled queue messages, secrets manager rotation, and per-task wall-clock timeouts to prevent runaway agent loops."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

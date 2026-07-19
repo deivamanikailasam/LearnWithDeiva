@@ -1,0 +1,1621 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "The Sequential Eval Bottleneck"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When an agentic AI system's CI pipeline scores eval cases one at a time—send case to LLM, wait for response, score, repeat—the total eval stage time grows linearly with dataset size. A dataset of 1,100 cases with an average of one second per API call takes roughly 18 minutes to complete serially. As the dataset expands to cover more behaviors, wall time increases proportionally. Engineers waiting 20+ minutes for feedback on a prompt change stop running evals locally and start relying on CI as the only evaluation mechanism, which slows iteration to a crawl."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallel eval pipeline design solves this by distributing cases across multiple independent workers that each make LLM API calls concurrently. The same 1,100 cases with 8 workers completes in roughly 2.5 minutes. The key insight is that individual eval cases are embarrassingly parallel: each case's scoring depends only on its own prompt and expected output, not on the results of other cases. This independence makes sharding and parallel execution both safe and straightforward."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why It Matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Developer feedback loops determine the speed of iteration. A 20-minute eval stage means engineers commit, wait, check results, iterate—a cycle measured in tens of minutes per change. A 3-minute parallel eval stage turns the same cycle into something closer to running a local test suite. Teams that optimize eval wall time ship higher-quality prompts faster because they can experiment more per hour."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Parallelism also enables a class of evaluation strategies that are infeasible serially: running the same dataset against multiple model variants or prompt versions in a single CI run to pick the best configuration. This matrix evaluation—fan out across (model, prompt) combinations, fan in to compare results—is a natural extension of the basic parallel eval pattern and requires only a configuration change in the CI matrix definition."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Dramatically reduced wall time — 8 parallel workers reduce a 20-minute serial eval to under 3 minutes, improving developer feedback loops by 6–8x."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model variant comparison — matrix strategies allow simultaneous evaluation of N model or prompt variants, producing a ranked comparison in the same wall-time budget as a single serial eval run."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No correctness impact — because eval cases are independent, parallel execution produces identical results to serial execution; no synchronization or ordering dependencies exist."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scalable to large datasets — teams can expand their eval dataset without proportionally increasing pipeline wait time, enabling comprehensive coverage without a speed penalty."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Flaky case isolation — when a case produces inconsistent results across workers (a sign of model non-determinism or ambiguous expected output), the merge step can flag it for investigation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Same API cost — parallelism reduces wall time, not token spend; running 8 workers simultaneously costs exactly the same in LLM tokens as running one worker sequentially. The spend is front-loaded rather than spread over time."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limit risk — 8 workers making concurrent API calls can hit provider rate limits; teams must configure retry-with-backoff logic and potentially request higher rate limit quotas."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Result merge complexity — collecting and deduplicating partial result files from N workers adds a merge step that must handle missing workers, partial failures, and case ID collisions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Infrastructure cost — spinning up 8 CI runner VMs instead of 1 has overhead in compute costs and in queue time if the CI pool is shared."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works: Fan-Out and Fan-In"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The parallel eval pattern has three phases. Fan-out: the controller job reads the full case list and partitions it into N roughly equal shards, one per worker. Each worker job receives its shard index and total shard count, loads its assigned subset of cases, scores them against the LLM, and writes a partial result file (e.g., results-0.json through results-7.json). Fan-in: a merge job collects all partial result files using CI artifact download, concatenates them, deduplicates by case ID (to handle retried workers), and computes aggregate metrics. Gate: the merged result feeds the standard promotion gate script."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Test sharding in pytest-xdist follows the same fan-out/fan-in logic but is managed by the framework rather than the CI YAML. The --numprocesses flag distributes test collection across N workers in a single machine; for larger scale, each CI matrix job runs one pytest-xdist worker. The combination—CI matrix for cross-machine sharding, pytest-xdist for intra-machine parallelism—provides two levels of scaling."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDYwIiB2aWV3Qm94PSIwIDAgODYwIDQ2MCI+CiAgPHJlY3Qgd2lkdGg9Ijg2MCIgaGVpZ2h0PSI0NjAiIGZpbGw9IiMwZjE3MmEiIHJ4PSIxMiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBhcmFsbGVsIEV2YWwgUGlwZWxpbmU6IEZhbi1PdXQgLyBGYW4tSW4gUGF0dGVybjwvdGV4dD4KCiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnciIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM0NzU1NjkiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJ3ZyIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzM0ZDM5OSIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcndiIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDgsMyB6IiBmaWxsPSIjMzhiZGY4Ii8+CiAgICA8L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFyd3kiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiNmNTllMGIiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KCiAgPCEtLSBFdmFsIEhhcm5lc3MgU3RhZ2UgKGxlZnQpIC0tPgogIDxyZWN0IHg9IjEwIiB5PSI1MCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI4MCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzMzNDE1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI4MCIgeT0iNzgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkV2YWwgSGFybmVzczwvdGV4dD4KICA8dGV4dCB4PSI4MCIgeT0iOTQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJtaWRkbGUiPjEsMTAwIGNhc2VzPC90ZXh0PgogIDx0ZXh0IHg9IjgwIiB5PSIxMTAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+c2hhcmQg4oaSIE4gd29ya2VyczwvdGV4dD4KCiAgPCEtLSBGYW4tb3V0IGFycm93cyAtLT4KICA8bGluZSB4MT0iMTUwIiB5MT0iNzAiIHgyPSIyMDAiIHkyPSI1NSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcndiKSIvPgogIDxsaW5lIHgxPSIxNTAiIHkxPSI4MCIgeDI9IjIwMCIgeTI9IjEzMCIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcndiKSIvPgogIDxsaW5lIHgxPSIxNTAiIHkxPSI5MCIgeDI9IjIwMCIgeTI9IjIwNSIgc3Ryb2tlPSIjMzhiZGY4IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcndiKSIvPgogIDxsaW5lIHgxPSIxNTAiIHkxPSIxMDAiIHgyPSIyMDAiIHkyPSIyODAiIHN0cm9rZT0iIzM4YmRmOCIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJ3YikiLz4KICA8dGV4dCB4PSIxNzMiIHk9IjQ4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiMzOGJkZjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkZBTi1PVVQ8L3RleHQ+CgogIDwhLS0gV29ya2VyIDEgLS0+CiAgPHJlY3QgeD0iMjAwIiB5PSIzNSIgd2lkdGg9IjEzNSIgaGVpZ2h0PSI2MCIgcng9IjYiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iIzFkNGVkOCIvPgogIDx0ZXh0IHg9IjI2NyIgeT0iNTciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2MGE1ZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPldvcmtlciAxPC90ZXh0PgogIDx0ZXh0IHg9IjI2NyIgeT0iNzEiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzkzYzVmZCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Y2FzZXMgMC0yNzQ8L3RleHQ+CiAgPHRleHQgeD0iMjY3IiB5PSI4NSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNjQ3NDhiIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5yZXN1bHRzLTAuanNvbjwvdGV4dD4KCiAgPCEtLSBXb3JrZXIgMiAtLT4KICA8cmVjdCB4PSIyMDAiIHk9IjExMCIgd2lkdGg9IjEzNSIgaGVpZ2h0PSI2MCIgcng9IjYiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iIzFkNGVkOCIvPgogIDx0ZXh0IHg9IjI2NyIgeT0iMTMyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjNjBhNWZhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Xb3JrZXIgMjwvdGV4dD4KICA8dGV4dCB4PSIyNjciIHk9IjE0NiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjOTNjNWZkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5jYXNlcyAyNzUtNTQ5PC90ZXh0PgogIDx0ZXh0IHg9IjI2NyIgeT0iMTYwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnJlc3VsdHMtMS5qc29uPC90ZXh0PgoKICA8IS0tIFdvcmtlciAzIC0tPgogIDxyZWN0IHg9IjIwMCIgeT0iMTg1IiB3aWR0aD0iMTM1IiBoZWlnaHQ9IjYwIiByeD0iNiIgZmlsbD0iIzFlM2E1ZiIgc3Ryb2tlPSIjMWQ0ZWQ4Ii8+CiAgPHRleHQgeD0iMjY3IiB5PSIyMDciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2MGE1ZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPldvcmtlciAzPC90ZXh0PgogIDx0ZXh0IHg9IjI2NyIgeT0iMjIxIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM5M2M1ZmQiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmNhc2VzIDU1MC04MjQ8L3RleHQ+CiAgPHRleHQgeD0iMjY3IiB5PSIyMzUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+cmVzdWx0cy0yLmpzb248L3RleHQ+CgogIDwhLS0gV29ya2VyIDQgLS0+CiAgPHJlY3QgeD0iMjAwIiB5PSIyNjAiIHdpZHRoPSIxMzUiIGhlaWdodD0iNjAiIHJ4PSI2IiBmaWxsPSIjMWUzYTVmIiBzdHJva2U9IiMxZDRlZDgiLz4KICA8dGV4dCB4PSIyNjciIHk9IjI4MiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzYwYTVmYSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+V29ya2VyIDQ8L3RleHQ+CiAgPHRleHQgeD0iMjY3IiB5PSIyOTYiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzkzYzVmZCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Y2FzZXMgODI1LTEwOTk8L3RleHQ+CiAgPHRleHQgeD0iMjY3IiB5PSIzMTAiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+cmVzdWx0cy0zLmpzb248L3RleHQ+CgogIDwhLS0gRmFuLWluIGFycm93cyAtLT4KICA8bGluZSB4MT0iMzM1IiB5MT0iNjUiIHgyPSIzODAiIHkyPSIxNzAiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJ3ZykiLz4KICA8bGluZSB4MT0iMzM1IiB5MT0iMTQwIiB4Mj0iMzgwIiB5Mj0iMTc1IiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2Fyd2cpIi8+CiAgPGxpbmUgeDE9IjMzNSIgeTE9IjIxNSIgeDI9IjM4MCIgeTI9IjE4MCIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcndnKSIvPgogIDxsaW5lIHgxPSIzMzUiIHkxPSIyOTAiIHgyPSIzODAiIHkyPSIxODUiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJ3ZykiLz4KICA8dGV4dCB4PSIzNTgiIHk9IjE0OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMzRkMzk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5GQU4tSU48L3RleHQ+CgogIDwhLS0gTWVyZ2UvQWdncmVnYXRlIC0tPgogIDxyZWN0IHg9IjM4MCIgeT0iMTM1IiB3aWR0aD0iMTM1IiBoZWlnaHQ9IjgwIiByeD0iOCIgZmlsbD0iIzA2NGUzYiIgc3Ryb2tlPSIjMDY1ZjQ2IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ0NyIgeT0iMTU4IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzRkMzk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5NZXJnZSBSZXN1bHRzPC90ZXh0PgogIDx0ZXh0IHg9IjQ0NyIgeT0iMTc0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiNhN2YzZDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiPmNvbmNhdCByZXN1bHRzLSouanNvbjwvdGV4dD4KICA8dGV4dCB4PSI0NDciIHk9IjE4OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjYTdmM2QwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5kZWR1cCBieSBjYXNlX2lkPC90ZXh0PgogIDx0ZXh0IHg9IjQ0NyIgeT0iMjAyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2ZWU3YjciIHRleHQtYW5jaG9yPSJtaWRkbGUiPmNvbXB1dGUgcGFzc19yYXRlPC90ZXh0PgoKICA8IS0tIEFycm93IHRvIEdhdGUgLS0+CiAgPGxpbmUgeDE9IjUxNSIgeTE9IjE3NSIgeDI9IjU1NSIgeTI9IjE3NSIgc3Ryb2tlPSIjMzRkMzk5IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcndnKSIvPgoKICA8IS0tIEdhdGUgLS0+CiAgPHJlY3QgeD0iNTU1IiB5PSIxMzUiIHdpZHRoPSIxMzUiIGhlaWdodD0iODAiIHJ4PSI4IiBmaWxsPSIjMjkyNTI0IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjIyIiB5PSIxNTgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNmNTllMGIiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlByb21vdGlvbiBHYXRlPC90ZXh0PgogIDx0ZXh0IHg9IjYyMiIgeT0iMTc0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiNmZGU2OGEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPnBhc3NfcmF0ZSA+PSA4OCU8L3RleHQ+CiAgPHRleHQgeD0iNjIyIiB5PSIxODgiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2ZkZTY4YSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+cmVncmVzc2lvbnMgPT0gMDwvdGV4dD4KICA8dGV4dCB4PSI2MjIiIHk9IjIwMiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMzRkMzk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5QQVNTIOKGkiBjb250aW51ZTwvdGV4dD4KCiAgPCEtLSBBcnJvdyB0byBkb3duc3RyZWFtIC0tPgogIDxsaW5lIHgxPSI2OTAiIHkxPSIxNzUiIHgyPSI3MzAiIHkyPSIxNzUiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJ3eSkiLz4KCiAgPCEtLSBJbnRlZ3JhdGlvbiAtLT4KICA8cmVjdCB4PSI3MzAiIHk9IjEzNSIgd2lkdGg9IjExNSIgaGVpZ2h0PSI4MCIgcng9IjgiIGZpbGw9IiMxZTI5M2IiIHN0cm9rZT0iIzMzNDE1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI3ODciIHk9IjE1OCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+SW50ZWdyYXRpb248L3RleHQ+CiAgPHRleHQgeD0iNzg3IiB5PSIxNzQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM5NGEzYjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlRlc3RzPC90ZXh0PgogIDx0ZXh0IHg9Ijc4NyIgeT0iMTkwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJtaWRkbGUiPm5leHQgc3RhZ2U8L3RleHQ+CiAgPHRleHQgeD0iNzg3IiB5PSIyMDQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzY0NzQ4YiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+cnVucyBvbmx5IGlmIFBBU1M8L3RleHQ+CgogIDwhLS0gVGltZSBjb21wYXJpc29uIGJhciBjaGFydCAtLT4KICA8dGV4dCB4PSI0MzAiIHk9IjM0NSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzk0YTNiOCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+V2FsbCBUaW1lOiBTZXJpYWwgdnMgUGFyYWxsZWwgKDEsMTAwIGNhc2VzLCAxcyBhdmcgcGVyIGNhc2UpPC90ZXh0PgoKICA8IS0tIFNlcmlhbCBiYXIgLS0+CiAgPHJlY3QgeD0iMTAiIHk9IjM2MCIgd2lkdGg9Ijg0MCIgaGVpZ2h0PSIyMCIgcng9IjMiIGZpbGw9IiNlZjQ0NDQiIGZpbGwtb3BhY2l0eT0iMC4zIi8+CiAgPHJlY3QgeD0iMTAiIHk9IjM2MCIgd2lkdGg9Ijg0MCIgaGVpZ2h0PSIyMCIgcng9IjMiIGZpbGw9IiNlZjQ0NDQiIGZpbGwtb3BhY2l0eT0iMC41Ii8+CiAgPHRleHQgeD0iNDMwIiB5PSIzNzQiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iI2ZjYTVhNSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+U2VyaWFsOiB+MTggbWluICgxLDEwMCBjYXNlcyDDlyAxcywgc2VxdWVudGlhbCk8L3RleHQ+CgogIDwhLS0gNCB3b3JrZXJzIGJhciAtLT4KICA8cmVjdCB4PSIxMCIgeT0iMzg4IiB3aWR0aD0iMjE0IiBoZWlnaHQ9IjIwIiByeD0iMyIgZmlsbD0iIzM0ZDM5OSIgZmlsbC1vcGFjaXR5PSIwLjUiLz4KICA8dGV4dCB4PSIxMDciIHk9IjQwMiIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjNmVlN2I3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj40IHdvcmtlcnM6IH41IG1pbjwvdGV4dD4KCiAgPCEtLSA4IHdvcmtlcnMgYmFyIC0tPgogIDxyZWN0IHg9IjEwIiB5PSI0MTAiIHdpZHRoPSIxMTIiIGhlaWdodD0iMjAiIHJ4PSIzIiBmaWxsPSIjMzhiZGY4IiBmaWxsLW9wYWNpdHk9IjAuNSIvPgogIDx0ZXh0IHg9IjE3NSIgeT0iNDI0IiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjkiIGZpbGw9IiM3ZGQzZmMiIHRleHQtYW5jaG9yPSJtaWRkbGUiPjggd29ya2VyczogfjIuNSBtaW4gKyBtZXJnZSBvdmVyaGVhZDwvdGV4dD4KCiAgPCEtLSBDb3N0IG5vdGUgLS0+CiAgPHRleHQgeD0iNDMwIiB5PSI0NTIiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM2NDc0OGIiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkFQSSBjb3N0IGlzIGlkZW50aWNhbCByZWdhcmRsZXNzIG9mIHBhcmFsbGVsaXNtIOKAlCBwYXJhbGxlbGlzbSByZWR1Y2VzIHdhbGwgdGltZSwgbm90IHRva2VuIHNwZW5kPC90ZXh0Pgo8L3N2Zz4K",
+          "alt": "Parallel eval pipeline fan-out fan-in: 1100 cases distributed across 4 workers, results merged and fed to promotion gate, wall time comparison between serial and parallel execution"
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental Model: A Checkout Queue"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Imagine 1,100 customers waiting to check out at a grocery store. A single checkout lane serves them one by one—18 minutes total. Opening 8 lanes simultaneously serves all 1,100 customers in roughly 2.5 minutes (plus the brief overhead of customers selecting lanes). Each lane operates independently; what one customer buys doesn't affect another's checkout. Parallel eval workers are those lanes—each independently processes its assigned cases, and the manager (merge job) tallies the totals at the end. The total grocery bill (token cost) is identical regardless of lane count."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to Use Parallelism"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use parallel eval when dataset size exceeds ~200 cases and serial wall time exceeds 5 minutes—the threshold at which developers meaningfully disengage from the feedback loop."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use matrix evaluation when comparing multiple model or prompt variants in a release decision; parallelism makes A/B eval feasible in CI rather than a separate offline process."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skip parallelism for datasets under 100 cases—the fan-out/fan-in overhead and worker startup time may exceed the parallelism benefit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skip parallelism when the LLM provider's rate limit is the bottleneck rather than wall time—parallelism concentrates API calls and will hit limits faster, requiring complex backoff logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to Implement: GitHub Actions Matrix"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Define a matrix strategy with shard_index values [0, 1, 2, 3] and pass TOTAL_SHARDS: 4 as an environment variable."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "In the eval script, use SHARD_INDEX and TOTAL_SHARDS to slice the case list: cases = all_cases[shard_index::total_shards] (round-robin distribution for balanced shards)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Upload each worker's results as a named CI artifact: eval-results-{shard_index}."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Add a merge job that needs: all worker jobs, downloads all named artifacts, and runs the merge-and-gate script."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Handle worker failures explicitly: if any worker job fails with a non-rate-limit error, the merge job should propagate that failure rather than compute a pass rate from incomplete results."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example: GitHub Actions Parallel Eval with Matrix"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# .github/workflows/parallel-eval.yml\nname: Parallel Eval\non: [push]\n\njobs:\n  eval-shard:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        shard_index: [0, 1, 2, 3]\n      fail-fast: false  # let all shards finish; merge job checks overall pass\n    env:\n      TOTAL_SHARDS: 4\n      SHARD_INDEX: ${{ matrix.shard_index }}\n      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n    steps:\n      - uses: actions/checkout@v4\n      - run: pip install -e .[eval]\n      - name: Fetch eval dataset\n        run: |\n          git clone --depth 1 --branch evals/v2.3.1 \\\n            https://x-token:${{ secrets.EVALS_TOKEN }}@github.com/org/evals.git evals\n      - name: Run shard\n        run: |\n          python scripts/run_evals.py \\\n            --dataset evals/cases/ \\\n            --shard-index $SHARD_INDEX \\\n            --total-shards $TOTAL_SHARDS \\\n            --output results/results-${{ matrix.shard_index }}.json\n      - uses: actions/upload-artifact@v4\n        if: always()  # upload even on failure for debugging\n        with:\n          name: eval-shard-${{ matrix.shard_index }}\n          path: results/\n\n  merge-and-gate:\n    needs: eval-shard\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: pip install -e .[eval]\n      - name: Download all shard results\n        uses: actions/download-artifact@v4\n        with:\n          pattern: eval-shard-*\n          path: results/\n          merge-multiple: true\n      - name: Merge results and check gate\n        run: |\n          python scripts/merge_eval_results.py \\\n            --results-dir results/ \\\n            --output results/merged.json\n          python scripts/check_promotion_gate.py \\\n            --results results/merged.json \\\n            --manifest evals/manifest.yaml\n      - uses: actions/upload-artifact@v4\n        with:\n          name: eval-results-merged\n          path: results/merged.json\n\n  integration:\n    needs: merge-and-gate\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: pytest tests/integration/ -q"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example: Eval Script with Sharding"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# scripts/run_evals.py\nimport json\nimport os\nimport argparse\nfrom pathlib import Path\nfrom openai import OpenAI\nfrom tenacity import retry, stop_after_attempt, wait_exponential\n\nclient = OpenAI()\n\n@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))\ndef score_case(case: dict, model: str) -> dict:\n    \"\"\"Score a single eval case against the model. Retries on rate limit.\"\"\"\n    response = client.chat.completions.create(\n        model=model,\n        messages=[\n            {\"role\": \"system\", \"content\": case[\"system_prompt\"]},\n            {\"role\": \"user\", \"content\": case[\"prompt\"]},\n        ],\n        temperature=0,  # deterministic for stable CI\n    )\n    output = response.choices[0].message.content\n    passed = evaluate_output(output, case[\"expected\"], case.get(\"judge_rubric\"))\n    return {\"id\": case[\"id\"], \"passed\": passed, \"output\": output}\n\ndef load_cases(dataset_dir: str) -> list[dict]:\n    cases = []\n    for path in Path(dataset_dir).glob(\"*.jsonl\"):\n        with open(path) as f:\n            for line in f:\n                cases.append(json.loads(line))\n    return cases\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--dataset\", required=True)\n    parser.add_argument(\"--shard-index\", type=int, default=0)\n    parser.add_argument(\"--total-shards\", type=int, default=1)\n    parser.add_argument(\"--model\", default=\"gpt-4o-2024-11-20\")\n    parser.add_argument(\"--output\", required=True)\n    args = parser.parse_args()\n\n    all_cases = load_cases(args.dataset)\n    # Round-robin sharding: worker i gets cases i, i+N, i+2N, ...\n    shard = all_cases[args.shard_index::args.total_shards]\n    print(f\"Shard {args.shard_index}/{args.total_shards}: {len(shard)} cases\")\n\n    results = [score_case(c, args.model) for c in shard]\n    passed = sum(1 for r in results if r[\"passed\"])\n\n    summary = {\n        \"shard_index\": args.shard_index,\n        \"total_cases\": len(shard),\n        \"passed\": passed,\n        \"results\": results,\n    }\n    Path(args.output).parent.mkdir(parents=True, exist_ok=True)\n    with open(args.output, \"w\") as f:\n        json.dump(summary, f, indent=2)\n    print(f\"Shard complete: {passed}/{len(shard)} passed\")\n\nif __name__ == \"__main__\":\n    main()"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example: Merge Script"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# scripts/merge_eval_results.py\nimport json\nimport argparse\nfrom pathlib import Path\n\ndef merge_results(results_dir: str, output: str):\n    shard_files = sorted(Path(results_dir).glob(\"results-*.json\"))\n    if not shard_files:\n        raise RuntimeError(f\"No shard result files found in {results_dir}\")\n\n    all_results = []\n    seen_ids = set()\n    shards_loaded = 0\n\n    for path in shard_files:\n        with open(path) as f:\n            shard = json.load(f)\n        for r in shard[\"results\"]:\n            if r[\"id\"] not in seen_ids:  # dedup on retry\n                all_results.append(r)\n                seen_ids.add(r[\"id\"])\n        shards_loaded += 1\n\n    total = len(all_results)\n    passed = sum(1 for r in all_results if r[\"passed\"])\n    pass_rate = passed / total if total > 0 else 0.0\n\n    merged = {\n        \"shards_loaded\": shards_loaded,\n        \"summary\": {\n            \"total_cases\": total,\n            \"passed\": passed,\n            \"pass_rate\": pass_rate,\n            \"regression_count\": 0,  # filled by gate script with baseline comparison\n        },\n        \"results\": all_results,\n    }\n    with open(output, \"w\") as f:\n        json.dump(merged, f, indent=2)\n    print(f\"Merged {shards_loaded} shards: {passed}/{total} ({pass_rate:.1%}) passed\")\n\nif __name__ == \"__main__\":\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--results-dir\", required=True)\n    parser.add_argument(\"--output\", required=True)\n    args = parser.parse_args()\n    merge_results(args.results_dir, args.output)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Matrix Strategy for Multi-Variant Evaluation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The CI matrix can be extended beyond shard sharding to run the same cases against multiple (model, prompt) configurations simultaneously. The include: key in GitHub Actions allows defining combinations such as (gpt-4o, prompt-v1.4.2) and (gpt-4o-mini, prompt-v1.4.2). The merge job collects results grouped by configuration and outputs a comparison table, enabling automated model upgrade decisions within CI. This is the eval-as-experimentation pattern: CI is not just a quality gate but a platform for controlled model evaluation."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Multi-variant matrix: compare two models on the same eval dataset\njobs:\n  eval-variants:\n    strategy:\n      matrix:\n        include:\n          - model: gpt-4o-2024-11-20\n            prompt_version: v1.4.2\n            shard_index: 0\n          - model: gpt-4o-2024-11-20\n            prompt_version: v1.4.2\n            shard_index: 1\n          - model: gpt-4o-mini-2024-07-18\n            prompt_version: v1.4.2\n            shard_index: 0\n          - model: gpt-4o-mini-2024-07-18\n            prompt_version: v1.4.2\n            shard_index: 1\n      fail-fast: false\n    steps:\n      - name: Run eval shard\n        run: |\n          python scripts/run_evals.py \\\n            --model ${{ matrix.model }} \\\n            --prompt-version ${{ matrix.prompt_version }} \\\n            --shard-index ${{ matrix.shard_index }} \\\n            --total-shards 2 \\\n            --output results/${{ matrix.model }}-${{ matrix.shard_index }}.json\n      - uses: actions/upload-artifact@v4\n        with:\n          name: eval-${{ matrix.model }}-shard-${{ matrix.shard_index }}\n          path: results/"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Flaky Eval Detection"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A flaky eval case produces inconsistent pass/fail results across runs even with identical model configuration. Flakiness typically signals one of three problems: the expected output is ambiguous (multiple correct answers exist), the model temperature is non-zero causing non-determinism, or the LLM provider serves different model snapshots under the same API identifier. To detect flaky cases, re-run suspected failing cases twice more and flag any case that flips between pass and fail as a flaky candidate. These cases should be reviewed and either have their expected output tightened or be moved to a separate 'soft' eval suite that does not block promotion."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-World Example: Scaling to 5,000 Cases"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A team's eval dataset grows from 300 cases to 5,000 over six months as they add coverage for new agent behaviors. Serial evaluation now takes 83 minutes—a non-starter for a CI feedback loop. They implement a 16-worker GitHub Actions matrix: each worker handles ~312 cases. Wall time drops to 6 minutes. Worker startup and merge overhead add about 90 seconds. Total eval stage time: under 8 minutes, competitive with the team's existing integration test stage."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "They also hit the OpenAI rate limit (10,000 RPM) with 16 workers making concurrent requests. The tenacity retry-with-backoff decorator in the eval script absorbs most rate limit errors, but they also add an API token budget check that fails the shard job if it detects more than 50 retries, signaling a systemic rate-limit issue rather than transient errors. They request a higher rate limit tier from OpenAI, which resolves the remaining issue."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost Control for Parallel LLM Eval Runs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache results by (case_id, model_id, prompt_hash) — re-running a PR that changes only non-prompt code should skip already-scored cases, cutting API spend by 90%+ on typical PRs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a smaller judge model for the majority of cases — if a case has a deterministic expected output (exact string match), skip the LLM judge entirely and score it with string comparison; reserve LLM judging for rubric-scored cases."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set a per-run token budget and abort the eval with a structured error if the budget is exceeded — prevents a misconfigured prompt from generating unexpectedly long outputs on every case."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run subset evals on PRs, full evals on merge to main — a fast 'smoke subset' of 100 representative cases on every PR keeps PR feedback under 2 minutes; the full eval runs only when merging."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not handling partial shard failure — if one of 8 workers fails and the merge job computes pass rate from only 7 shards, the result is systematically wrong; the merge job must verify that all N shard files exist before computing metrics."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Using fail-fast: true in the eval matrix — this cancels other workers as soon as one fails, preventing the collection of useful debugging data from completed shards; use fail-fast: false for eval jobs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No deduplication in the merge step — if a flaky worker is retried and both the original and retry artifacts are downloaded, cases from that shard appear twice, inflating total count and skewing pass rate."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Unbalanced shard sizes — if shards are divided by contiguous slices (cases 0-274, 275-549) instead of round-robin, one shard containing all the long-output cases will be the bottleneck; round-robin distribution (case i goes to shard i % N) is more balanced."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use round-robin sharding (case i to worker i % N) rather than contiguous ranges; it balances load better when case complexity varies across the dataset."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always set temperature=0 for CI eval runs to minimize non-determinism; accept slight quality differences versus best-temperature production behavior in exchange for reproducible CI results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement retry-with-exponential-backoff in the eval script (tenacity is a good default) to handle transient rate limit and network errors without failing entire shard jobs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Upload partial results even on failure (if: always()) so the merge job and developers can inspect which cases failed and why."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Profile shard wall times and rebalance the shard count if one worker consistently takes 2x longer than others—it suggests that shard contains disproportionately many complex cases."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The effective speedup from N parallel workers is bounded by Amdahl's Law applied to the merge step. If the merge and gate step takes 60 seconds and each shard takes 120 seconds, the theoretical maximum speedup with infinite workers is 3x, not infinite. In practice, the merge step is fast relative to the shard scoring time, so speedup scales nearly linearly up to the provider's concurrent request limit. Beyond that limit, parallelism adds workers that immediately start retrying rather than scoring, providing no further speedup. For teams hitting rate limits at 8 workers, the cost-optimal strategy is often to use a smaller judge model for scoring rather than adding more workers."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling and Ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "GitHub Actions matrix — the most common approach; strategy.matrix with shard indices provides a straightforward fan-out mechanism without additional tooling."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "pytest-xdist — the standard pytest plugin for intra-machine test parallelism; --numprocesses auto distributes test collection across available CPUs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ray — a Python distributed computing framework; ray.remote makes it straightforward to distribute eval case scoring across a Ray cluster for very large datasets (10,000+ cases) that exceed what a CI matrix can handle."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Braintrust — managed eval platform with built-in concurrency; handles sharding, fan-in, and rate-limit management internally, removing the need to write custom parallel eval orchestration."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with Alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sharding"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Wall Time (1k cases)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Complexity"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Serial eval"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~17 min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Minimal"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "GH Actions matrix (4 workers)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CI YAML matrix"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~5 min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "pytest-xdist (intra-machine)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "CPU cores"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~4 min (4-core VM)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Very low (one pytest flag)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Ray distributed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Ray tasks"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~1–2 min (cluster)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High (cluster management)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Braintrust managed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Automatic"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~2 min"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Minimal (managed service)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Reliability"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Each worker job receives the LLM API key via CI secrets—never embed it in the shard result file or log it; use masked environment variables."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate the case count in the merge step against the expected total from the dataset manifest; a discrepancy indicates a worker silently dropped cases without failing."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set a maximum job timeout on each shard job (e.g., 30 minutes); a hung shard that never uploads its artifact should not block the merge job indefinitely."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Eval cases are embarrassingly parallel—each case's scoring is independent, making fan-out/fan-in safe and correct without synchronization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Parallelism reduces wall time but not token cost; the same number of LLM API calls is made regardless of worker count."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use round-robin sharding for balanced worker load; contiguous slices can create stragglers if case complexity varies by position in the dataset."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The merge job must verify completeness—if any shard is missing, reject the merged result rather than computing a pass rate from a partial dataset."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set temperature=0 for CI evals to minimize non-determinism and distinguish true regressions from random variance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use fail-fast: false in the CI matrix so all shards complete and produce debugging artifacts even when one shard fails."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For very large datasets (10,000+ cases) or matrix evaluation across multiple model variants, consider Ray for distributed execution or a managed platform like Braintrust rather than scaling the CI matrix further."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

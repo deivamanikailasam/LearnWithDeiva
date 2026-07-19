@@ -1,0 +1,538 @@
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "What it is"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Tail sampling", "marks": [{"type": "bold"}]},
+          {"type": "text", "text": " is a trace-collection strategy where the decision to keep or discard a distributed trace is deferred until the entire trace — root span through every child span — has been received. Unlike head sampling, which randomly drops traces at ingestion time based solely on a probability roll before any work is done, tail sampling evaluates the completed trace against outcome-aware policies: did any span return an error? did the LLM call exceed a token budget? did a tool call time out? Only traces that match at least one \"interesting\" criterion are forwarded to long-term storage; the rest are discarded after a short buffer window."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Why it matters"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Agentic AI systems generate trace volumes that dwarf typical microservices. A single multi-step agent run might emit hundreds of spans across LLM calls, tool invocations, memory reads, and orchestration steps. At scale — thousands of concurrent agent sessions — the raw span throughput can reach tens of millions per minute. Storing everything is economically infeasible and operationally noisy. Head sampling solves the volume problem but destroys the most valuable signals: errors, anomalous latencies, and high-cost token usage are exactly the low-probability events that head sampling discards by definition. Tail sampling inverts this: it retains the traces that matter while discarding the routine successful runs that constitute the bulk of volume."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Benefits"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Preserves 100 % of error and failure traces regardless of overall sampling rate, giving complete incident visibility."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Dramatically reduces storage costs — routine successful traces that make up 95–99 % of volume can be safely discarded."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Enables latency-aware sampling: P99 outliers are retained even when the operation ultimately succeeds."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Supports domain-specific AI policies such as retaining any trace whose aggregate token cost exceeds a configured threshold."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Works well with probabilistic baseline sampling layered on top, so a representative fraction of healthy traces is also captured for statistical baselines."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Trade-offs and limitations"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Requires buffering all spans for a trace in memory until the trace is complete or a wait-window expires — increases collector memory pressure."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Long-running agent traces (hours) create very large buffers or force early decisions before the trace closes."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "All spans for a given trace must arrive at the same collector instance (or a shared buffer), which complicates horizontal scaling."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Policy configuration is a new operational surface — misconfigured rules can silently drop important traces."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Adds collector-layer latency before traces appear in the storage backend, which can slow incident triage by seconds to minutes."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "How it works"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Spans from agent processes are emitted to an OpenTelemetry Collector via OTLP. The collector holds incoming spans in a "},
+          {"type": "text", "text": "span buffer", "marks": [{"type": "bold"}]},
+          {"type": "text", "text": " keyed by trace ID. A "},
+          {"type": "text", "text": "trace assembler", "marks": [{"type": "bold"}]},
+          {"type": "text", "text": " reconstructs the full causal tree as spans arrive. After a configurable "},
+          {"type": "text", "text": "wait window", "marks": [{"type": "bold"}]},
+          {"type": "text", "text": " — typically 30 seconds for agent workflows — the policy evaluator inspects the assembled trace and applies rules in priority order. If any rule matches, the trace is forwarded to the storage backend. If no rule matches, the trace is dropped and its buffer memory is freed."}
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Policy evaluation is non-mutually-exclusive: a trace can satisfy multiple rules simultaneously (e.g., high latency AND high token cost). The evaluator performs an OR across all rules — any match triggers retention. Policies are defined as YAML or HCL in the collector configuration and can reference span attributes like "},
+          {"type": "text", "text": "http.status_code", "marks": [{"type": "code"}]},
+          {"type": "text", "text": ", "},
+          {"type": "text", "text": "llm.token_count", "marks": [{"type": "code"}]},
+          {"type": "text", "text": ", "},
+          {"type": "text", "text": "agent.tool_error", "marks": [{"type": "code"}]},
+          {"type": "text", "text": ", or "},
+          {"type": "text", "text": "span.duration", "marks": [{"type": "code"}]},
+          {"type": "text", "text": "."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Architecture"}]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NjAiIGhlaWdodD0iNDIwIiB2aWV3Qm94PSIwIDAgODYwIDQyMCIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjQyMCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+CiAgPHRleHQgeD0iNDMwIiB5PSIzNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2YxZjVmOSIgZm9udC1zaXplPSIxNSIgZm9udC13ZWlnaHQ9ImJvbGQiPlRhaWwgU2FtcGxpbmcgQXJjaGl0ZWN0dXJlIGZvciBIaWdoLVZvbHVtZSBBSSBUcmFjZXM8L3RleHQ+CgogIDwhLS0gQWdlbnQgUHJvZHVjZXJzIC0tPgogIDxyZWN0IHg9IjIwIiB5PSI1NSIgd2lkdGg9IjEzMCIgaGVpZ2h0PSIzMjAiIHJ4PSI4IiBmaWxsPSIjMWUzYTVmIiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iODUiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOTNjNWZkIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+QWdlbnQgQ2x1c3RlcjwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iODgiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMWMyZDQwIiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9Ijg1IiB5PSIxMDUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiZmRiZmUiIGZvbnQtc2l6ZT0iOCI+QWdlbnQgQSBzcGFuczwvdGV4dD4KICA8cmVjdCB4PSIzMiIgeT0iMTIwIiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjI2IiByeD0iNCIgZmlsbD0iIzFjMmQ0MCIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI4NSIgeT0iMTM3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYmZkYmZlIiBmb250LXNpemU9IjgiPkFnZW50IEIgc3BhbnM8L3RleHQ+CiAgPHJlY3QgeD0iMzIiIHk9IjE1MiIgd2lkdGg9IjEwNiIgaGVpZ2h0PSIyNiIgcng9IjQiIGZpbGw9IiMxYzJkNDAiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iODUiIHk9IjE2OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JmZGJmZSIgZm9udC1zaXplPSI4Ij5BZ2VudCBDIHNwYW5zPC90ZXh0PgogIDxyZWN0IHg9IjMyIiB5PSIxODQiIHdpZHRoPSIxMDYiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMWMyZDQwIiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9Ijg1IiB5PSIyMDEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNiZmRiZmUiIGZvbnQtc2l6ZT0iOCI+QWdlbnQgRCBzcGFuczwvdGV4dD4KICA8dGV4dCB4PSI4NSIgeT0iMjQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNjQ3NDhiIiBmb250LXNpemU9IjE4Ij4uLi48L3RleHQ+CiAgPHRleHQgeD0iODUiIHk9IjM3MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI4Ij5+bWlsbGlvbnMgc3BhbnMvbWluPC90ZXh0PgoKICA8IS0tIEFycm93IHRvIENvbGxlY3RvciAtLT4KICA8bGluZSB4MT0iMTUwIiB5MT0iMjE1IiB4Mj0iMjEwIiB5Mj0iMjE1IiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KCiAgPCEtLSBPVGVsIENvbGxlY3RvciAtLT4KICA8cmVjdCB4PSIyMTAiIHk9IjkwIiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjI1MCIgcng9IjgiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iIzhiNWNmNiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIyNzUiIHk9IjExMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2M0YjVmZCIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPk9UZWwgQ29sbGVjdG9yPC90ZXh0PgogIDxyZWN0IHg9IjIyMiIgeT0iMTIyIiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjI2IiByeD0iNCIgZmlsbD0iIzJkMWI2OSIgc3Ryb2tlPSIjOGI1Y2Y2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIyNzUiIHk9IjEzOSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2RkZDZmZSIgZm9udC1zaXplPSI4Ij5TcGFuIEJ1ZmZlcjwvdGV4dD4KICA8cmVjdCB4PSIyMjIiIHk9IjE1NCIgd2lkdGg9IjEwNiIgaGVpZ2h0PSIyNiIgcng9IjQiIGZpbGw9IiMyZDFiNjkiIHN0cm9rZT0iIzhiNWNmNiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMjc1IiB5PSIxNzEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkZGQ2ZmUiIGZvbnQtc2l6ZT0iOCI+VHJhY2UgQXNzZW1ibGVyPC90ZXh0PgogIDxyZWN0IHg9IjIyMiIgeT0iMTg2IiB3aWR0aD0iMTA2IiBoZWlnaHQ9IjI2IiByeD0iNCIgZmlsbD0iIzJkMWI2OSIgc3Ryb2tlPSIjOGI1Y2Y2IiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIyNzUiIHk9IjIwMyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2RkZDZmZSIgZm9udC1zaXplPSI4Ij5XYWl0IFdpbmRvdyAoMzBzKTwvdGV4dD4KICA8cmVjdCB4PSIyMjIiIHk9IjIxOCIgd2lkdGg9IjEwNiIgaGVpZ2h0PSIyNiIgcng9IjQiIGZpbGw9IiMyZDFiNjkiIHN0cm9rZT0iIzhiNWNmNiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMjc1IiB5PSIyMzUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkZGQ2ZmUiIGZvbnQtc2l6ZT0iOCI+UG9saWN5IEV2YWx1YXRvcjwvdGV4dD4KICA8dGV4dCB4PSIyNzUiIHk9IjMxMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzk0YTNiOCIgZm9udC1zaXplPSI3Ij5Bd2FpdHMgZnVsbCB0cmFjZSBiZWZvcmU8L3RleHQ+CiAgPHRleHQgeD0iMjc1IiB5PSIzMjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iNyI+c2FtcGxpbmcgZGVjaXNpb248L3RleHQ+CgogIDwhLS0gQXJyb3cgdG8gVGFpbCBTYW1wbGVyIC0tPgogIDxsaW5lIHgxPSIzNDAiIHkxPSIyMTUiIHgyPSI0MDAiIHkyPSIyMTUiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgoKICA8IS0tIFRhaWwgU2FtcGxlciAtLT4KICA8cmVjdCB4PSI0MDAiIHk9IjYwIiB3aWR0aD0iMTUwIiBoZWlnaHQ9IjMxMCIgcng9IjgiIGZpbGw9IiMxZTNhNWYiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI0NzUiIHk9IjgwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmNkMzRkIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iYm9sZCI+VGFpbCBTYW1wbGVyPC90ZXh0PgogIDxyZWN0IHg9IjQxMiIgeT0iOTIiIHdpZHRoPSIxMjYiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjNDUxYTAzIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ3NSIgeT0iMTA5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjgiPkVycm9yIFJhdGUgUnVsZTwvdGV4dD4KICA8dGV4dCB4PSI0NzUiIHk9IjEyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Q5NzcwNiIgZm9udC1zaXplPSI3Ij7ihpIgMTAwJSBpZiBlcnJvci9mYWlsPC90ZXh0PgogIDxyZWN0IHg9IjQxMiIgeT0iMTMwIiB3aWR0aD0iMTI2IiBoZWlnaHQ9IjI2IiByeD0iNCIgZmlsbD0iIzQ1MWEwMyIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI0NzUiIHk9IjE0NyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZkZTY4YSIgZm9udC1zaXplPSI4Ij5MYXRlbmN5IFJ1bGU8L3RleHQ+CiAgPHRleHQgeD0iNDc1IiB5PSIxNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkOTc3MDYiIGZvbnQtc2l6ZT0iNyI+4oaSIDEwMCUgaWYgUDk5ICZndDsgNXM8L3RleHQ+CiAgPHJlY3QgeD0iNDEyIiB5PSIxNjgiIHdpZHRoPSIxMjYiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjNDUxYTAzIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ3NSIgeT0iMTg1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjgiPkxMTSBDb3N0IFJ1bGU8L3RleHQ+CiAgPHRleHQgeD0iNDc1IiB5PSIxOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkOTc3MDYiIGZvbnQtc2l6ZT0iNyI+4oaSIDEwMCUgaWYgdG9rZW5zICZndDs1MGs8L3RleHQ+CiAgPHJlY3QgeD0iNDEyIiB5PSIyMDYiIHdpZHRoPSIxMjYiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjNDUxYTAzIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ3NSIgeT0iMjIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjgiPlRvb2wgRmFpbHVyZSBSdWxlPC90ZXh0PgogIDx0ZXh0IHg9IjQ3NSIgeT0iMjM0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZDk3NzA2IiBmb250LXNpemU9IjciPuKGkiAxMDAlIGlmIHRvb2xfZXJyb3I8L3RleHQ+CiAgPHJlY3QgeD0iNDEyIiB5PSIyNDQiIHdpZHRoPSIxMjYiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjNDUxYTAzIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQ3NSIgeT0iMjYxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmRlNjhhIiBmb250LXNpemU9IjgiPlByb2JhYmlsaXN0aWMgUnVsZTwvdGV4dD4KICA8dGV4dCB4PSI0NzUiIHk9IjI3MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Q5NzcwNiIgZm9udC1zaXplPSI3Ij7ihpIgMS01JSBiYXNlbGluZSBzYW1wbGU8L3RleHQ+CiAgPHRleHQgeD0iNDc1IiB5PSIzNTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5NGEzYjgiIGZvbnQtc2l6ZT0iNyI+RGVjaXNpb246IEtFRVAgLyBEUk9QPC90ZXh0PgoKICA8IS0tIEFycm93cyBmcm9tIFRhaWwgU2FtcGxlciAtLT4KICA8bGluZSB4MT0iNTUwIiB5MT0iMTcwIiB4Mj0iNjIwIiB5Mj0iMTMwIiBzdHJva2U9IiMyMmM1NWUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycjIpIi8+CiAgPGxpbmUgeDE9IjU1MCIgeTE9IjI3MCIgeDI9IjYyMCIgeTI9IjMxMCIgc3Ryb2tlPSIjZWY0NDQ0IiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIzKSIvPgoKICA8IS0tIFN0b3JhZ2UgLS0+CiAgPHJlY3QgeD0iNjIwIiB5PSI4MCIgd2lkdGg9IjEzMCIgaGVpZ2h0PSI4MCIgcng9IjgiIGZpbGw9IiMxNDUzMmQiIHN0cm9rZT0iIzIyYzU1ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI2ODUiIHk9IjEwNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg2ZWZhYyIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiPkJhY2tlbmQgU3RvcmFnZTwvdGV4dD4KICA8dGV4dCB4PSI2ODUiIHk9IjEyMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2JiZjdkMCIgZm9udC1zaXplPSI4Ij5KYWVnZXIgLyBUZW1wbzwvdGV4dD4KICA8dGV4dCB4PSI2ODUiIHk9IjEzOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzg2ZWZhYyIgZm9udC1zaXplPSI3Ij5LRUVQIChzaWduaWZpY2FudCB0cmFjZXMpPC90ZXh0PgoKICA8IS0tIERyb3AgLS0+CiAgPHJlY3QgeD0iNjIwIiB5PSIyNzAiIHdpZHRoPSIxMzAiIGhlaWdodD0iNzAiIHJ4PSI4IiBmaWxsPSIjNDUwYTBhIiBzdHJva2U9IiNlZjQ0NDQiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjg1IiB5PSIyOTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNmY2E1YTUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSJib2xkIj5EaXNjYXJkPC90ZXh0PgogIDx0ZXh0IHg9IjY4NSIgeT0iMzE1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjg3MTcxIiBmb250LXNpemU9IjgiPkRST1AgKHJvdXRpbmUgdHJhY2VzKTwvdGV4dD4KICA8dGV4dCB4PSI2ODUiIHk9IjMzMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2VmNDQ0NCIgZm9udC1zaXplPSI3Ij5+OTUtOTklIHZvbHVtZTwvdGV4dD4KCiAgPCEtLSBMYWJlbHMgLS0+CiAgPHRleHQgeD0iMTMwIiB5PSIyODAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM2NDc0OGIiIGZvbnQtc2l6ZT0iOCI+ZW1pdCBzcGFuczwvdGV4dD4KICA8dGV4dCB4PSIzNDAiIHk9IjI1NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzY0NzQ4YiIgZm9udC1zaXplPSI4Ij5hc3NlbWJsZWQgdHJhY2VzPC90ZXh0PgogIDx0ZXh0IHg9IjU3NSIgeT0iMTQ1IiBmaWxsPSIjMjJjNTVlIiBmb250LXNpemU9IjgiPktFRVA8L3RleHQ+CiAgPHRleHQgeD0iNTc1IiB5PSIyOTUiIGZpbGw9IiNlZjQ0NDQiIGZvbnQtc2l6ZT0iOCI+RFJPUDwvdGV4dD4KCiAgPGRlZnM+CiAgICA8bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+CiAgICAgIDxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM2NDc0OGIiLz4KICAgIDwvbWFya2VyPgogICAgPG1hcmtlciBpZD0iYXJyMiIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNiIgcmVmWT0iMyIgb3JpZW50PSJhdXRvIj4KICAgICAgPHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzIyYzU1ZSIvPgogICAgPC9tYXJrZXI+CiAgICA8bWFya2VyIGlkPSJhcnIzIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPgogICAgICA8cGF0aCBkPSJNMCwwIEwwLDYgTDgsMyB6IiBmaWxsPSIjZWY0NDQ0Ii8+CiAgICA8L21hcmtlcj4KICA8L2RlZnM+Cjwvc3ZnPgo=",
+          "alt": "Tail sampling architecture diagram showing agent cluster, OTel Collector with span buffer, tail sampler with policy rules, and storage vs discard paths"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Spans flow from agent processes into an OTel Collector, which buffers and assembles them by trace ID. After the wait window, the tail sampler evaluates each completed trace against prioritized policy rules. Traces matching any rule — errors, high latency, high token cost, or tool failures — are forwarded to Jaeger/Tempo. The majority of routine traces are discarded, reducing storage by 95–99 %."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "When to use it"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [{"type": "text", "text": "Tail sampling is appropriate when:"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Agent trace volume exceeds what can be stored economically at 100 % retention."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Errors and anomalies are rare relative to overall volume but are the primary debugging targets."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The system has well-defined \"interesting\" conditions (errors, latency spikes, cost anomalies) that can be expressed as span attribute policies."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Most agent traces follow a narrow latency distribution with infrequent tail events — making head sampling wasteful of signal."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "How to implement"}]
+      },
+      {
+        "type": "orderedList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Instrument agents with OpenTelemetry SDK, emitting spans with domain-specific attributes (token count, tool name, iteration number)."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Deploy the OTel Collector with the ", "marks": []}, {"type": "text", "text": "tail_sampling", "marks": [{"type": "code"}]}, {"type": "text", "text": " processor enabled. Set the wait window to cover the P95 trace duration for your agent workflows."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Define sampling policies in order of priority: error policy first, then latency, then cost, then probabilistic baseline."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use a load balancer exporter upstream to route all spans for a given trace ID to the same collector instance, ensuring complete trace assembly."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Monitor collector memory usage and buffer size metrics. Tune the wait window and buffer limits to stay within memory budget."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Export accepted traces to Tempo or Jaeger; validate that error rates in the backend match known agent error rates as a policy-correctness check."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Examples"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "yaml"},
+        "content": [{"type": "text", "text": "# OTel Collector config: tail_sampling processor\nprocessors:\n  tail_sampling:\n    decision_wait: 30s          # wait window for trace completion\n    num_traces: 500000          # max traces held in memory\n    expected_new_traces_per_sec: 5000\n    policies:\n      - name: errors-policy\n        type: status_code\n        status_code: {status_codes: [ERROR]}\n\n      - name: high-latency-policy\n        type: latency\n        latency: {threshold_ms: 5000}\n\n      - name: llm-high-token-cost\n        type: string_attribute\n        string_attribute:\n          key: llm.token_count_total\n          values: []\n          enabled_regex_matching: true\n          invert_match: false\n        # Note: use numeric_attribute for real deployments\n\n      - name: tool-failure-policy\n        type: boolean_attribute\n        boolean_attribute:\n          key: agent.tool_error\n          value: true\n\n      - name: baseline-probabilistic\n        type: probabilistic\n        probabilistic: {sampling_percentage: 2}\n\nservice:\n  pipelines:\n    traces:\n      receivers: [otlp]\n      processors: [tail_sampling]\n      exporters: [tempo]\n"}]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [{"type": "text", "text": "# Agent instrumentation: emit domain-specific span attributes\nfrom opentelemetry import trace\nfrom opentelemetry.sdk.trace import TracerProvider\nfrom opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter\nfrom opentelemetry.sdk.trace.export import BatchSpanProcessor\n\nprovider = TracerProvider()\nprovider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))\ntrace.set_tracer_provider(provider)\ntracer = trace.get_tracer(\"agent.service\")\n\ndef run_agent_step(prompt: str, tools: list) -> str:\n    with tracer.start_as_current_span(\"agent.step\") as span:\n        span.set_attribute(\"agent.iteration\", 1)\n        try:\n            result = call_llm(prompt)\n            span.set_attribute(\"llm.token_count_total\", result.total_tokens)\n            span.set_attribute(\"llm.model\", result.model)\n        except Exception as e:\n            span.set_attribute(\"agent.tool_error\", True)\n            span.record_exception(e)\n            span.set_status(trace.StatusCode.ERROR, str(e))\n            raise\n        return result.text\n"}]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Real-world example"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "A customer support agent platform processes 50,000 agent sessions per hour. Each session emits an average of 120 spans across LLM calls, CRM lookups, and escalation tool invocations. At 100 % retention that is 6 million spans per hour, filling roughly 18 GB of Tempo storage per day."}
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "After configuring tail sampling with a 30-second wait window, an error policy (100 % retention), a latency policy (P99 > 4 s), and a 2 % probabilistic baseline, the team retains approximately 8,000 traces per hour — the 150 error traces, the 350 slow traces, and a 2 % random sample of the rest. Storage drops to under 1 GB per day. Incident detection time falls because the noise floor is gone: every trace in storage is either an anomaly or a known-good sample."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Common mistakes"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Setting the wait window too short for long-running agent traces, causing incomplete traces to be evaluated and often dropped before errors are emitted."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Failing to route spans for the same trace ID to the same collector instance, resulting in split traces and incorrect policy evaluation."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Setting probabilistic baseline to 0 % — this makes it impossible to detect silent degradations in healthy-looking traces."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Not emitting the domain-specific attributes (token count, tool_error) that policies depend on, making policies match nothing or everything."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Over-allocating collector memory for the trace buffer and under-allocating for the exporter queue, causing backpressure at the storage backend."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Best practices"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Set the wait window to at least the P95 trace duration measured in production, with an additional 20 % safety margin."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Place error and status-code policies first in the policy list — they are cheapest to evaluate and capture the highest-value traces."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Always include a probabilistic baseline policy at 1–5 % to maintain representative samples of healthy traces for regression baselines."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Monitor collector metrics: ", "marks": []}, {"type": "text", "text": "otelcol_processor_tail_sampling_sampling_decision_latency", "marks": [{"type": "code"}]}, {"type": "text", "text": " and ", "marks": []}, {"type": "text", "text": "otelcol_processor_tail_sampling_sampling_decision_timer_latency", "marks": [{"type": "code"}]}, {"type": "text", "text": " reveal buffer pressure."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use the load-balancing exporter to hash trace IDs to collector instances deterministically — this is required for correct assembly."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Version-control your sampling policy configurations alongside application code; policy changes affect what becomes observable in production."}]}]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Performance and scalability"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "The primary scalability constraint is collector memory: each buffered trace consumes memory proportional to its span count and attribute payload. A trace with 150 spans at 2 KB each requires ~300 KB; with 500,000 traces buffered simultaneously the collector needs ~150 GB of RAM. Practical deployments limit the buffer to 50,000–200,000 traces and use multiple collector instances behind a trace-ID-aware load balancer. When the buffer fills, the "},
+          {"type": "text", "text": "num_traces", "marks": [{"type": "code"}]},
+          {"type": "text", "text": " limit evicts the oldest traces with a DROP decision, so tuning this value against your agent trace lifetime is critical."}
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Decision latency (the delay between trace completion and forwarding to storage) is dominated by the wait window. For real-time alerting, consider using a separate alerting pipeline that bypasses tail sampling for error spans, while tail sampling handles historical storage."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Tooling and ecosystem"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tool"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Role"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Notes"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "OTel Collector tail_sampling processor"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Core policy engine"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Built-in, no external dependency"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "OTel loadbalancingexporter"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Route spans by trace ID"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Required for multi-collector setups"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Grafana Tempo"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Trace storage backend"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Object-store-backed, cost-efficient at scale"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Jaeger"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Trace storage backend"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Alternative; supports Cassandra/Elasticsearch"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Honeycomb"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Managed tail sampling + storage"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "SaaS option; BubbleUp surfaces anomalies"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Comparison with alternatives"}]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Strategy"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Decision point"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Error capture"}]}]},
+              {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Memory overhead"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Head sampling"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "At trace start"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Proportional to rate"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Low — no buffer"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tail sampling"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "After trace complete"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "100 % of errors"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "High — full buffer"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "100 % retention"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None (keep all)"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "100 %"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "None"}]}]}
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Metrics-only"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "No traces"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Aggregate counts only"}]}]},
+              {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Negligible"}]}]}
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Security and reliability"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Span buffers in the collector may contain sensitive data — user prompts, PII in tool call arguments, or private model responses. Secure the collector with mTLS on OTLP endpoints and encrypt the buffer at rest if required by compliance policy. Apply attribute redaction before the tail sampling processor using an OTel transform processor to strip sensitive fields from spans before they are buffered."}
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "For reliability, run at least two collector instances with health checks. If a collector instance fails during the wait window, all buffered traces for that instance are lost. Accept this trade-off explicitly: tail sampling improves average-case cost and debugging quality but introduces a bounded data loss risk during collector failures. Use the OTel Collector's "},
+          {"type": "text", "text": "retry_on_failure", "marks": [{"type": "code"}]},
+          {"type": "text", "text": " exporter setting to handle transient backend unavailability after the sampling decision is made."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Advanced patterns"}]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "Composite policies for AI workloads"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Standard tail sampling policy types (status_code, latency, probabilistic) address generic observability concerns. For AI workloads, compound policies unlock more precise control. The "},
+          {"type": "text", "text": "composite", "marks": [{"type": "code"}]},
+          {"type": "text", "text": " policy type in OTel Collector lets you combine sub-policies with AND logic, so you can express conditions like \"retain only if error AND token_count > 10000\" — capturing expensive failures but not cheap ones. This prevents a flood of low-cost errors (e.g., validation failures on empty inputs) from overwhelming storage."}
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {"language": "yaml"},
+        "content": [{"type": "text", "text": "# Composite policy: expensive errors only\npolicies:\n  - name: expensive-error-composite\n    type: composite\n    composite:\n      max_total_spans_per_second: 1000\n      policy_order: [error-check, high-token-check]\n      composite_sub_policy:\n        - name: error-check\n          type: status_code\n          status_code: {status_codes: [ERROR]}\n        - name: high-token-check\n          type: numeric_attribute\n          numeric_attribute:\n            key: llm.token_count_total\n            min_value: 10000\n            max_value: 9999999\n      rate_allocation:\n        - policy: error-check\n          percent: 50\n        - policy: high-token-check\n          percent: 50\n"}]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "Adaptive sampling rates"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Static probabilistic rates become problematic when agent traffic is bursty. During peak load, a 5 % baseline can still produce more traces than storage can absorb; during off-hours the same rate provides more samples than necessary. Adaptive sampling adjusts the probabilistic rate dynamically based on recent throughput. The OTel Collector does not natively support adaptive sampling, but the Honeycomb Refinery proxy and Grafana Alloy both implement it. Alternatively, expose a configuration endpoint on the collector and update the probabilistic rate via a controller that monitors ingestion rates from Prometheus metrics."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "Handling trace orphans"}]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {"type": "text", "text": "Long-running agent tasks often span process restarts, container evictions, or async continuations. These produce "},
+          {"type": "text", "text": "orphan spans", "marks": [{"type": "bold"}]},
+          {"type": "text", "text": " — spans whose parent ID references a span that never arrives at the collector. Configure "},
+          {"type": "text", "text": "decision_wait", "marks": [{"type": "code"}]},
+          {"type": "text", "text": " generously and enable the "},
+          {"type": "text", "text": "filter/ottl", "marks": [{"type": "code"}]},
+          {"type": "text", "text": " processor to tag orphan traces with an "},
+          {"type": "text", "text": "agent.orphan_trace", "marks": [{"type": "code"}]},
+          {"type": "text", "text": " attribute so a dedicated policy can sample them at 100 % for investigation rather than applying the normal probabilistic rate."}
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": [{"type": "text", "text": "Key takeaways"}]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tail sampling defers the keep/drop decision until a complete trace is available, enabling outcome-aware policies that head sampling cannot express."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "The core cost is collector memory: the entire working set of active traces must fit in the buffer for the duration of the wait window."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Routing all spans for a trace to the same collector instance is a hard requirement — without it, policy evaluation is incorrect."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Prioritize error and tool-failure policies first; add a 1–5 % probabilistic baseline so healthy traces are represented in storage."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Instrument agents with AI-specific span attributes (token count, tool name, iteration count) to unlock meaningful domain policies beyond generic HTTP status codes."}]}]
+          },
+          {
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Tail sampling is not a replacement for alerting: use a parallel metrics or log pipeline for real-time anomaly detection that does not depend on the sampling wait window."}]}]
+          }
+        ]
+      }
+    ]
+  }
+}
