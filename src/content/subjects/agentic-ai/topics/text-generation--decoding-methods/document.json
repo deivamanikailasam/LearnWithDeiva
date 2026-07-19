@@ -1,1 +1,586 @@
-{"format": "tiptap/v1", "updatedAt": "2026-06-22T17:56:19.580Z", "doc": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Decoding methods define "}, {"type": "text", "text": "how", "marks": [{"type": "bold"}]}, {"type": "text", "text": " the next token is chosen from model logits: greedy argmax, beam search, or stochastic sampling. For agents, greedy and low-temperature sampling dominate production APIs; beam search appears in translation and some batch inference pipelines but rarely in interactive tool-calling agents."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "What it is"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Greedy decoding", "marks": [{"type": "bold"}]}, {"type": "text", "text": " selects the highest-probability token at each step. "}, {"type": "text", "text": "Beam search", "marks": [{"type": "bold"}]}, {"type": "text", "text": " maintains b partial hypotheses, expanding the top candidates each step and keeping the b highest-scoring sequences by cumulative log-probability. Both are deterministic (given fixed model weights); sampling adds randomness on top."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Why it matters"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Greedy is fast—one forward pass per token—and maps cleanly to streaming APIs. Beam search can improve global coherence for short outputs but costs b× compute per step and is poorly suited to long agent traces with tool calls. Choosing the wrong method affects latency budgets and whether the model \"commits\" to a suboptimal early token."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "How it works"}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Greedy decoding"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "At each step: compute logits → softmax → pick argmax token → append → repeat until stop. Equivalent to temperature → 0 with no top-p restriction."}]}, {"type": "codeBlock", "attrs": {"language": "python"}, "content": [{"type": "text", "text": "def greedy_decode(model, prompt_ids, max_tokens=256):\n    tokens = list(prompt_ids)\n    for _ in range(max_tokens):\n        logits = model(tokens)[-1]\n        next_id = int(logits.argmax())\n        tokens.append(next_id)\n        if next_id == EOS_ID:\n            break\n    return tokens"}]}, {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Beam search"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Maintain a beam of b sequences. Each step, expand each sequence with top-k next tokens, score by sum of log-probabilities (often length-normalized), prune to b best. Used when a single greedy path misses better global strings—for example, short captions or constrained templates."}]}, {"type": "codeBlock", "attrs": {"language": "python"}, "content": [{"type": "text", "text": "# Conceptual beam step (simplified)\nbeams = [(prompt_ids, 0.0)]  # (token_ids, log_score)\nfor step in range(max_new_tokens):\n    candidates = []\n    for ids, score in beams:\n        logits = model(ids)[-1]\n        log_probs = log_softmax(logits)\n        for tok in top_k_tokens(log_probs, k=beam_width):\n            candidates.append((ids + [tok], score + log_probs[tok]))\n    beams = sorted(candidates, key=lambda x: x[1] / len(x[0]), reverse=True)[:beam_width]"}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Benefits"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Greedy: minimal latency, simple streaming, default for chat APIs"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Beam search: can recover from locally suboptimal first tokens on short outputs"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Deterministic decoding enables regression testing with fixed seeds where supported"}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Trade-offs"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Greedy can repeat phrases or stall; no look-ahead"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Beam search scales poorly with output length and beam width"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Beam search does not integrate cleanly with tool-call interrupts mid-stream"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Length normalization and diverse beam variants add implementation complexity"}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "When to use"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Use greedy or near-greedy (temperature 0) for agent tool calls, code, and JSON. Consider beam search offline for batch summarization or caption generation—not for multi-turn agents with external tool latency. For open-ended chat, stochastic sampling usually beats wide beams on quality per dollar."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Agentic AI connection"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Agent loops interleave generation with tool execution; decoding must stop at delimiters and resume after tool results. Beam search across tool boundaries is impractical. Production agents rely on greedy or sampled decoding plus "}, {"type": "text", "text": "validators", "marks": [{"type": "bold"}]}, {"type": "text", "text": " (JSON schema, retry prompts) rather than exponential search in token space."}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Common mistakes"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Enabling beam search in APIs that do not support it mid-agent-loop"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Expecting beam search to fix hallucinations—it optimizes probability, not truth"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Using wide beams on long chain-of-thought outputs, blowing latency and cost"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Treating greedy output as \"ground truth\" without logprob or external verification"}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Best practices"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Default agent paths to temperature 0 or greedy for structured steps"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "If exploring alternatives, rerank N sampled completions instead of large beams"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Measure end-to-end agent success, not BLEU-style metrics tuned for beam search"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Use constrained decoding (grammar, JSON mode) where available instead of beam width"}]}]}]}, {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Key takeaways"}]}, {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Greedy picks the top token each step; beam search keeps multiple hypotheses"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Interactive agents almost always use greedy or low-temperature sampling"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Beam search trades compute for better short-sequence global scores"}]}]}, {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Validators and retries outperform wide beams for tool-calling reliability"}]}]}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-22T17:56:19.580Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Decoding methods define "
+          },
+          {
+            "type": "text",
+            "text": "how",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " the next token is chosen from model logits: greedy argmax, beam search, or stochastic sampling. For agents, greedy and low-temperature sampling dominate production APIs; beam search appears in translation and some batch inference pipelines but rarely in interactive tool-calling agents."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MDAiIGhlaWdodD0iNDQwIj4KICA8cmVjdCB3aWR0aD0iODAwIiBoZWlnaHQ9IjQ0MCIgZmlsbD0iI2Y5ZjlmOSIgcng9IjgiLz4KICA8dGV4dCB4PSI0MDAiIHk9IjMyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNyIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzMzMiPkRlY29kaW5nIE1ldGhvZHMgZm9yIFRleHQgR2VuZXJhdGlvbjwvdGV4dD4KICA8ZGVmcz48bWFya2VyIGlkPSJhcnIiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+PHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iIzU1NSIvPjwvbWFya2VyPjwvZGVmcz4KICA8IS0tIEdyZWVkeSAtLT4KICA8cmVjdCB4PSIyMCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iMTY1IiByeD0iOCIgZmlsbD0iI2ZmZiIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxyZWN0IHg9IjIwIiB5PSI1NSIgd2lkdGg9IjIzMCIgaGVpZ2h0PSIzMiIgcng9IjgiIGZpbGw9IiNlOGU4ZTgiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSIxMzUiIHk9Ijc2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMyIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzMzMiPkdyZWVkeSBEZWNvZGluZzwvdGV4dD4KICA8dGV4dCB4PSI0MCIgeT0iMTA0IiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzMzMyI+QWx3YXlzIHBpY2tzIGhpZ2hlc3QtcHJvYiB0b2tlbjwvdGV4dD4KICA8dGV4dCB4PSI0MCIgeT0iMTIyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5hcmdtYXggUCh0b2tlbiB8IGNvbnRleHQpPC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIxNDgiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzEzOyBEZXRlcm1pbmlzdGljLCBmYXN0PC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIxNjYiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzEzOyBHb29kIGZvciBmYWN0dWFsIHRhc2tzPC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIxODQiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzE3OyBSZXBldGl0aXZlLCBtaXNzZXMgYmV0dGVyIHBhdGhzPC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIyMDIiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzE3OyBObyBkaXZlcnNpdHk8L3RleHQ+CiAgPCEtLSBCZWFtIFNlYXJjaCAtLT4KICA8cmVjdCB4PSIyODUiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9IjE2NSIgcng9IjgiIGZpbGw9IiNmZmYiIHN0cm9rZT0iIzU1NSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cmVjdCB4PSIyODUiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0iI2U4ZThlOCIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQwMCIgeT0iNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzMzMyI+QmVhbSBTZWFyY2g8L3RleHQ+CiAgPHRleHQgeD0iMzA1IiB5PSIxMDQiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj5LZWVwIHRvcC1rIHBhdGhzIChiZWFtcykgYXQgZWFjaCBzdGVwPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMTIyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5iZWFtX3NpemUgPSA0IOKGkiA0IGNhbmRpZGF0ZXM8L3RleHQ+CiAgPHRleHQgeD0iMzA1IiB5PSIxNDgiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzEzOyBCZXR0ZXIgZ2xvYmFsIHNlcXVlbmNlIHNjb3JlPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMTY2IiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+JiN4MjcxMzsgU3RhbmRhcmQgZm9yIHRyYW5zbGF0aW9uL0FTUjwvdGV4dD4KICA8dGV4dCB4PSIzMDUiIHk9IjE4NCIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPiYjeDI3MTc7IFNsb3cgKGJlYW1fc2l6ZcOXIGNvc3QpPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMjAyIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+JiN4MjcxNzsgU3RpbGwgZGV0ZXJtaW5pc3RpYywgcmVwZXRpdGl2ZTwvdGV4dD4KICA8IS0tIFNhbXBsaW5nIC0tPgogIDxyZWN0IHg9IjU1MCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iMTY1IiByeD0iOCIgZmlsbD0iI2ZmZiIgc3Ryb2tlPSIjNTU1IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxyZWN0IHg9IjU1MCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iMzIiIHJ4PSI4IiBmaWxsPSIjZThlOGU4IiBzdHJva2U9IiM1NTUiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNjY1IiB5PSI3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTMiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMzMzIj5TYW1wbGluZzwvdGV4dD4KICA8dGV4dCB4PSI1NzAiIHk9IjEwNCIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzMzMiPkRyYXcgZnJvbSB0aGUgcHJvYmFiaWxpdHkgZGlzdHJpYnV0aW9uPC90ZXh0PgogIDx0ZXh0IHg9IjU3MCIgeT0iMTIyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij50b2tlbiB+IFAowrd8Y29udGV4dCk8L3RleHQ+CiAgPHRleHQgeD0iNTcwIiB5PSIxNDgiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzEzOyBEaXZlcnNlLCBjcmVhdGl2ZSBvdXRwdXQ8L3RleHQ+CiAgPHRleHQgeD0iNTcwIiB5PSIxNjYiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij4mI3gyNzEzOyBOb24tcmVwZXRpdGl2ZTwvdGV4dD4KICA8dGV4dCB4PSI1NzAiIHk9IjE4NCIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPiYjeDI3MTc7IENhbiBiZSBpbmNvaGVyZW50IGF0IGhpZ2ggdGVtcDwvdGV4dD4KICA8dGV4dCB4PSI1NzAiIHk9IjIwMiIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPiYjeDI3MTc7IE5vbi1kZXRlcm1pbmlzdGljPC90ZXh0PgogIDwhLS0gQ29tcGFyaXNvbiB0YWJsZSAtLT4KICA8cmVjdCB4PSIyMCIgeT0iMjQwIiB3aWR0aD0iNzYwIiBoZWlnaHQ9IjE4NSIgcng9IjgiIGZpbGw9IiNmZmYiIHN0cm9rZT0iI2NjYyIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNDAwIiB5PSIyNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEzIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzMzMyI+V2hlbiB0byBVc2UgRWFjaCBNZXRob2Q8L3RleHQ+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMjcwIiB4Mj0iNzgwIiB5Mj0iMjcwIiBzdHJva2U9IiNkZGQiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjMwIiB5PSIyOTIiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzMzMyI+TWV0aG9kPC90ZXh0PgogIDx0ZXh0IHg9IjIwMCIgeT0iMjkyIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzMzMiPkJlc3QgZm9yPC90ZXh0PgogIDx0ZXh0IHg9IjUwMCIgeT0iMjkyIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMzMzMiPkF2b2lkIHdoZW48L3RleHQ+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMjk4IiB4Mj0iNzgwIiB5Mj0iMjk4IiBzdHJva2U9IiNkZGQiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjMwIiB5PSIzMTgiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj5HcmVlZHk8L3RleHQ+CiAgPHRleHQgeD0iMjAwIiB5PSIzMTgiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5Db2RlLCBtYXRoLCBmYWN0dWFsIFEmYW1wO0EsIGNsYXNzaWZpY2F0aW9uPC90ZXh0PgogIDx0ZXh0IHg9IjUwMCIgeT0iMzE4IiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+Q3JlYXRpdmUgd3JpdGluZyAodG9vIHJpZ2lkKTwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iMzQyIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzMzMyI+QmVhbSBzZWFyY2g8L3RleHQ+CiAgPHRleHQgeD0iMjAwIiB5PSIzNDIiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5UcmFuc2xhdGlvbiwgc3VtbWFyaXphdGlvbiwgQVNSPC90ZXh0PgogIDx0ZXh0IHg9IjUwMCIgeT0iMzQyIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+TG9uZyBvcGVuLWVuZGVkIGdlbmVyYXRpb24gKHJlcGV0aXRpdmUpPC90ZXh0PgogIDx0ZXh0IHg9IjMwIiB5PSIzNjYiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjMzMzIj5TYW1wbGluZyAodGVtcCt0b3AtcCk8L3RleHQ+CiAgPHRleHQgeD0iMjAwIiB5PSIzNjYiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5DaGF0LCBjcmVhdGl2ZSB3cml0aW5nLCBicmFpbnN0b3JtaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjUwMCIgeT0iMzY2IiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+U2luZ2xlLWFuc3dlciB0YXNrcyAobm9uZGV0ZXJtaW5pc3RpYyk8L3RleHQ+CiAgPHRleHQgeD0iMzAiIHk9IjM5MCIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiMzMzMiPlNwZWN1bGF0aXZlIGRlY29kaW5nPC90ZXh0PgogIDx0ZXh0IHg9IjIwMCIgeT0iMzkwIiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+U3BlZWQgdXAgYW55IG1ldGhvZCB1c2luZyBkcmFmdCBtb2RlbDwvdGV4dD4KICA8dGV4dCB4PSI1MDAiIHk9IjM5MCIgZm9udC1mYW1pbHk9IkFyaWFsLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM1NTUiPldoZW4gZHJhZnQgbW9kZWwgaXMgdG9vIGRpZmZlcmVudDwvdGV4dD4KICA8dGV4dCB4PSIzMCIgeT0iNDE0IiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzMzMyI+QmVzdC1vZi1OIChuIHNhbXBsZXMpPC90ZXh0PgogIDx0ZXh0IHg9IjIwMCIgeT0iNDE0IiBmb250LWZhbWlseT0iQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzU1NSI+UmVhc29uaW5nLCBjb2RlIOKAlCBwaWNrIGJlc3QgYnkgdmVyaWZpZXI8L3RleHQ+CiAgPHRleHQgeD0iNTAwIiB5PSI0MTQiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjExIiBmaWxsPSIjNTU1Ij5MYXRlbmN5LXNlbnNpdGl2ZSBhcHBsaWNhdGlvbnM8L3RleHQ+Cjwvc3ZnPg==",
+          "alt": "Text generation decoding methods: greedy, beam search, and sampling compared"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Greedy decoding",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " selects the highest-probability token at each step. "
+          },
+          {
+            "type": "text",
+            "text": "Beam search",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " maintains b partial hypotheses, expanding the top candidates each step and keeping the b highest-scoring sequences by cumulative log-probability. Both are deterministic (given fixed model weights); sampling adds randomness on top."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Greedy is fast\u2014one forward pass per token\u2014and maps cleanly to streaming APIs. Beam search can improve global coherence for short outputs but costs b\u00d7 compute per step and is poorly suited to long agent traces with tool calls. Choosing the wrong method affects latency budgets and whether the model \"commits\" to a suboptimal early token."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Greedy decoding"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At each step: compute logits \u2192 softmax \u2192 pick argmax token \u2192 append \u2192 repeat until stop. Equivalent to temperature \u2192 0 with no top-p restriction."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def greedy_decode(model, prompt_ids, max_tokens=256):\n    tokens = list(prompt_ids)\n    for _ in range(max_tokens):\n        logits = model(tokens)[-1]\n        next_id = int(logits.argmax())\n        tokens.append(next_id)\n        if next_id == EOS_ID:\n            break\n    return tokens"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Beam search"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Maintain a beam of b sequences. Each step, expand each sequence with top-k next tokens, score by sum of log-probabilities (often length-normalized), prune to b best. Used when a single greedy path misses better global strings\u2014for example, short captions or constrained templates."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Conceptual beam step (simplified)\nbeams = [(prompt_ids, 0.0)]  # (token_ids, log_score)\nfor step in range(max_new_tokens):\n    candidates = []\n    for ids, score in beams:\n        logits = model(ids)[-1]\n        log_probs = log_softmax(logits)\n        for tok in top_k_tokens(log_probs, k=beam_width):\n            candidates.append((ids + [tok], score + log_probs[tok]))\n    beams = sorted(candidates, key=lambda x: x[1] / len(x[0]), reverse=True)[:beam_width]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Greedy: minimal latency, simple streaming, default for chat APIs"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Beam search: can recover from locally suboptimal first tokens on short outputs"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Deterministic decoding enables regression testing with fixed seeds where supported"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Greedy can repeat phrases or stall; no look-ahead"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Beam search scales poorly with output length and beam width"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Beam search does not integrate cleanly with tool-call interrupts mid-stream"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Length normalization and diverse beam variants add implementation complexity"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use greedy or near-greedy (temperature 0) for agent tool calls, code, and JSON. Consider beam search offline for batch summarization or caption generation\u2014not for multi-turn agents with external tool latency. For open-ended chat, stochastic sampling usually beats wide beams on quality per dollar."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Agentic AI connection"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Agent loops interleave generation with tool execution; decoding must stop at delimiters and resume after tool results. Beam search across tool boundaries is impractical. Production agents rely on greedy or sampled decoding plus "
+          },
+          {
+            "type": "text",
+            "text": "validators",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " (JSON schema, retry prompts) rather than exponential search in token space."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enabling beam search in APIs that do not support it mid-agent-loop"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Expecting beam search to fix hallucinations\u2014it optimizes probability, not truth"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Using wide beams on long chain-of-thought outputs, blowing latency and cost"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treating greedy output as \"ground truth\" without logprob or external verification"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Default agent paths to temperature 0 or greedy for structured steps"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "If exploring alternatives, rerank N sampled completions instead of large beams"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Measure end-to-end agent success, not BLEU-style metrics tuned for beam search"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use constrained decoding (grammar, JSON mode) where available instead of beam width"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Greedy picks the top token each step; beam search keeps multiple hypotheses"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Interactive agents almost always use greedy or low-temperature sampling"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Beam search trades compute for better short-sequence global scores"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validators and retries outperform wide beams for tool-calling reliability"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
