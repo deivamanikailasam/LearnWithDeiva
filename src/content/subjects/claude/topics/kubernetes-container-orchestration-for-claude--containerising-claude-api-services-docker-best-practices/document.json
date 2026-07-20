@@ -1,1 +1,1012 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-19T06:38:38.755Z","doc":{"type":"doc","content":[]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Wrapping a Claude API service in a container is straightforward — the service is a stateless HTTP gateway that calls an external API, requiring no GPU, no large model weights, and no special privileges. The challenge is production hardening: safe secret injection, correct resource limits, graceful shutdown, and health probes that accurately reflect the service's readiness to handle requests."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Containerising a Claude API service means packaging the application code, runtime, and configuration into a Docker image that runs identically across development, staging, and production environments. Because the service calls the Anthropic API rather than running a local model, the image is small (typically 100–400 MB) and requires only CPU resources. The container's only privileged dependency is the ANTHROPIC_API_KEY, which is injected at runtime from a secrets manager rather than baked into the image."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In Kubernetes, the containerised service is deployed as a Deployment with multiple replicas behind a Service, enabling horizontal scaling and rolling updates. A HorizontalPodAutoscaler (HPA) adjusts replica count based on CPU utilization — the metric that best tracks request load for a CPU-bound HTTP proxy. Readiness and liveness probes ensure that traffic is routed only to healthy pods and that crashed pods are restarted automatically."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Containerisation enforces environment parity. A service that works on a developer's laptop with a locally exported API key often fails in CI or production because of dependency version drift or implicit environment assumptions. A well-built Docker image eliminates these differences, making deployments predictable and rollbacks safe."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Security is also a primary motivation. Hard-coding API keys in environment files checked into git, or passing them as plaintext environment variables in Kubernetes manifests, is a common source of credential leaks. The patterns described here — Kubernetes Secrets, external secret stores, and non-root containers — address the most common misconfiguration vectors."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Environment parity across dev, staging, and production — the same image runs everywhere."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Small image size — no model weights, only Python/Node runtime and application code."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Horizontal scaling via Kubernetes HPA with minimal configuration."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rolling updates with zero downtime using RollingUpdate deployment strategy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Secret isolation — API keys injected at runtime, never baked into images."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Container cold-start latency is real but manageable. Python container startup (importing anthropic, FastAPI, and related libraries) takes 1–4 seconds. For latency-sensitive endpoints, keep a minimum of 2 replicas running at all times to avoid cold-start latency on the first request after a scale-down. Kubernetes minReplicas in the HPA controls this."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Network egress to api.anthropic.com adds a policy consideration. In locked-down Kubernetes clusters with default-deny network policies, the Claude service pod must be explicitly allowed outbound HTTPS to api.anthropic.com on port 443. Missing this allowance is one of the most common deployment failures."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The container follows a four-layer build: base image (Python slim or distroless), dependency installation (pip install), application copy, and entrypoint definition. Multi-stage builds keep the final image small by separating the build environment (which may include compilers for C extensions) from the runtime environment. The ANTHROPIC_API_KEY is not present in the image; it is injected as an environment variable from a Kubernetes Secret at pod creation time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMzIwIiB2aWV3Qm94PSIwIDAgODIwIDMyMCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjMyMCIgZmlsbD0iI2Y4ZmFmYyIgcng9IjEwIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iIzFlMjkzYiI+Q29udGFpbmVyaXNlZCBDbGF1ZGUgQVBJIFNlcnZpY2UgQXJjaGl0ZWN0dXJlPC90ZXh0PgogIDwhLS0gS3ViZXJuZXRlcyBDbHVzdGVyIC0tPgogIDxyZWN0IHg9IjE1IiB5PSI0NSIgd2lkdGg9Ijc5MCIgaGVpZ2h0PSIyMjAiIHJ4PSIxMCIgZmlsbD0iI2VmZjZmZiIgc3Ryb2tlPSIjOTNjNWZkIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWRhc2hhcnJheT0iNiwzIi8+CiAgPHRleHQgeD0iMzAiIHk9IjY1IiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjMjU2M2ViIj5LdWJlcm5ldGVzIENsdXN0ZXI8L3RleHQ+CiAgPCEtLSBJbmdyZXNzIC0tPgogIDxyZWN0IHg9IjMwIiB5PSI4MCIgd2lkdGg9IjExMCIgaGVpZ2h0PSI1MCIgcng9IjciIGZpbGw9IiNkYmVhZmUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI4NSIgeT0iMTAyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjMWQ0ZWQ4Ij5JbmdyZXNzPC90ZXh0PgogIDx0ZXh0IHg9Ijg1IiB5PSIxMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzFlNDBhZiI+TkdJTlggLyBUcmFlZmlrPC90ZXh0PgogIDwhLS0gU2VydmljZSAtLT4KICA8cmVjdCB4PSIxODUiIHk9IjgwIiB3aWR0aD0iMTEwIiBoZWlnaHQ9IjUwIiByeD0iNyIgZmlsbD0iI2ZlZjNjNyIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjI0MCIgeT0iMTAyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjOTI0MDBlIj5TZXJ2aWNlIChMQik8L3RleHQ+CiAgPHRleHQgeD0iMjQwIiB5PSIxMTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzc4MzUwZiI+Q2x1c3RlcklQPC90ZXh0PgogIDxsaW5lIHgxPSIxNDAiIHkxPSIxMDUiIHgyPSIxODMiIHkyPSIxMDUiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDwhLS0gUG9kcyAtLT4KICA8cmVjdCB4PSIzNDAiIHk9IjcwIiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjcwIiByeD0iNyIgZmlsbD0iI2YzZThmZiIgc3Ryb2tlPSIjYTg1NWY3IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQwMCIgeT0iOTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSI2MDAiIGZpbGw9IiM2YjIxYTgiPlBvZCAocmVwbGljYSAxKTwvdGV4dD4KICA8dGV4dCB4PSI0MDAiIHk9IjEwOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjN2MzYWVkIj5jbGF1ZGUtc2VydmljZTpsYXRlc3Q8L3RleHQ+CiAgPHRleHQgeD0iNDAwIiB5PSIxMjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzdjM2FlZCI+cG9ydCA4MDgwPC90ZXh0PgogIDxsaW5lIHgxPSIyOTUiIHkxPSIxMDUiIHgyPSIzMzgiIHkyPSIxMDUiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDxyZWN0IHg9IjM0MCIgeT0iMTU1IiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjcwIiByeD0iNyIgZmlsbD0iI2YzZThmZiIgc3Ryb2tlPSIjYTg1NWY3IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQwMCIgeT0iMTc3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjNmIyMWE4Ij5Qb2QgKHJlcGxpY2EgMik8L3RleHQ+CiAgPHRleHQgeD0iNDAwIiB5PSIxOTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzdjM2FlZCI+Y2xhdWRlLXNlcnZpY2U6bGF0ZXN0PC90ZXh0PgogIDx0ZXh0IHg9IjQwMCIgeT0iMjA3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM3YzNhZWQiPnBvcnQgODA4MDwvdGV4dD4KICA8IS0tIFNlY3JldHMgLS0+CiAgPHJlY3QgeD0iNTEwIiB5PSI4MCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSI1MCIgcng9IjciIGZpbGw9IiNmZWUyZTIiIHN0cm9rZT0iI2VmNDQ0NCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI1NzAiIHk9IjEwMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9IjYwMCIgZmlsbD0iIzk5MWIxYiI+SzhzIFNlY3JldDwvdGV4dD4KICA8dGV4dCB4PSI1NzAiIHk9IjExOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjYjkxYzFjIj5BTlRIUk9QSUNfQVBJX0tFWTwvdGV4dD4KICA8bGluZSB4MT0iNDYwIiB5MT0iMTA1IiB4Mj0iNTA4IiB5Mj0iMTA1IiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSIzLDIiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDwhLS0gSFBBIC0tPgogIDxyZWN0IHg9IjUxMCIgeT0iMTU1IiB3aWR0aD0iMTIwIiBoZWlnaHQ9IjUwIiByeD0iNyIgZmlsbD0iI2RjZmNlNyIgc3Ryb2tlPSIjMjJjNTVlIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjU3MCIgeT0iMTc3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjMTY2NTM0Ij5IUEE8L3RleHQ+CiAgPHRleHQgeD0iNTcwIiB5PSIxOTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzE1ODAzZCI+Q1BVIDYwJSDihpIgc2NhbGUgMeKAkzEwPC90ZXh0PgogIDwhLS0gUmVzb3VyY2UgbGltaXRzIGJveCAtLT4KICA8cmVjdCB4PSI2NTAiIHk9IjgwIiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjE0NSIgcng9IjciIGZpbGw9IiNmMWY1ZjkiIHN0cm9rZT0iI2NiZDVlMSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNjYwIiB5PSIxMDAiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiMzMzQxNTUiPlJlc291cmNlIGxpbWl0czwvdGV4dD4KICA8dGV4dCB4PSI2NjAiIHk9IjExNiIgZm9udC1zaXplPSI5IiBmaWxsPSIjNDc1NTY5Ij5yZXF1ZXN0cy5jcHU6IDI1MG08L3RleHQ+CiAgPHRleHQgeD0iNjYwIiB5PSIxMzAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+bGltaXRzLmNwdTogMTAwMG08L3RleHQ+CiAgPHRleHQgeD0iNjYwIiB5PSIxNDQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+cmVxdWVzdHMubWVtOiAyNTZNaTwvdGV4dD4KICA8dGV4dCB4PSI2NjAiIHk9IjE1OCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNDc1NTY5Ij5saW1pdHMubWVtOiAxR2k8L3RleHQ+CiAgPHRleHQgeD0iNjYwIiB5PSIxNzQiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+Tm8gR1BVIG5lZWRlZDwvdGV4dD4KICA8dGV4dCB4PSI2NjAiIHk9IjE5MCIgZm9udC1zaXplPSI5IiBmaWxsPSIjNDc1NTY5Ij4oaW5mZXJlbmNlIG9uIEFudGhyb3BpYyk8L3RleHQ+CiAgPHRleHQgeD0iNjYwIiB5PSIyMDYiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+UmVhZGluZXNzUHJvYmU6IC9oZWFsdGg8L3RleHQ+CiAgPHRleHQgeD0iNjYwIiB5PSIyMjAiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+TGl2ZW5lc3NQcm9iZTogL2hlYWx0aDwvdGV4dD4KICA8IS0tIEV4dGVybmFsIC0tPgogIDxyZWN0IHg9IjMwIiB5PSIxODUiIHdpZHRoPSIxMTAiIGhlaWdodD0iNTAiIHJ4PSI3IiBmaWxsPSIjZmNlN2YzIiBzdHJva2U9IiNlYzQ4OTkiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iODUiIHk9IjIwNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9IjYwMCIgZmlsbD0iIzlkMTc0ZCI+QW50aHJvcGljIEFQSTwvdGV4dD4KICA8dGV4dCB4PSI4NSIgeT0iMjIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiNiZTE4NWQiPmFwaS5hbnRocm9waWMuY29tPC90ZXh0PgogIDxsaW5lIHgxPSIxODUiIHkxPSIxOTAiIHgyPSIxNDIiIHkyPSIyMTAiIHN0cm9rZT0iI2VjNDg5OSIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjMsMiIgbWFya2VyLWVuZD0idXJsKCNhcnJwKSIvPgogIDxkZWZzPgogICAgPG1hcmtlciBpZD0iYXJyIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM2NDc0OGIiLz48L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycnAiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+PHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iI2VjNDg5OSIvPjwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+",
+          "alt": "Containerised Claude API service Kubernetes architecture",
+          "title": "Claude Service — Kubernetes Architecture"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Traffic flows from the internet through an Ingress controller (NGINX or Traefik) to a Kubernetes Service (ClusterIP load balancer) and then to one of several Claude service pods. Each pod reads ANTHROPIC_API_KEY from a Kubernetes Secret at startup. The HPA monitors CPU utilization and adjusts replica count between a configured minimum and maximum. Pods make outbound HTTPS calls to api.anthropic.com."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use it"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use full Kubernetes deployment for production services handling sustained traffic (more than a few requests per minute) or when your organization already operates a Kubernetes cluster. For development, testing, and low-traffic internal tools, docker-compose or a single container on a VM is simpler and sufficient."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Dockerfile"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "dockerfile"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# syntax=docker/dockerfile:1\n\n# Stage 1: dependency builder\nFROM python:3.12-slim AS builder\nWORKDIR /build\nCOPY requirements.txt .\nRUN pip install --prefix=/install --no-cache-dir -r requirements.txt\n\n# Stage 2: runtime image\nFROM python:3.12-slim AS runtime\n\n# Non-root user for security\nRUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser\nUSER appuser\nWORKDIR /app\n\n# Copy installed packages from builder\nCOPY --from=builder /install /usr/local\n\n# Copy application code\nCOPY --chown=appuser:appgroup . .\n\n# Health check (optional — Kubernetes probes are preferred)\nHEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c \"import httpx; httpx.get('http://localhost:8080/health').raise_for_status()\"\n\nENV PORT=8080\nEXPOSE 8080\n\n# Graceful shutdown: uvicorn handles SIGTERM\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\", \"--workers\", \"2\"]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Application (FastAPI)"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# main.py\nfrom contextlib import asynccontextmanager\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel\nimport anthropic, os, logging\n\nlogger = logging.getLogger(__name__)\nclient: anthropic.Anthropic | None = None\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    global client\n    api_key = os.environ.get(\"ANTHROPIC_API_KEY\")\n    if not api_key:\n        raise RuntimeError(\"ANTHROPIC_API_KEY not set\")\n    client = anthropic.Anthropic(api_key=api_key)\n    logger.info(\"Claude client initialised\")\n    yield\n    logger.info(\"Shutting down\")\n\napp = FastAPI(title=\"Claude API Service\", lifespan=lifespan)\n\n@app.get(\"/health\")\ndef health():\n    return {\"status\": \"ok\"}\n\nclass ChatRequest(BaseModel):\n    message: str\n    model: str = \"claude-haiku-4-5-20251001\"\n    max_tokens: int = 1024\n\n@app.post(\"/chat\")\ndef chat(req: ChatRequest):\n    try:\n        response = client.messages.create(\n            model=req.model,\n            max_tokens=req.max_tokens,\n            messages=[{\"role\": \"user\", \"content\": req.message}],\n        )\n        return {\"content\": response.content[0].text, \"usage\": dict(response.usage)}\n    except anthropic.APIError as exc:\n        raise HTTPException(status_code=502, detail=str(exc))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Kubernetes manifests"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# secret.yaml (apply first; use ExternalSecrets or Vault in production)\napiVersion: v1\nkind: Secret\nmetadata:\n  name: claude-credentials\ntype: Opaque\nstringData:\n  ANTHROPIC_API_KEY: \"sk-ant-...\"   # replace at deploy time\n---\n# deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: claude-service\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: claude-service\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 1\n      maxUnavailable: 0   # zero-downtime rollout\n  template:\n    metadata:\n      labels:\n        app: claude-service\n    spec:\n      terminationGracePeriodSeconds: 30\n      containers:\n        - name: claude-service\n          image: your-registry/claude-service:latest\n          ports:\n            - containerPort: 8080\n          env:\n            - name: ANTHROPIC_API_KEY\n              valueFrom:\n                secretKeyRef:\n                  name: claude-credentials\n                  key: ANTHROPIC_API_KEY\n          resources:\n            requests:\n              cpu: \"250m\"\n              memory: \"256Mi\"\n            limits:\n              cpu: \"1000m\"\n              memory: \"1Gi\"\n          readinessProbe:\n            httpGet:\n              path: /health\n              port: 8080\n            initialDelaySeconds: 5\n            periodSeconds: 10\n          livenessProbe:\n            httpGet:\n              path: /health\n              port: 8080\n            initialDelaySeconds: 10\n            periodSeconds: 30\n          securityContext:\n            runAsNonRoot: true\n            allowPrivilegeEscalation: false\n            readOnlyRootFilesystem: true\n---\n# hpa.yaml\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: claude-service-hpa\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: claude-service\n  minReplicas: 2\n  maxReplicas: 10\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 60"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A customer support platform serving 50,000 daily active users runs a Claude service on Kubernetes with 2 baseline replicas and HPA scaling to 12 at peak. Each pod handles ~150 concurrent slow-streaming Claude requests. With maxUnavailable: 0 and maxSurge: 1 in the rolling update strategy, model updates deploy in under 5 minutes with zero user-visible downtime. The ANTHROPIC_API_KEY is managed by External Secrets Operator pulling from AWS Secrets Manager, refreshed hourly without pod restarts."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running containers as root is the most common security mistake. Add USER nobody (or a named non-root user) to the Dockerfile and set runAsNonRoot: true in the pod security context. Also set readOnlyRootFilesystem: true unless the application writes to disk — Claude API services typically do not."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "dockerfile"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: default root user\nFROM python:3.12-slim\nWORKDIR /app\nCOPY . .\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n\n# RIGHT: explicit non-root user\nFROM python:3.12-slim\nRUN adduser --system appuser\nUSER appuser\nWORKDIR /app\nCOPY --chown=appuser . .\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Missing resource requests causes Kubernetes to schedule too many pods on a single node, leading to CPU throttling and Out-Of-Memory kills. Always specify both requests and limits. For Claude API services, cpu request of 250m and memory request of 256Mi are reasonable starting points."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use multi-stage builds — separate the dependency-installation stage from the runtime stage to minimize image size and surface area."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pin base image versions — FROM python:3.12.9-slim-bookworm, not FROM python:3-slim, to prevent unexpected breaking changes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set terminationGracePeriodSeconds to at least 30 seconds so in-flight Claude streaming responses complete before the pod is killed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Never put ANTHROPIC_API_KEY in the Dockerfile or docker-compose.yml checked into git — use environment variable injection at runtime."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Configure an explicit network policy allowing outbound HTTPS to api.anthropic.com if your cluster uses default-deny egress rules."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude API services are I/O-bound, not CPU-bound. Each request spends most of its time waiting for the Anthropic API to return tokens. A single uvicorn worker with asyncio can handle 50–200 concurrent slow-streaming requests. Set --workers to match the number of CPU cores for CPU-bound preprocessing (embedding, chunking) but keep it at 1–2 for pure proxy services to avoid excessive memory use."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Connection pooling to the Anthropic API is handled automatically by the httpx client inside the Anthropic SDK. The default pool size of 100 connections per client is sufficient for most workloads. For very high-throughput deployments (thousands of simultaneous requests), initialize multiple Anthropic client instances and round-robin across them."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Helm charts are the standard distribution mechanism for multi-manifest Kubernetes deployments. Package the deployment, service, HPA, and secret reference into a Helm chart with configurable values (image tag, replica count, resource limits) for environment-specific overrides. Tools like Kustomize provide similar parameterization without the template language."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For secret management beyond Kubernetes Secrets, the External Secrets Operator integrates with AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault, and Azure Key Vault. It creates Kubernetes Secrets from external stores and refreshes them automatically, eliminating manual secret rotation steps."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Deployment"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Ops complexity"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Kubernetes (this)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "HPA auto-scaling"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Production, high traffic"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "docker-compose"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Manual"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Dev, internal tools"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWS Lambda / Cloud Run"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Auto, per-request"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bursty / low-volume traffic"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Managed (Modal, Fly.io)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Auto, per-container"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Quick deploy, no k8s ops"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The ANTHROPIC_API_KEY must never appear in image layers, Kubernetes manifests committed to git, or application logs. Use Kubernetes Secrets for basic deployments and External Secrets Operator backed by a secret manager (AWS Secrets Manager, Vault) for production. Enable secret rotation by updating the secret store entry and rolling the Kubernetes Deployment — pods pick up the new key on restart."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Set readOnlyRootFilesystem: true and allowPrivilegeEscalation: false in the pod security context. Add a NetworkPolicy that restricts outbound traffic to only api.anthropic.com:443 and the cluster DNS. These two controls eliminate the most common container escape and lateral movement vectors."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude API services are stateless, CPU-bound containers with no GPU requirement and small image sizes (100–400 MB)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Inject ANTHROPIC_API_KEY from a Kubernetes Secret or external secret store — never bake it into the image."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run as a non-root user with readOnlyRootFilesystem: true and allowPrivilegeEscalation: false."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use RollingUpdate with maxUnavailable: 0 for zero-downtime deployments and set terminationGracePeriodSeconds ≥ 30 for graceful streaming shutdown."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HPA on CPU utilization (60% target) with minReplicas: 2 prevents cold-start latency under normal load."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "If the cluster uses default-deny egress NetworkPolicy, add an explicit allow rule for outbound HTTPS to api.anthropic.com:443."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,1 +1,1085 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-19T06:36:41.717Z","doc":{"type":"doc","content":[]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Calling Claude synchronously from a web request works for short, interactive tasks but fails for long-running agent workflows. When a research agent needs 30 seconds and five tool calls to answer a question, the HTTP connection times out, the client retries, and the server processes the same request twice. Queue-based dispatch solves this by decoupling request acceptance from task execution."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue-based agent task dispatch is an async processing pattern where client requests are serialized into a durable message queue, consumed by one or more worker processes, and results are stored separately for client retrieval. The three leading implementations are Celery (Python, Redis or RabbitMQ backend), BullMQ (Node.js, Redis backend), and AWS SQS (managed, any consumer language). Each provides durability (messages survive worker crashes), at-least-once delivery, configurable retry logic, and dead-letter queues for unrecoverable failures."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key separation is: the API endpoint returns immediately with a task_id; the worker consumes the task, calls Claude, and stores the result; the client polls GET /tasks/{id} or receives a webhook when the result is ready. This decoupling eliminates HTTP timeout constraints, enables workload distribution across many workers, and provides natural backpressure — if Claude's API is slow, tasks accumulate in the queue rather than blocking all web server threads."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude agent workflows that use multi-step tool calls, extended thinking, or process large documents may run for 10–120 seconds. Default HTTP timeouts (30 seconds in most load balancers, 60 seconds in most clients) cause spurious failures and duplicate execution. Synchronous execution also ties up web server workers — a FastAPI app with 4 worker processes stalls completely when four concurrent long-running Claude calls are in flight."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue-based dispatch is also the foundation for rate limiting, cost control, and priority scheduling. When the queue is the bottleneck, concurrency is controlled by the number of workers rather than by the web server's thread pool. Worker count becomes the single tuning dial for throughput vs. Anthropic API rate limit consumption."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No HTTP timeouts — task duration is no longer constrained by connection lifetime."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Horizontal scaling — add workers to increase throughput without changing the API server."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "At-least-once delivery — tasks are not lost if a worker crashes mid-execution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Natural backpressure — queue depth signals overload without cascading failures."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Priority queues — urgent tasks (user-facing) can preempt batch tasks (nightly reports) with different queue names and worker routing."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Asynchronous UX requires client-side polling or webhook infrastructure. Users accustomed to instant responses must be told their request is queued — an optimistic UI with a progress indicator helps. Streaming responses (Server-Sent Events) become harder to support because the worker may be on a different host than the one that accepted the request."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Idempotency is now a design requirement. If a network glitch causes the client to re-enqueue a task that was already completed, the system must detect and deduplicate it. The standard mitigation is a client-generated idempotency_key in the task payload, with a Redis SET NX check at the start of the worker's execute function."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The worker loop follows a three-phase cycle: dequeue a task message (which includes the prompt, model parameters, and idempotency key), execute the agent logic (which may involve multiple Claude API calls and tool calls), and store the result. Celery and BullMQ handle the dequeue phase automatically and re-enqueue the task with exponential backoff if the worker function raises an exception. After max_retries are exhausted, the message moves to a dead-letter queue (DLQ) for manual inspection."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Message acknowledgment (ack) happens after the result is stored, not after the first dequeue. This is called late acknowledgment or ack-on-complete. It ensures that if the worker crashes after dequeuing but before storing the result, the task is re-delivered to another worker rather than silently dropped. SQS calls this visibility timeout — the message becomes visible again if not deleted within the configured window."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMzAwIiB2aWV3Qm94PSIwIDAgODIwIDMwMCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIj4KICA8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iI2Y4ZmFmYyIgcng9IjEwIi8+CiAgPHRleHQgeD0iNDEwIiB5PSIyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iIzFlMjkzYiI+UXVldWUtQmFzZWQgQWdlbnQgVGFzayBEaXNwYXRjaCBBcmNoaXRlY3R1cmU8L3RleHQ+CiAgPCEtLSBQcm9kdWNlciAtLT4KICA8cmVjdCB4PSIyMCIgeT0iNjAiIHdpZHRoPSIxMzAiIGhlaWdodD0iNjAiIHJ4PSI3IiBmaWxsPSIjZGJlYWZlIiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iODUiIHk9Ijg0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjMWQ0ZWQ4Ij5BUEkgLyBQcm9kdWNlcjwvdGV4dD4KICA8dGV4dCB4PSI4NSIgeT0iMTAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiMxZTQwYWYiPmVucXVldWUgdGFza3M8L3RleHQ+CiAgPHRleHQgeD0iODUiIHk9IjExMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMWU0MGFmIj5yZXR1cm4gdGFza19pZDwvdGV4dD4KICA8IS0tIFF1ZXVlIC0tPgogIDxyZWN0IHg9IjE5NSIgeT0iNjAiIHdpZHRoPSIxNTAiIGhlaWdodD0iNjAiIHJ4PSI3IiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjI3MCIgeT0iODQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTEiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiM5MjQwMGUiPlRhc2sgUXVldWU8L3RleHQ+CiAgPHRleHQgeD0iMjcwIiB5PSIxMDAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzc4MzUwZiI+Q2VsZXJ5IC8gQnVsbE1RIC8gU1FTPC90ZXh0PgogIDx0ZXh0IHg9IjI3MCIgeT0iMTEyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM3ODM1MGYiPmR1cmFibGUsIGFjay1vbi1jb21wbGV0ZTwvdGV4dD4KICA8bGluZSB4MT0iMTUwIiB5MT0iOTAiIHgyPSIxOTMiIHkyPSI5MCIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPCEtLSBXb3JrZXJzIC0tPgogIDxyZWN0IHg9IjM5MCIgeT0iNTAiIHdpZHRoPSIxMzAiIGhlaWdodD0iNDAiIHJ4PSI3IiBmaWxsPSIjZjNlOGZmIiBzdHJva2U9IiNhODU1ZjciIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDU1IiB5PSI3MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9IjYwMCIgZmlsbD0iIzZiMjFhOCI+V29ya2VyIDE8L3RleHQ+CiAgPHJlY3QgeD0iMzkwIiB5PSIxMDAiIHdpZHRoPSIxMzAiIGhlaWdodD0iNDAiIHJ4PSI3IiBmaWxsPSIjZjNlOGZmIiBzdHJva2U9IiNhODU1ZjciIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNDU1IiB5PSIxMjMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSI2MDAiIGZpbGw9IiM2YjIxYTgiPldvcmtlciAyPC90ZXh0PgogIDxyZWN0IHg9IjM5MCIgeT0iMTUwIiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjQwIiByeD0iNyIgZmlsbD0iI2YzZThmZiIgc3Ryb2tlPSIjYTg1NWY3IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjQ1NSIgeT0iMTczIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjNmIyMWE4Ij5Xb3JrZXIgTjwvdGV4dD4KICA8bGluZSB4MT0iMzQ1IiB5MT0iODAiIHgyPSIzODgiIHkyPSI3MCIgc3Ryb2tlPSIjNjQ3NDhiIiBzdHJva2Utd2lkdGg9IjEuNSIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPGxpbmUgeDE9IjM0NSIgeTE9IjkwIiB4Mj0iMzg4IiB5Mj0iMTIwIiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8bGluZSB4MT0iMzQ1IiB5MT0iMTAwIiB4Mj0iMzg4IiB5Mj0iMTYwIiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2FycikiLz4KICA8IS0tIENsYXVkZSBBUEkgLS0+CiAgPHJlY3QgeD0iNTY1IiB5PSI3MCIgd2lkdGg9IjEzMCIgaGVpZ2h0PSI2MCIgcng9IjciIGZpbGw9IiNmY2U3ZjMiIHN0cm9rZT0iI2VjNDg5OSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8dGV4dCB4PSI2MzAiIHk9Ijk0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjOWQxNzRkIj5DbGF1ZGUgQVBJPC90ZXh0PgogIDx0ZXh0IHg9IjYzMCIgeT0iMTEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiNiZTE4NWQiPmFwaS5hbnRocm9waWMuY29tPC90ZXh0PgogIDxsaW5lIHgxPSI1MjAiIHkxPSIxMDAiIHgyPSI1NjMiIHkyPSIxMDAiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDwhLS0gUmVzdWx0IHN0b3JlIC0tPgogIDxyZWN0IHg9IjU2NSIgeT0iMTU1IiB3aWR0aD0iMTMwIiBoZWlnaHQ9IjYwIiByeD0iNyIgZmlsbD0iI2RjZmNlNyIgc3Ryb2tlPSIjMjJjNTVlIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDx0ZXh0IHg9IjYzMCIgeT0iMTc4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjExIiBmb250LXdlaWdodD0iNjAwIiBmaWxsPSIjMTY2NTM0Ij5SZXN1bHQgU3RvcmU8L3RleHQ+CiAgPHRleHQgeD0iNjMwIiB5PSIxOTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzE1ODAzZCI+UmVkaXMgLyBEQjwvdGV4dD4KICA8dGV4dCB4PSI2MzAiIHk9IjIwOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSI5IiBmaWxsPSIjMTU4MDNkIj5rZXllZCBieSB0YXNrX2lkPC90ZXh0PgogIDxsaW5lIHgxPSI1MjAiIHkxPSIxNjAiIHgyPSI1NjMiIHkyPSIxNzUiIHN0cm9rZT0iIzY0NzQ4YiIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjMsMiIgbWFya2VyLWVuZD0idXJsKCNhcnIpIi8+CiAgPCEtLSBQb2xsIC0tPgogIDxyZWN0IHg9IjcwMCIgeT0iNjAiIHdpZHRoPSIxMDAiIGhlaWdodD0iNjAiIHJ4PSI3IiBmaWxsPSIjZjFmNWY5IiBzdHJva2U9IiM5NGEzYjgiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iNzUwIiB5PSI4MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9IjYwMCIgZmlsbD0iIzMzNDE1NSI+Q2xpZW50IHBvbGxzPC90ZXh0PgogIDx0ZXh0IHg9Ijc1MCIgeT0iOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZmlsbD0iIzQ3NTU2OSI+R0VUIC90YXNrcy97aWR9PC90ZXh0PgogIDx0ZXh0IHg9Ijc1MCIgeT0iMTA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiM0NzU1NjkiPm9yIHdlYmhvb2sgcHVzaDwvdGV4dD4KICA8bGluZSB4MT0iNjk1IiB5MT0iMTg1IiB4Mj0iNzIwIiB5Mj0iMTMwIiBzdHJva2U9IiM2NDc0OGIiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtZGFzaGFycmF5PSIzLDIiIG1hcmtlci1lbmQ9InVybCgjYXJyKSIvPgogIDwhLS0gRGVhZC1sZXR0ZXIgLS0+CiAgPHJlY3QgeD0iMTk1IiB5PSIxNzUiIHdpZHRoPSIxNTAiIGhlaWdodD0iNDUiIHJ4PSI3IiBmaWxsPSIjZmVlMmUyIiBzdHJva2U9IiNlZjQ0NDQiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMjcwIiB5PSIxOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTAiIGZvbnQtd2VpZ2h0PSI2MDAiIGZpbGw9IiM5OTFiMWIiPkRlYWQtTGV0dGVyIFF1ZXVlPC90ZXh0PgogIDx0ZXh0IHg9IjI3MCIgeT0iMjEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjkiIGZpbGw9IiNiOTFjMWMiPm1heF9yZXRyaWVzIGV4Y2VlZGVkPC90ZXh0PgogIDxsaW5lIHgxPSIyNzAiIHkxPSIxMjAiIHgyPSIyNzAiIHkyPSIxNzMiIHN0cm9rZT0iI2VmNDQ0NCIgc3Ryb2tlLXdpZHRoPSIxLjIiIHN0cm9rZS1kYXNoYXJyYXk9IjMsMiIgbWFya2VyLWVuZD0idXJsKCNhcnJlKSIvPgogIDxkZWZzPgogICAgPG1hcmtlciBpZD0iYXJyIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI2IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDAsNiBMOCwzIHoiIGZpbGw9IiM2NDc0OGIiLz48L21hcmtlcj4KICAgIDxtYXJrZXIgaWQ9ImFycmUiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjYiIHJlZlk9IjMiIG9yaWVudD0iYXV0byI+PHBhdGggZD0iTTAsMCBMMCw2IEw4LDMgeiIgZmlsbD0iI2VmNDQ0NCIvPjwvbWFya2VyPgogIDwvZGVmcz4KPC9zdmc+",
+          "alt": "Queue-based agent task dispatch architecture diagram",
+          "title": "Queue-Based Agent Task Dispatch"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The API server accepts requests, enqueues tasks, and returns a task_id immediately. Multiple workers dequeue tasks concurrently, call Claude, and write results to a result store. Clients retrieve results by polling or via webhook. Tasks that exceed max_retries land in the dead-letter queue."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use it"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use queue-based dispatch when any of the following apply: expected task duration exceeds 10 seconds, multiple Claude API calls are needed per request, the system must survive worker crashes without data loss, or cost control via concurrency limits is required. Skip it for synchronous chat interfaces where streaming latency matters more than resilience — instead stream Claude's response directly to the client."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Celery (Python, Redis backend)"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# celery_app.py\nfrom celery import Celery\nimport anthropic, os, redis as redis_lib, json\n\napp = Celery(\"agent\", broker=\"redis://localhost:6379/0\",\n             backend=\"redis://localhost:6379/1\")\n\napp.conf.update(\n    task_serializer=\"json\",\n    result_serializer=\"json\",\n    task_acks_late=True,           # ack only after success\n    task_reject_on_worker_lost=True,\n    task_max_retries=3,\n    task_default_retry_delay=30,   # seconds\n)\n\nclient = anthropic.Anthropic(api_key=os.environ[\"ANTHROPIC_API_KEY\"])\n_redis = redis_lib.Redis.from_url(\"redis://localhost:6379/2\")\n\n@app.task(bind=True, max_retries=3)\ndef run_agent_task(self, task_id: str, prompt: str,\n                   model: str = \"claude-haiku-4-5-20251001\",\n                   idempotency_key: str | None = None):\n    # Idempotency check\n    if idempotency_key:\n        if _redis.set(f\"idem:{idempotency_key}\", task_id, nx=True, ex=86400) is None:\n            return  # already processed\n    try:\n        response = client.messages.create(\n            model=model,\n            max_tokens=2048,\n            messages=[{\"role\": \"user\", \"content\": prompt}],\n        )\n        result = {\"status\": \"completed\", \"text\": response.content[0].text,\n                  \"usage\": dict(response.usage)}\n    except anthropic.RateLimitError as exc:\n        raise self.retry(exc=exc, countdown=60)\n    except anthropic.APIError as exc:\n        raise self.retry(exc=exc)\n    _redis.setex(f\"result:{task_id}\", 3600, json.dumps(result))"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FastAPI endpoint that enqueues tasks"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# api.py\nimport uuid, json\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\nimport redis\nfrom celery_app import run_agent_task\n\napp = FastAPI()\n_redis = redis.Redis.from_url(\"redis://localhost:6379/2\")\n\nclass AgentRequest(BaseModel):\n    prompt: str\n    model: str = \"claude-haiku-4-5-20251001\"\n    idempotency_key: str | None = None\n\n@app.post(\"/tasks\")\ndef create_task(req: AgentRequest):\n    task_id = str(uuid.uuid4())\n    run_agent_task.apply_async(\n        args=[task_id, req.prompt, req.model, req.idempotency_key],\n        task_id=task_id,\n    )\n    return {\"task_id\": task_id, \"status\": \"queued\"}\n\n@app.get(\"/tasks/{task_id}\")\ndef get_task(task_id: str):\n    raw = _redis.get(f\"result:{task_id}\")\n    if raw is None:\n        return {\"task_id\": task_id, \"status\": \"pending\"}\n    return {\"task_id\": task_id} | json.loads(raw)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "BullMQ (Node.js)"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "// worker.ts\nimport { Worker, Queue } from 'bullmq';\nimport Anthropic from '@anthropic-ai/sdk';\n\nconst client = new Anthropic();\nconst resultQueue = new Queue('results', { connection: { host: 'localhost', port: 6379 } });\n\nconst worker = new Worker('agent-tasks', async (job) => {\n  const { taskId, prompt, model = 'claude-haiku-4-5-20251001' } = job.data;\n  const message = await client.messages.create({\n    model,\n    max_tokens: 2048,\n    messages: [{ role: 'user', content: prompt }],\n  });\n  return {\n    status: 'completed',\n    text: message.content[0].type === 'text' ? message.content[0].text : '',\n    usage: message.usage,\n  };\n}, {\n  connection: { host: 'localhost', port: 6379 },\n  concurrency: 5,   // 5 concurrent Claude calls per worker process\n});\n\nworker.on('failed', (job, err) => {\n  console.error(`Job ${job?.id} failed:`, err.message);\n});"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A content moderation platform processes 200,000 pieces of user-generated content per day through a Claude haiku classifier. Tasks are enqueued to SQS by the ingestion service and consumed by an auto-scaling group of 5–40 EC2 workers based on queue depth. Each worker runs 10 concurrent Claude tasks (SQS visibility timeout: 120 seconds). Priority queues route paid user content to a dedicated fast lane and free-tier content to a standard lane with lower worker allocation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When Anthropic's API returns 429 (rate limit), the Celery retry decorator re-enqueues the task with a 60-second countdown. The SQS approach uses exponential backoff on the ReceiveMessage poll loop instead. Both approaches prevent thundering-herd retry storms that would make rate limiting worse."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Acknowledging before processing is the most dangerous mistake. If the worker acks the message before the Claude call completes and then crashes, the task is lost. Always use late acknowledgment (task_acks_late=True in Celery; the default behavior in BullMQ; do not delete the SQS message until after result storage)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: early ack (implicit in many frameworks without explicit config)\n@app.task\ndef run(task_id, prompt):\n    # Celery acks here by default — crash after this line loses the task\n    response = client.messages.create(...)\n    store_result(task_id, response)\n\n# RIGHT: late ack\n@app.task(task_acks_late=True, task_reject_on_worker_lost=True)\ndef run(task_id, prompt):\n    response = client.messages.create(...)\n    store_result(task_id, response)\n    # Celery acks here — after success"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set max_retries=3 with exponential backoff and route exhausted tasks to a dead-letter queue — never silently discard failures."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement idempotency with a client-provided idempotency_key checked via Redis SET NX — prevents duplicate Claude calls on client retries."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use separate queues for user-facing (low-latency) and batch (high-throughput) tasks, with different worker allocations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor queue depth as a leading indicator of overload — scale workers when depth grows beyond 2× the expected processing time × throughput."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set visibility timeout (SQS) or task time limit (Celery) to 2× the expected maximum task duration to prevent ghost re-delivery of slow tasks."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Queue throughput is limited by the number of concurrent workers × the Claude API rate limit. With 10 Celery workers each running 5 concurrent tasks, 50 Claude calls are in flight simultaneously. Anthropic's default rate limits for tier-3 accounts allow 4,000 requests per minute for claude-haiku; 50 concurrent workers with average 2-second responses saturates at 50/2 × 60 = 1,500 RPM, well within limits. For higher throughput, increase worker count until the rate limit is the bottleneck, then apply for higher limits or use request budgeting."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Celery Flower provides a real-time web dashboard showing queue depth, active workers, task success/failure rates, and individual task details. BullMQ has Bull Board, a similar dashboard. For SQS, CloudWatch metrics (NumberOfMessagesSent, ApproximateNumberOfMessagesVisible, NumberOfMessagesFailed) feed into autoscaling alarms. Datadog and Grafana can ingest all three via standard integrations."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "System"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Language"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Backend"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Managed?"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Celery"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Redis / RabbitMQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Python stacks, ML pipelines"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "BullMQ"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Node.js"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Redis"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Node.js, TypeScript stacks"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWS SQS"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Any"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWS managed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Yes"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "AWS deployments, polyglot"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Kafka / Kinesis"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Any"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Varies"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Partially"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High-throughput streaming, replay"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Task payloads in the queue may contain user prompts, which could include sensitive personal information. Encrypt task payloads at rest (Redis encryption, SQS server-side encryption with KMS) and in transit (TLS). Avoid logging full prompt text in worker logs; log only task IDs and metadata. For PII-heavy workloads, store the prompt in a short-lived encrypted store (AWS Secrets Manager, with TTL) and pass only a reference in the queue message."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The dead-letter queue must be monitored with alerts. A DLQ with growing depth indicates a systemic failure — bad prompt format, API key expiry, or a model change that breaks the task's parsing logic. Page the on-call engineer when DLQ depth exceeds a threshold rather than letting tasks silently accumulate."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Queue-based dispatch decouples request acceptance from Claude execution, eliminating HTTP timeout constraints and enabling durable at-least-once delivery."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use late acknowledgment (ack-on-complete) so tasks are re-delivered if a worker crashes mid-execution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement idempotency via a client-provided idempotency_key checked with Redis SET NX to prevent duplicate Claude calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Celery+Redis, BullMQ+Redis, and AWS SQS all work well for Claude task dispatch; choose based on your language stack and cloud provider."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Route Anthropic 429 responses to a retry with exponential backoff, not an error — rate limits are transient and retries succeed without human intervention."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor queue depth and DLQ depth with alerts; both are leading indicators of overload or systemic failure."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
