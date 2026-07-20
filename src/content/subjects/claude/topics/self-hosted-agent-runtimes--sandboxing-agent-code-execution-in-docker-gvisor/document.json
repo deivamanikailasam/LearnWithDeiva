@@ -1,1 +1,3029 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-22T09:00:13.091Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Sandboxing agent code execution in Docker/gVisor is the practice of running Claude-powered agents inside "},{"type":"text","marks":[{"type":"bold"}],"text":"isolated execution environments"},{"type":"text","text":" so that the agent can execute arbitrary code, tools, or scripts without being able to harm your host system, leak secrets, or compromise other services. In "},{"type":"text","marks":[{"type":"bold"}],"text":"Self-Hosted Agent Runtimes"},{"type":"text","text":", this means you build and manage the isolation yourself, unlike Managed Agents where Anthropic provides secure cloud sandboxes."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What it is"}]},{"type":"paragraph","content":[{"type":"text","text":"Sandboxing creates a "},{"type":"text","marks":[{"type":"bold"}],"text":"security boundary"},{"type":"text","text":" between the agent and your infrastructure:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Docker containers"},{"type":"text","text":": Provide OS-level isolation, resource limits, and network confinement for agent execution.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"gVisor"},{"type":"text","text":": A stricter sandbox that uses seccomp filters and minimal kernels to restrict what code can do, even inside containers.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Self-hosted sandboxes"},{"type":"text","text":": You control the infrastructure (unlike Anthropic-managed sandboxes), which is critical for compliance, data residency, or when you need custom tool execution."}]},{"type":"paragraph","content":[{"type":"text","text":"The agent runs inside the sandbox and can execute tools, scripts, or LLM code generation, but the sandbox prevents it from escaping to the host or accessing unauthorized resources."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why it matters"}]},{"type":"paragraph","content":[{"type":"text","text":"Sandboxing is essential for production agent workloads because:\n- Agents can be triggered by "},{"type":"text","marks":[{"type":"bold"}],"text":"malicious prompts"},{"type":"text","text":" that try to execute harmful code or access secrets.\n- Without sandboxing, the agent could "},{"type":"text","marks":[{"type":"bold"}],"text":"read your filesystem"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"exfiltrate data"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"bold"}],"text":"compromise other services"},{"type":"text","text":".\n- Self-hosted sandboxes let you control "},{"type":"text","marks":[{"type":"bold"}],"text":"security boundaries"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"credential management"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"bold"}],"text":"data residency"},{"type":"text","text":" requirements."}]},{"type":"paragraph","content":[{"type":"text","text":"For enterprise deployments, sandboxing is one of the core security controls: it prevents the agent from executing arbitrary system commands, accessing sensitive files, or communicating with unauthorized networks."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Mental model"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of the sandbox as a "},{"type":"text","marks":[{"type":"bold"}],"text":"sealed room"},{"type":"text","text":":\n- The agent is inside the room.\n- The room has "},{"type":"text","marks":[{"type":"bold"}],"text":"limited tools"},{"type":"text","text":" (e.g., can read specific files, run specific commands).\n- The room has "},{"type":"text","marks":[{"type":"bold"}],"text":"no escape"},{"type":"text","text":" (cannot access the host filesystem or network).\n- The room has "},{"type":"text","marks":[{"type":"bold"}],"text":"resource limits"},{"type":"text","text":" (cannot consume infinite CPU/memory)."}]},{"type":"paragraph","content":[{"type":"text","text":"Docker provides the room's walls. gVisor adds an extra layer of security inside the room by restricting what the agent's code can actually do."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"How it works"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Docker containerization"}]},{"type":"paragraph","content":[{"type":"text","text":"Docker provides isolation through:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Filesystem isolation"},{"type":"text","text":": Each container has its own filesystem, not shared with the host.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Network isolation"},{"type":"text","text":": Containers can have their own network stack or be restricted.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Resource limits"},{"type":"text","text":": CPU, memory, and disk quotas prevent resource exhaustion.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Process isolation"},{"type":"text","text":": Containers run in separate process namespaces."}]},{"type":"paragraph","content":[{"type":"text","text":"A typical agent Docker setup:"}]},{"type":"codeBlock","attrs":{"language":"yaml"},"content":[{"type":"text","text":"# docker-compose.yml\nversion: \"3.8\"\nservices:\n  agent-runner:\n    image: agent-runtime:latest\n    container_name: claude-agent\n    security_opt:\n      - no-new-privileges:true\n    read_only: true\n    tmpfs:\n      - /tmp\n    volumes:\n      - ./sandbox-data:/sandbox:ro\n    networks:\n      - agent-net\n    deploy:\n      resources:\n        limits:\n          cpus: \"2\"\n          memory: 4G"}]},{"type":"paragraph","content":[{"type":"text","text":"This configuration:\n- Makes the container filesystem read-only (except "},{"type":"text","marks":[{"type":"code"}],"text":"/tmp"},{"type":"text","text":").\n- Limits filesystem access to a specific sandbox directory.\n- Restricts network access to an internal network.\n- Limits CPU and memory resources."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"gVisor enforcement"}]},{"type":"paragraph","content":[{"type":"text","text":"gVisor adds "},{"type":"text","marks":[{"type":"bold"}],"text":"seccomp filters"},{"type":"text","text":" and a "},{"type":"text","marks":[{"type":"bold"}],"text":"minimal kernel"},{"type":"text","text":" that restricts what code can execute inside the container:\n- Blocks dangerous system calls (e.g., "},{"type":"text","marks":[{"type":"code"}],"text":"ptrace"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"mount"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"execve"},{"type":"text","text":").\n- Prevents the agent from escaping the container.\n- Adds an extra security layer beyond standard Docker isolation."}]},{"type":"paragraph","content":[{"type":"text","text":"gVisor is particularly useful when:\n- The agent executes "},{"type":"text","marks":[{"type":"bold"}],"text":"arbitrary code"},{"type":"text","text":" (e.g., code generation from LLM).\n- You need "},{"type":"text","marks":[{"type":"bold"}],"text":"stricter security"},{"type":"text","text":" than Docker provides alone.\n- You're running agents in "},{"type":"text","marks":[{"type":"bold"}],"text":"multi-tenant environments"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","text":"A gVisor profile might look like:"}]},{"type":"codeBlock","attrs":{"language":"json"},"content":[{"type":"text","text":"{\n  \"seccomp\": {\n    \"defaultAction\": \"SCMP_ERR\",\n    \"syscalls\": [\n      {\n        \"names\": [\"read\", \"write\", \"exit\", \"exit_group\"],\n        \"action\": \"SCMP_ALLOW\"\n      }\n    ]\n  }\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"This blocks all system calls except the explicitly allowed ones."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Self-hosted vs. managed sandboxes"}]},{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Aspect"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Self-hosted (Docker/gVisor)"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Managed (Anthropic)"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Control"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"You control infrastructure, security, and data"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Anthropic controls infrastructure"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Compliance"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Can meet custom compliance requirements"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Limited to Anthropic's cert scope"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Data residency"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Can enforce data stays in your region"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Data may be processed by Anthropic"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Setup complexity"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Requires infrastructure engineering"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Turnkey, no setup"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Security"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"You manage security boundaries"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Anthropic manages security"}]}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"For "},{"type":"text","marks":[{"type":"bold"}],"text":"Self-Hosted Agent Runtimes"},{"type":"text","text":", you build the sandbox yourself. For "},{"type":"text","marks":[{"type":"bold"}],"text":"Managed Agents"},{"type":"text","text":", Anthropic provides secure cloud sandboxes with pre-installed packages and network access."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Implementation patterns"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Simple Docker sandbox"}]},{"type":"paragraph","content":[{"type":"text","text":"For basic agent execution:"}]},{"type":"codeBlock","attrs":{"language":"bash"},"content":[{"type":"text","text":"docker run \\\n  --rm \\\n  --name claude-agent \\\n  --read-only \\\n  --tmpfs /tmp:rw,noexec,nosuid,size=1G \\\n  --cap-drop ALL \\\n  --security-opt no-new-privileges:true \\\n  --user agent-user \\\n  agent-runtime:latest"}]},{"type":"paragraph","content":[{"type":"text","text":"This:\n- Removes the container after exit ("},{"type":"text","marks":[{"type":"code"}],"text":"--rm"},{"type":"text","text":").\n- Makes the filesystem read-only.\n- Creates a temporary writable filesystem for "},{"type":"text","marks":[{"type":"code"}],"text":"/tmp"},{"type":"text","text":".\n- Drops all capabilities (no privileged operations).\n- Removes user privileges.\n- Runs as a non-root user."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"gVisor-enforced sandbox"}]},{"type":"paragraph","content":[{"type":"text","text":"For stricter security:"}]},{"type":"codeBlock","attrs":{"language":"bash"},"content":[{"type":"text","text":"docker run \\\n  --runtime=gvisor \\\n  --rm \\\n  --name claude-agent Secure \\\n  agent-runtime:latest"}]},{"type":"paragraph","content":[{"type":"text","text":"This uses gVisor as the container runtime, adding the extra security layer."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Security considerations"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Credential management"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Store credentials in "},{"type":"text","marks":[{"type":"bold"}],"text":"managed secret stores"},{"type":"text","text":" (e.g., Vault, AWS Secrets Manager), not in the container."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"short-lived credentials"},{"type":"text","text":" that expire automatically."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Rotate credentials"},{"type":"text","text":" regularly."}]}]}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Network isolation"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Restrict network access to "},{"type":"text","marks":[{"type":"bold"}],"text":"specific endpoints"},{"type":"text","text":" (e.g., only Anthropic's API)."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"firewall rules"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"bold"}],"text":"network policies"},{"type":"text","text":" to block unauthorized connections."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Don't allow the agent to access your internal network unless explicitly needed."}]}]}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Filesystem restrictions"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Make the container filesystem "},{"type":"text","marks":[{"type":"bold"}],"text":"read-only"},{"type":"text","text":" except for specific directories."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"tmpfs"},{"type":"text","text":" for temporary writable storage."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Don't expose the host filesystem to the container."}]}]}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Resource limits"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Set "},{"type":"text","marks":[{"type":"bold"}],"text":"CPU and memory limits"},{"type":"text","text":" to prevent resource exhaustion."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"disk quotas"},{"type":"text","text":" to prevent disk exhaustion."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Monitor resource usage and "},{"type":"text","marks":[{"type":"bold"}],"text":"alert on anomalies"},{"type":"text","text":"."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Trade-offs"}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Benefits:"},{"type":"text","text":"\n- You control "},{"type":"text","marks":[{"type":"bold"}],"text":"security boundaries"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"bold"}],"text":"data residency"},{"type":"text","text":".\n- Can meet "},{"type":"text","marks":[{"type":"bold"}],"text":"custom compliance requirements"},{"type":"text","text":".\n- More "},{"type":"text","marks":[{"type":"bold"}],"text":"flexible"},{"type":"text","text":" for custom tool execution.\n- Lower latency for "},{"type":"text","marks":[{"type":"bold"}],"text":"local execution"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Trade-offs:"},{"type":"text","text":"\n- You must "},{"type":"text","marks":[{"type":"bold"}],"text":"build and maintain"},{"type":"text","text":" the sandbox infrastructure.\n- More "},{"type":"text","marks":[{"type":"bold"}],"text":"complex"},{"type":"text","text":" than managed sandboxes.\n- Requires "},{"type":"text","marks":[{"type":"bold"}],"text":"infrastructure engineering"},{"type":"text","text":" expertise.\n- You're responsible for "},{"type":"text","marks":[{"type":"bold"}],"text":"security updates"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"bold"}],"text":"monitoring"},{"type":"text","text":"."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best practices"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"Docker with read-only filesystems"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"bold"}],"text":"tmpfs"},{"type":"text","text":" for writable storage."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Enable "},{"type":"text","marks":[{"type":"bold"}],"text":"gVisor"},{"type":"text","text":" for stricter security when executing arbitrary code."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Drop all capabilities"},{"type":"text","text":" and run as "},{"type":"text","marks":[{"type":"bold"}],"text":"non-root"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Set "},{"type":"text","marks":[{"type":"bold"}],"text":"resource limits"},{"type":"text","text":" (CPU, memory, disk)."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"managed secret stores"},{"type":"text","text":" for credentials."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Monitor"},{"type":"text","text":" sandbox health and "},{"type":"text","marks":[{"type":"bold"}],"text":"alert on anomalies"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Rotate credentials"},{"type":"text","text":" regularly and use "},{"type":"text","marks":[{"type":"bold"}],"text":"short-lived tokens"},{"type":"text","text":"."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Key takeaways"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Sandbox agent execution in "},{"type":"text","marks":[{"type":"bold"}],"text":"Docker containers"},{"type":"text","text":" for OS-level isolation and "},{"type":"text","marks":[{"type":"bold"}],"text":"gVisor"},{"type":"text","text":" for stricter security."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Self-hosted sandboxes let you control "},{"type":"text","marks":[{"type":"bold"}],"text":"security boundaries"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"bold"}],"text":"data residency"},{"type":"text","text":", unlike managed sandboxes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Key security controls: "},{"type":"text","marks":[{"type":"bold"}],"text":"read-only filesystems"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"tmpfs"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"capability drops"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"non-root users"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"resource limits"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"bold"}],"text":"managed secret stores"},{"type":"text","text":" for credentials, not container environment variables."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Sandbox isolation is critical for preventing "},{"type":"text","marks":[{"type":"bold"}],"text":"malicious code execution"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"bold"}],"text":"data exfiltration"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"bold"}],"text":"host compromise"},{"type":"text","text":"."}]}]}]},{"type":"paragraph"}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-22T09:00:13.091Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sandboxing agent code execution in Docker/gVisor is the practice of running Claude-powered agents inside "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "isolated execution environments"
+          },
+          {
+            "type": "text",
+            "text": " so that the agent can execute arbitrary code, tools, or scripts without being able to harm your host system, leak secrets, or compromise other services. In "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Self-Hosted Agent Runtimes"
+          },
+          {
+            "type": "text",
+            "text": ", this means you build and manage the isolation yourself, unlike Managed Agents where Anthropic provides secure cloud sandboxes."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5TYW5kYm94aW5nIGFnZW50IGNvZGUgZXhlY3V0aW9uIGluIERvY2tlci9nVmlzb3Ig4oCUIEtleSBDb25jZXB0czwvdGV4dD4KPHJlY3QgeD0iMzAiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjMWU0MGFmIiByeD0iOCIvPgo8dGV4dCB4PSIxNDUiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Q29yZSBDb25jZXB0PC90ZXh0Pgo8cmVjdCB4PSIyOTUiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjMDY1ZjQ2IiByeD0iOCIvPgo8dGV4dCB4PSI0MTAiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+SG93IEl0IFdvcmtzPC90ZXh0Pgo8cmVjdCB4PSI1NjAiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjN2MyZDEyIiByeD0iOCIvPgo8dGV4dCB4PSI2NzUiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+QmVzdCBQcmFjdGljZXM8L3RleHQ+CjxsaW5lIHgxPSIyNjAiIHkxPSI5NyIgeDI9IjI5MyIgeTI9Ijk3IiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8bGluZSB4MT0iNTI1IiB5MT0iOTciIHgyPSI1NTgiIHkyPSI5NyIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYSkiLz4KPGRlZnM+PG1hcmtlciBpZD0iYSIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNyIgcmVmWT0iNCIgb3JpZW50PSJhdXRvIj48cGF0aCBkPSJNMCwwIEw4LDQgTDAsOCBaIiBmaWxsPSIjNDc1NTY5Ii8+PC9tYXJrZXI+PC9kZWZzPgo8L3N2Zz4=",
+          "alt": "Sandboxing agent code execution in Docker/gVisor concept diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sandboxing creates a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "security boundary"
+          },
+          {
+            "type": "text",
+            "text": " between the agent and your infrastructure:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Docker containers"
+          },
+          {
+            "type": "text",
+            "text": ": Provide OS-level isolation, resource limits, and network confinement for agent execution.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "gVisor"
+          },
+          {
+            "type": "text",
+            "text": ": A stricter sandbox that uses seccomp filters and minimal kernels to restrict what code can do, even inside containers.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Self-hosted sandboxes"
+          },
+          {
+            "type": "text",
+            "text": ": You control the infrastructure (unlike Anthropic-managed sandboxes), which is critical for compliance, data residency, or when you need custom tool execution."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The agent runs inside the sandbox and can execute tools, scripts, or LLM code generation, but the sandbox prevents it from escaping to the host or accessing unauthorized resources."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sandboxing is essential for production agent workloads because:\n- Agents can be triggered by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "malicious prompts"
+          },
+          {
+            "type": "text",
+            "text": " that try to execute harmful code or access secrets.\n- Without sandboxing, the agent could "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "read your filesystem"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "exfiltrate data"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "compromise other services"
+          },
+          {
+            "type": "text",
+            "text": ".\n- Self-hosted sandboxes let you control "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "security boundaries"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "credential management"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "data residency"
+          },
+          {
+            "type": "text",
+            "text": " requirements."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For enterprise deployments, sandboxing is one of the core security controls: it prevents the agent from executing arbitrary system commands, accessing sensitive files, or communicating with unauthorized networks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of the sandbox as a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "sealed room"
+          },
+          {
+            "type": "text",
+            "text": ":\n- The agent is inside the room.\n- The room has "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "limited tools"
+          },
+          {
+            "type": "text",
+            "text": " (e.g., can read specific files, run specific commands).\n- The room has "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "no escape"
+          },
+          {
+            "type": "text",
+            "text": " (cannot access the host filesystem or network).\n- The room has "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "resource limits"
+          },
+          {
+            "type": "text",
+            "text": " (cannot consume infinite CPU/memory)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Docker provides the room's walls. gVisor adds an extra layer of security inside the room by restricting what the agent's code can actually do."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Docker containerization"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Docker provides isolation through:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Filesystem isolation"
+          },
+          {
+            "type": "text",
+            "text": ": Each container has its own filesystem, not shared with the host.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Network isolation"
+          },
+          {
+            "type": "text",
+            "text": ": Containers can have their own network stack or be restricted.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Resource limits"
+          },
+          {
+            "type": "text",
+            "text": ": CPU, memory, and disk quotas prevent resource exhaustion.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Process isolation"
+          },
+          {
+            "type": "text",
+            "text": ": Containers run in separate process namespaces."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A typical agent Docker setup:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "yaml"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# docker-compose.yml\nversion: \"3.8\"\nservices:\n  agent-runner:\n    image: agent-runtime:latest\n    container_name: claude-agent\n    security_opt:\n      - no-new-privileges:true\n    read_only: true\n    tmpfs:\n      - /tmp\n    volumes:\n      - ./sandbox-data:/sandbox:ro\n    networks:\n      - agent-net\n    deploy:\n      resources:\n        limits:\n          cpus: \"2\"\n          memory: 4G"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This configuration:\n- Makes the container filesystem read-only (except "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/tmp"
+          },
+          {
+            "type": "text",
+            "text": ").\n- Limits filesystem access to a specific sandbox directory.\n- Restricts network access to an internal network.\n- Limits CPU and memory resources."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "gVisor enforcement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "gVisor adds "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "seccomp filters"
+          },
+          {
+            "type": "text",
+            "text": " and a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "minimal kernel"
+          },
+          {
+            "type": "text",
+            "text": " that restricts what code can execute inside the container:\n- Blocks dangerous system calls (e.g., "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ptrace"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "mount"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "execve"
+          },
+          {
+            "type": "text",
+            "text": ").\n- Prevents the agent from escaping the container.\n- Adds an extra security layer beyond standard Docker isolation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "gVisor is particularly useful when:\n- The agent executes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "arbitrary code"
+          },
+          {
+            "type": "text",
+            "text": " (e.g., code generation from LLM).\n- You need "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "stricter security"
+          },
+          {
+            "type": "text",
+            "text": " than Docker provides alone.\n- You're running agents in "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "multi-tenant environments"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A gVisor profile might look like:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "json"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"seccomp\": {\n    \"defaultAction\": \"SCMP_ERR\",\n    \"syscalls\": [\n      {\n        \"names\": [\"read\", \"write\", \"exit\", \"exit_group\"],\n        \"action\": \"SCMP_ALLOW\"\n      }\n    ]\n  }\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This blocks all system calls except the explicitly allowed ones."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Self-hosted vs. managed sandboxes"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Aspect"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Self-hosted (Docker/gVisor)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Managed (Anthropic)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Control"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "You control infrastructure, security, and data"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Anthropic controls infrastructure"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Compliance"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Can meet custom compliance requirements"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Limited to Anthropic's cert scope"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Data residency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Can enforce data stays in your region"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Data may be processed by Anthropic"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Setup complexity"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Requires infrastructure engineering"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Turnkey, no setup"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ],
+                        "text": "Security"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "You manage security boundaries"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Anthropic manages security"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Self-Hosted Agent Runtimes"
+          },
+          {
+            "type": "text",
+            "text": ", you build the sandbox yourself. For "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Managed Agents"
+          },
+          {
+            "type": "text",
+            "text": ", Anthropic provides secure cloud sandboxes with pre-installed packages and network access."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Implementation patterns"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Simple Docker sandbox"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For basic agent execution:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "bash"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "docker run \\\n  --rm \\\n  --name claude-agent \\\n  --read-only \\\n  --tmpfs /tmp:rw,noexec,nosuid,size=1G \\\n  --cap-drop ALL \\\n  --security-opt no-new-privileges:true \\\n  --user agent-user \\\n  agent-runtime:latest"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This:\n- Removes the container after exit ("
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "--rm"
+          },
+          {
+            "type": "text",
+            "text": ").\n- Makes the filesystem read-only.\n- Creates a temporary writable filesystem for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/tmp"
+          },
+          {
+            "type": "text",
+            "text": ".\n- Drops all capabilities (no privileged operations).\n- Removes user privileges.\n- Runs as a non-root user."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "gVisor-enforced sandbox"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For stricter security:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "bash"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "docker run \\\n  --runtime=gvisor \\\n  --rm \\\n  --name claude-agent Secure \\\n  agent-runtime:latest"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This uses gVisor as the container runtime, adding the extra security layer."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security considerations"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Credential management"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Store credentials in "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "managed secret stores"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (e.g., Vault, AWS Secrets Manager), not in the container."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "short-lived credentials"
+                  },
+                  {
+                    "type": "text",
+                    "text": " that expire automatically."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Rotate credentials"
+                  },
+                  {
+                    "type": "text",
+                    "text": " regularly."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Network isolation"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Restrict network access to "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "specific endpoints"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (e.g., only Anthropic's API)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "firewall rules"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "network policies"
+                  },
+                  {
+                    "type": "text",
+                    "text": " to block unauthorized connections."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Don't allow the agent to access your internal network unless explicitly needed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Filesystem restrictions"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Make the container filesystem "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "read-only"
+                  },
+                  {
+                    "type": "text",
+                    "text": " except for specific directories."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "tmpfs"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for temporary writable storage."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Don't expose the host filesystem to the container."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Resource limits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "CPU and memory limits"
+                  },
+                  {
+                    "type": "text",
+                    "text": " to prevent resource exhaustion."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "disk quotas"
+                  },
+                  {
+                    "type": "text",
+                    "text": " to prevent disk exhaustion."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor resource usage and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "alert on anomalies"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Benefits:"
+          },
+          {
+            "type": "text",
+            "text": "\n- You control "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "security boundaries"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "data residency"
+          },
+          {
+            "type": "text",
+            "text": ".\n- Can meet "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "custom compliance requirements"
+          },
+          {
+            "type": "text",
+            "text": ".\n- More "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "flexible"
+          },
+          {
+            "type": "text",
+            "text": " for custom tool execution.\n- Lower latency for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "local execution"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Trade-offs:"
+          },
+          {
+            "type": "text",
+            "text": "\n- You must "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "build and maintain"
+          },
+          {
+            "type": "text",
+            "text": " the sandbox infrastructure.\n- More "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "complex"
+          },
+          {
+            "type": "text",
+            "text": " than managed sandboxes.\n- Requires "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "infrastructure engineering"
+          },
+          {
+            "type": "text",
+            "text": " expertise.\n- You're responsible for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "security updates"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "monitoring"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Docker with read-only filesystems"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "tmpfs"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for writable storage."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enable "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "gVisor"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for stricter security when executing arbitrary code."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Drop all capabilities"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and run as "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "non-root"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "resource limits"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (CPU, memory, disk)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "managed secret stores"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for credentials."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Monitor"
+                  },
+                  {
+                    "type": "text",
+                    "text": " sandbox health and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "alert on anomalies"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Rotate credentials"
+                  },
+                  {
+                    "type": "text",
+                    "text": " regularly and use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "short-lived tokens"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sandbox agent execution in "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Docker containers"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for OS-level isolation and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "gVisor"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for stricter security."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Self-hosted sandboxes let you control "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "security boundaries"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "data residency"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", unlike managed sandboxes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Key security controls: "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "read-only filesystems"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "tmpfs"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "capability drops"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "non-root users"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "resource limits"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "managed secret stores"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for credentials, not container environment variables."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sandbox isolation is critical for preventing "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "malicious code execution"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "data exfiltration"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "host compromise"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u2014"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with sandboxing agent code execution in docker/gvisor, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with sandboxing agent code execution in docker/gvisor. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of sandboxing agent code execution in docker/gvisor scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Follow these best practices when working with sandboxing agent code execution in docker/gvisor to maximize reliability and performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate incrementally \u2014 validate your core approach before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with realistic inputs \u2014 use representative examples from your actual use case, not just toy examples."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor in production \u2014 track latency, error rates, and output quality with structured logging and metrics."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version control your configurations \u2014 treat prompts and settings like code with proper change tracking."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Handle errors gracefully \u2014 implement retry logic with exponential backoff for transient API errors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set appropriate timeouts \u2014 long-running requests should have explicit timeout limits to prevent hangs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit produced content to catch quality drift as models are updated."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes and How to Avoid Them"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls catch most developers off guard. Learn from them upfront."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treating LLM output as deterministic \u2014 outputs vary between runs. Always validate structure and handle unexpected formats."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not accounting for token limits \u2014 conversations grow over time. Implement context truncation strategies before hitting limits."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering before validation \u2014 build the simplest thing that works, then optimize based on real measurements."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring rate limits \u2014 API throttling causes failures under load. Implement request queuing and rate-limit-aware retry logic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in source code \u2014 separate prompt text from code to enable rapid iteration without deployments."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability Considerations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At scale, sandboxing agent code execution in docker/gvisor introduces specific performance challenges that require deliberate design decisions."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency: Claude Haiku responds in 1-5 seconds; Sonnet in 5-15 seconds; Opus in 15-30+ seconds. Choose the right model for your latency budget."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Throughput: Use async clients (AsyncAnthropic in Python, async/await in TypeScript) for concurrent requests rather than sequential blocking calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cost optimization: Prompt caching reduces costs by 90% on repeated prefixes. The Message Batches API gives 50% discount for offline workloads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Streaming: Use streaming responses to reduce perceived latency \u2014 users see output immediately rather than waiting for complete generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Connection pooling: Reuse HTTP connections with a persistent client instance rather than creating a new client per request."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and Reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production deployments require attention to security boundaries and reliability engineering."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Never log API keys \u2014 rotate credentials immediately if they appear in logs, error messages, or version control history."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate and sanitize inputs \u2014 prompt injection attacks can exfiltrate data or override instructions if user inputs are embedded directly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement circuit breakers \u2014 automatically stop sending requests when error rates exceed threshold to prevent cascading failures."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Audit all AI-generated actions \u2014 log every API call, input, and output with correlation IDs for debugging and compliance."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sandboxing agent code execution in Docker/gVisor is a foundational aspect of building reliable Claude-powered applications. The patterns covered here \u2014 careful validation, incremental iteration, proper error handling, and performance-aware design \u2014 apply broadly across all Claude integrations. Master these fundamentals and you will be well-equipped to tackle more complex scenarios as your application evolves."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,1 +1,1295 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T08:52:05.027Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"For "},{"type":"text","marks":[{"type":"bold"}],"text":"React / Next.js + Claude"},{"type":"text","text":", the strongest production pattern is: use a Next.js App Router route handler as the streaming boundary, keep the Anthropic key on the server, call Claude with "},{"type":"text","marks":[{"type":"code"}],"text":"stream: true"},{"type":"text","text":" or the SDK streaming helper, and let the client progressively render text from the response stream. Server Actions can help with non-streaming mutations and chat persistence, but for live token-by-token chat, route handlers are usually the cleaner fit because the browser can consume the response body directly as a stream."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"In practice, the architecture is usually "},{"type":"text","marks":[{"type":"code"}],"text":"Client Component -> /app/api/chat/route.ts -> Anthropic SDK -> streamed response back to client"},{"type":"text","text":". Anthropic’s streaming docs state that setting "},{"type":"text","marks":[{"type":"code"}],"text":"\"stream\": true"},{"type":"text","text":" returns server-sent events, and the TypeScript SDK provides streaming helpers such as "},{"type":"text","marks":[{"type":"code"}],"text":".stream()"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":".finalMessage()"},{"type":"text","text":" to work with that flow. The event stream includes "},{"type":"text","marks":[{"type":"code"}],"text":"message_start"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_start"},{"type":"text","text":", one or more "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_delta"},{"type":"text","text":" events, optional "},{"type":"text","marks":[{"type":"code"}],"text":"ping"},{"type":"text","text":" events, "},{"type":"text","marks":[{"type":"code"}],"text":"message_delta"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"message_stop"},{"type":"text","text":", so your code should ignore unknown events and mainly render "},{"type":"text","marks":[{"type":"code"}],"text":"text_delta"},{"type":"text","text":" chunks for chat text."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why App Router works well"}]},{"type":"paragraph","content":[{"type":"text","text":"Next.js App Router route handlers can return a "},{"type":"text","marks":[{"type":"code"}],"text":"ReadableStream"},{"type":"text","text":", which makes them a natural place to proxy Claude streaming into the UI. This keeps secrets server-side, gives you one place for auth, rate limiting, validation, logging, and conversation trimming, and avoids exposing the Anthropic API key in the browser. Anthropic’s SDK documentation also notes support across Node.js, Deno, Bun, and browser environments, but the safe production pattern for web apps is still to keep model calls behind your own server boundary."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended file layout"}]},{"type":"paragraph","content":[{"type":"text","text":"A practical App Router setup often looks like this:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/chat/page.tsx"},{"type":"text","text":" for the chat screen UI."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/api/chat/route.ts"},{"type":"text","text":" for the streaming Claude endpoint."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/actions.ts"},{"type":"text","text":" or feature-specific server actions for saving conversations, renaming chats, or feedback events after streaming finishes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"lib/anthropic.ts"},{"type":"text","text":" for the configured Anthropic client."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"lib/chat-schema.ts"},{"type":"text","text":" for request validation and role/content normalization."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Route handler pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"The route handler should accept the current message list, validate it, optionally trim old turns, call Claude in streaming mode, and forward only the useful deltas to the browser. Anthropic’s official streaming docs specifically say that direct integrations need to handle SSE events, while the SDK simplifies this work."}]},{"type":"paragraph","content":[{"type":"text","text":"A minimal route handler pattern in Next.js looks like this:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"// app/api/chat/route.ts\nimport Anthropic from \"@anthropic-ai/sdk\";\n\nexport const runtime = \"nodejs\";\n\nconst anthropic = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY!,\n});\n\nexport async function POST(req: Request) {\n  const { messages } = await req.json();\n\n  const stream = await anthropic.messages.stream({\n    model: \"claude-opus-4-8\",\n    max_tokens: 1024,\n    stream: true,\n    messages,\n  });\n\n  const encoder = new TextEncoder();\n\n  const readable = new ReadableStream({\n    async start(controller) {\n      try {\n        for await (const event of stream) {\n          if (\n            event.type === \"content_block_delta\" &&\n            event.delta.type === \"text_delta\"\n          ) {\n            controller.enqueue(\n              encoder.encode(\n                `data: ${JSON.stringify({ type: \"text\", text: event.delta.text })}\\n\\n`\n              )\n            );\n          }\n\n          if (event.type === \"message_stop\") {\n            controller.enqueue(\n              encoder.encode(`data: ${JSON.stringify({ type: \"done\" })}\\n\\n`)\n            );\n          }\n        }\n\n        controller.close();\n      } catch (error) {\n        controller.enqueue(\n          encoder.encode(\n            `data: ${JSON.stringify({ type: \"error\", message: \"Stream failed\" })}\\n\\n`\n          )\n        );\n        controller.close();\n      }\n    },\n  });\n\n  return new Response(readable, {\n    headers: {\n      \"Content-Type\": \"text/event-stream\",\n      \"Cache-Control\": \"no-cache\",\n      Connection: \"keep-alive\",\n    },\n  });\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern matches the documented SSE behavior: "},{"type":"text","marks":[{"type":"code"}],"text":"text/event-stream"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"no-cache"},{"type":"text","text":", and incremental "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_delta"},{"type":"text","text":" handling."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Client streaming pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"On the client, use "},{"type":"text","marks":[{"type":"code"}],"text":"fetch()"},{"type":"text","text":" and read "},{"type":"text","marks":[{"type":"code"}],"text":"response.body"},{"type":"text","text":" with a stream reader instead of "},{"type":"text","marks":[{"type":"code"}],"text":"EventSource"},{"type":"text","text":", because "},{"type":"text","marks":[{"type":"code"}],"text":"EventSource"},{"type":"text","text":" only supports GET and cannot send the chat body conveniently. As chunks arrive, append them to the current assistant message rather than creating a new message for every token, which keeps rendering efficient and preserves the expected chat UX."}]},{"type":"paragraph","content":[{"type":"text","text":"A simple client-side pattern is:"}]},{"type":"codeBlock","attrs":{"language":"tsx"},"content":[{"type":"text","text":"\"use client\";\n\nimport { useState } from \"react\";\n\ntype Msg = { role: \"user\" | \"assistant\"; content: string };\n\nexport default function ChatPage() {\n  const [messages, setMessages] = useState<Msg[]>([]);\n  const [input, setInput] = useState(\"\");\n  const [isStreaming, setIsStreaming] = useState(false);\n\n  async function sendMessage() {\n    const nextMessages = [...messages, { role: \"user\", content: input }];\n    setMessages([...nextMessages, { role: \"assistant\", content: \"\" }]);\n    setInput(\"\");\n    setIsStreaming(true);\n\n    const res = await fetch(\"/api/chat\", {\n      method: \"POST\",\n      headers: { \"Content-Type\": \"application/json\" },\n      body: JSON.stringify({ messages: nextMessages }),\n    });\n\n    const reader = res.body?.getReader();\n    const decoder = new TextDecoder();\n\n    if (!reader) return;\n\n    let buffer = \"\";\n\n    while (true) {\n      const { value, done } = await reader.read();\n      if (done) break;\n\n      buffer += decoder.decode(value, { stream: true });\n      const events = buffer.split(\"\\n\\n\");\n      buffer = events.pop() ?? \"\";\n\n      for (const event of events) {\n        if (!event.startsWith(\"data: \")) continue;\n        const payload = JSON.parse(event.slice(6));\n\n        if (payload.type === \"text\") {\n          setMessages((prev) => {\n            const copy = [...prev];\n            copy[copy.length - 1] = {\n              role: \"assistant\",\n              content: copy[copy.length - 1].content + payload.text,\n            };\n            return copy;\n          });\n        }\n\n        if (payload.type === \"done\") {\n          setIsStreaming(false);\n        }\n      }\n    }\n\n    setIsStreaming(false);\n  }\n\n  return (\n    <div>\n      <div>\n        {messages.map((m, i) => (\n          <p key={i}>\n            <strong>{m.role}:</strong> {m.content}\n          </p>\n        ))}\n      </div>\n\n      <textarea value={input} onChange={(e) => setInput(e.target.value)} />\n      <button onClick={sendMessage} disabled={isStreaming || !input.trim()}>\n        Send\n      </button>\n    </div>\n  );\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"This is the simplest mental model: create an empty assistant bubble first, then keep appending streamed deltas into it."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Where Server Actions fit"}]},{"type":"paragraph","content":[{"type":"text","text":"Server Actions are useful around the chat, but not always ideal as the primary transport for token streaming. They are excellent for operations like saving a completed conversation, starring a message, creating a new chat thread, updating titles, or persisting analytics after the stream ends. If you try to make the Server Action itself own the full streaming transport, you often end up fighting React’s mutation semantics, whereas a route handler maps more directly to an HTTP stream."}]},{"type":"paragraph","content":[{"type":"text","text":"A clean split is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Route handler for live Claude output streaming."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Server Action for post-stream persistence and side effects."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Client component for optimistic rendering, cancel, retry, and scroll management."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Message shaping"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude’s Messages API expects a structured "},{"type":"text","marks":[{"type":"code"}],"text":"messages"},{"type":"text","text":" array, and responses come back as content blocks rather than a single flat string. For chat UIs, normalize your frontend model into Claude’s expected role/content format before calling the SDK, and keep only the minimum recent context needed for coherence and cost control. A good production tactic is to trim long histories, summarize stale turns, and keep system instructions separate from user-visible history."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Streaming event handling"}]},{"type":"paragraph","content":[{"type":"text","text":"For standard text chat, you usually care most about "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_delta"},{"type":"text","text":" events where "},{"type":"text","marks":[{"type":"code"}],"text":"delta.type === \"text_delta\""},{"type":"text","text":". Anthropic’s docs also note that streams may include "},{"type":"text","marks":[{"type":"code"}],"text":"ping"},{"type":"text","text":" events, overloaded errors, tool-use JSON deltas, and thinking deltas, so production parsers should ignore what they do not render rather than crash on unfamiliar event types. This matters because Anthropic explicitly warns that new event types may be added over time, and clients should handle unknown events gracefully."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tool use with chat UIs"}]},{"type":"paragraph","content":[{"type":"text","text":"If you enable tools, the streaming surface becomes more than plain text because Claude can stop with "},{"type":"text","marks":[{"type":"code"}],"text":"tool_use"},{"type":"text","text":" and emit partial JSON for tool inputs. In a Next.js chat UI, that means your route may need a loop: stream assistant text, detect a tool request, execute the tool server-side, append a "},{"type":"text","marks":[{"type":"code"}],"text":"tool_result"},{"type":"text","text":", then resume the conversation until the final assistant output is complete. The frontend should represent this as a stateful sequence such as “thinking,” “running tool,” and then “answer ready,” rather than pretending the whole interaction was one uninterrupted text stream."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"UX patterns that matter"}]},{"type":"paragraph","content":[{"type":"text","text":"Streaming only feels good when the UI is designed for it. Good chat interfaces usually include an empty assistant bubble while waiting, auto-scroll with guardrails, disabled submit during active stream, cancel/retry, and a clear distinction between network failure, refusal, and a normal stop. Anthropic’s streaming docs also mention stream-level error events like "},{"type":"text","marks":[{"type":"code"}],"text":"overloaded_error"},{"type":"text","text":", so a polished UI should convert that into a friendly retry affordance rather than a raw exception dump."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Refusals and stop reasons"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude streaming can end for different reasons, not just success. Anthropic documents "},{"type":"text","marks":[{"type":"code"}],"text":"message_delta"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"message_stop"},{"type":"text","text":" plus stop reasons such as "},{"type":"text","marks":[{"type":"code"}],"text":"end_turn"},{"type":"text","text":", and related docs describe refusal behavior in streaming contexts, so your backend should capture stop metadata and your UI should distinguish “completed answer” from “safety refusal” or “interrupted stream.” That distinction is important because the right recovery UX is different in each case: retry on overload, rephrase on refusal, resume or regenerate on network interruption."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Cancellation and aborting"}]},{"type":"paragraph","content":[{"type":"text","text":"A production chat client should use "},{"type":"text","marks":[{"type":"code"}],"text":"AbortController"},{"type":"text","text":" so users can stop long generations. On the browser side, pass "},{"type":"text","marks":[{"type":"code"}],"text":"signal"},{"type":"text","text":" into "},{"type":"text","marks":[{"type":"code"}],"text":"fetch"},{"type":"text","text":"; on the server side, close the response stream when the request is aborted and avoid doing unnecessary downstream work after cancellation. This keeps costs lower and makes the interface feel responsive rather than trapped inside a long model call."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Persistence pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"Do not save every token as a database write. A better pattern is to keep the partial assistant text in client memory during streaming, then persist the final assembled assistant message when the stream completes successfully, optionally with metadata such as token usage, latency, and stop reason. Server Actions are a strong fit for this final persistence step because they are mutation-oriented and easy to invoke after the stream ends."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Vercel AI SDK option"}]},{"type":"paragraph","content":[{"type":"text","text":"If you want a faster implementation with less stream plumbing, the Vercel AI SDK pattern is widely used with Next.js App Router and Anthropic. In that model, the server uses "},{"type":"text","marks":[{"type":"code"}],"text":"streamText()"},{"type":"text","text":" with the Anthropic provider and the client uses "},{"type":"text","marks":[{"type":"code"}],"text":"useChat()"},{"type":"text","text":", which abstracts state handling, streaming consumption, and common chat UX behaviors. It is a very productive option for app teams, though the lower-level Anthropic SDK path gives you more direct control over raw Claude event semantics and tool flows."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended decision rule"}]},{"type":"paragraph","content":[{"type":"text","text":"Use a plain route handler plus Anthropic SDK when you need fine-grained control over Claude event types, tool-use loops, custom persistence, or provider-specific behavior. Use the Vercel AI SDK when you want the fastest route to a polished streaming chat in Next.js and your requirements fit its abstractions. Use Server Actions mainly for mutations around the chat lifecycle rather than as the sole transport for token streaming."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Production checklist"}]},{"type":"paragraph","content":[{"type":"text","text":"For a real Next.js + Claude streaming chat, make sure you have these pieces in place:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Secret API key only on the server."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Route handler that returns "},{"type":"text","marks":[{"type":"code"}],"text":"text/event-stream"},{"type":"text","text":" or another real stream."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Client-side "},{"type":"text","marks":[{"type":"code"}],"text":"fetch"},{"type":"text","text":" stream reader, not "},{"type":"text","marks":[{"type":"code"}],"text":"EventSource"},{"type":"text","text":", for POST-based chats."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Graceful handling of "},{"type":"text","marks":[{"type":"code"}],"text":"text_delta"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"ping"},{"type":"text","text":", unknown events, and stream errors."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Abort/cancel support."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Conversation trimming and validation before model calls."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Separate persistence step, often via Server Actions, after successful completion."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Distinct UI states for loading, streaming, refused, overloaded, and interrupted."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Interview-ready explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"If someone asks, “How do you build Claude streaming chat in Next.js App Router with Server Actions?”, a strong answer is: use a route handler for the actual Claude stream because it maps directly to HTTP streaming and keeps the API key server-side, use the Anthropic SDK’s streaming helpers to process "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_delta"},{"type":"text","text":" text events, render those deltas incrementally in a client component with "},{"type":"text","marks":[{"type":"code"}],"text":"ReadableStream"},{"type":"text","text":", and use Server Actions for adjacent mutations like saving completed chats and feedback."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T08:52:05.027Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "React / Next.js + Claude"
+          },
+          {
+            "type": "text",
+            "text": ", the strongest production pattern is: use a Next.js App Router route handler as the streaming boundary, keep the Anthropic key on the server, call Claude with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream: true"
+          },
+          {
+            "type": "text",
+            "text": " or the SDK streaming helper, and let the client progressively render text from the response stream. Server Actions can help with non-streaming mutations and chat persistence, but for live token-by-token chat, route handlers are usually the cleaner fit because the browser can consume the response body directly as a stream."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core pattern"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5TdHJlYW1pbmcgY2hhdCBVSXMgd2l0aCBOZXh0LmpzIEFwcCBSb3V0ZXIgKyBTZXJ2ZXIgQWN0aW9uczwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjEwNSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjE0IgogICAgICAgIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBvcGFjaXR5PSIwLjc1Ij5DbGF1ZGUgTGVhcm5pbmcgUGF0aDwvdGV4dD4KICA8Y2lyY2xlIGN4PSI2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KICA8Y2lyY2xlIGN4PSI3NjAiIGN5PSI4MCIgcj0iMjgiIGZpbGw9IndoaXRlIiBvcGFjaXR5PSIwLjE1Ii8+Cjwvc3ZnPg==",
+          "alt": "Diagram for Streaming chat UIs with Next.js App Router + Server Actions",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice, the architecture is usually "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Client Component -> /app/api/chat/route.ts -> Anthropic SDK -> streamed response back to client"
+          },
+          {
+            "type": "text",
+            "text": ". Anthropic\u2019s streaming docs state that setting "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "\"stream\": true"
+          },
+          {
+            "type": "text",
+            "text": " returns server-sent events, and the TypeScript SDK provides streaming helpers such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".stream()"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".finalMessage()"
+          },
+          {
+            "type": "text",
+            "text": " to work with that flow. The event stream includes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_start"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_start"
+          },
+          {
+            "type": "text",
+            "text": ", one or more "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_delta"
+          },
+          {
+            "type": "text",
+            "text": " events, optional "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ping"
+          },
+          {
+            "type": "text",
+            "text": " events, "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_delta"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_stop"
+          },
+          {
+            "type": "text",
+            "text": ", so your code should ignore unknown events and mainly render "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "text_delta"
+          },
+          {
+            "type": "text",
+            "text": " chunks for chat text."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why App Router works well"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Next.js App Router route handlers can return a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ReadableStream"
+          },
+          {
+            "type": "text",
+            "text": ", which makes them a natural place to proxy Claude streaming into the UI. This keeps secrets server-side, gives you one place for auth, rate limiting, validation, logging, and conversation trimming, and avoids exposing the Anthropic API key in the browser. Anthropic\u2019s SDK documentation also notes support across Node.js, Deno, Bun, and browser environments, but the safe production pattern for web apps is still to keep model calls behind your own server boundary."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended file layout"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical App Router setup often looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/chat/page.tsx"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for the chat screen UI."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/api/chat/route.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for the streaming Claude endpoint."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/actions.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or feature-specific server actions for saving conversations, renaming chats, or feedback events after streaming finishes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "lib/anthropic.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for the configured Anthropic client."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "lib/chat-schema.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for request validation and role/content normalization."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Route handler pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The route handler should accept the current message list, validate it, optionally trim old turns, call Claude in streaming mode, and forward only the useful deltas to the browser. Anthropic\u2019s official streaming docs specifically say that direct integrations need to handle SSE events, while the SDK simplifies this work."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A minimal route handler pattern in Next.js looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "// app/api/chat/route.ts\nimport Anthropic from \"@anthropic-ai/sdk\";\n\nexport const runtime = \"nodejs\";\n\nconst anthropic = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY!,\n});\n\nexport async function POST(req: Request) {\n  const { messages } = await req.json();\n\n  const stream = await anthropic.messages.stream({\n    model: \"claude-opus-4-8\",\n    max_tokens: 1024,\n    stream: true,\n    messages,\n  });\n\n  const encoder = new TextEncoder();\n\n  const readable = new ReadableStream({\n    async start(controller) {\n      try {\n        for await (const event of stream) {\n          if (\n            event.type === \"content_block_delta\" &&\n            event.delta.type === \"text_delta\"\n          ) {\n            controller.enqueue(\n              encoder.encode(\n                `data: ${JSON.stringify({ type: \"text\", text: event.delta.text })}\\n\\n`\n              )\n            );\n          }\n\n          if (event.type === \"message_stop\") {\n            controller.enqueue(\n              encoder.encode(`data: ${JSON.stringify({ type: \"done\" })}\\n\\n`)\n            );\n          }\n        }\n\n        controller.close();\n      } catch (error) {\n        controller.enqueue(\n          encoder.encode(\n            `data: ${JSON.stringify({ type: \"error\", message: \"Stream failed\" })}\\n\\n`\n          )\n        );\n        controller.close();\n      }\n    },\n  });\n\n  return new Response(readable, {\n    headers: {\n      \"Content-Type\": \"text/event-stream\",\n      \"Cache-Control\": \"no-cache\",\n      Connection: \"keep-alive\",\n    },\n  });\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern matches the documented SSE behavior: "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "text/event-stream"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "no-cache"
+          },
+          {
+            "type": "text",
+            "text": ", and incremental "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_delta"
+          },
+          {
+            "type": "text",
+            "text": " handling."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Client streaming pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "On the client, use "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "fetch()"
+          },
+          {
+            "type": "text",
+            "text": " and read "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "response.body"
+          },
+          {
+            "type": "text",
+            "text": " with a stream reader instead of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "EventSource"
+          },
+          {
+            "type": "text",
+            "text": ", because "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "EventSource"
+          },
+          {
+            "type": "text",
+            "text": " only supports GET and cannot send the chat body conveniently. As chunks arrive, append them to the current assistant message rather than creating a new message for every token, which keeps rendering efficient and preserves the expected chat UX."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A simple client-side pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "tsx"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "\"use client\";\n\nimport { useState } from \"react\";\n\ntype Msg = { role: \"user\" | \"assistant\"; content: string };\n\nexport default function ChatPage() {\n  const [messages, setMessages] = useState<Msg[]>([]);\n  const [input, setInput] = useState(\"\");\n  const [isStreaming, setIsStreaming] = useState(false);\n\n  async function sendMessage() {\n    const nextMessages = [...messages, { role: \"user\", content: input }];\n    setMessages([...nextMessages, { role: \"assistant\", content: \"\" }]);\n    setInput(\"\");\n    setIsStreaming(true);\n\n    const res = await fetch(\"/api/chat\", {\n      method: \"POST\",\n      headers: { \"Content-Type\": \"application/json\" },\n      body: JSON.stringify({ messages: nextMessages }),\n    });\n\n    const reader = res.body?.getReader();\n    const decoder = new TextDecoder();\n\n    if (!reader) return;\n\n    let buffer = \"\";\n\n    while (true) {\n      const { value, done } = await reader.read();\n      if (done) break;\n\n      buffer += decoder.decode(value, { stream: true });\n      const events = buffer.split(\"\\n\\n\");\n      buffer = events.pop() ?? \"\";\n\n      for (const event of events) {\n        if (!event.startsWith(\"data: \")) continue;\n        const payload = JSON.parse(event.slice(6));\n\n        if (payload.type === \"text\") {\n          setMessages((prev) => {\n            const copy = [...prev];\n            copy[copy.length - 1] = {\n              role: \"assistant\",\n              content: copy[copy.length - 1].content + payload.text,\n            };\n            return copy;\n          });\n        }\n\n        if (payload.type === \"done\") {\n          setIsStreaming(false);\n        }\n      }\n    }\n\n    setIsStreaming(false);\n  }\n\n  return (\n    <div>\n      <div>\n        {messages.map((m, i) => (\n          <p key={i}>\n            <strong>{m.role}:</strong> {m.content}\n          </p>\n        ))}\n      </div>\n\n      <textarea value={input} onChange={(e) => setInput(e.target.value)} />\n      <button onClick={sendMessage} disabled={isStreaming || !input.trim()}>\n        Send\n      </button>\n    </div>\n  );\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the simplest mental model: create an empty assistant bubble first, then keep appending streamed deltas into it."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Where Server Actions fit"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Server Actions are useful around the chat, but not always ideal as the primary transport for token streaming. They are excellent for operations like saving a completed conversation, starring a message, creating a new chat thread, updating titles, or persisting analytics after the stream ends. If you try to make the Server Action itself own the full streaming transport, you often end up fighting React\u2019s mutation semantics, whereas a route handler maps more directly to an HTTP stream."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A clean split is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Route handler for live Claude output streaming."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Server Action for post-stream persistence and side effects."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Client component for optimistic rendering, cancel, retry, and scroll management."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Message shaping"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s Messages API expects a structured "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "messages"
+          },
+          {
+            "type": "text",
+            "text": " array, and responses come back as content blocks rather than a single flat string. For chat UIs, normalize your frontend model into Claude\u2019s expected role/content format before calling the SDK, and keep only the minimum recent context needed for coherence and cost control. A good production tactic is to trim long histories, summarize stale turns, and keep system instructions separate from user-visible history."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming event handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For standard text chat, you usually care most about "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_delta"
+          },
+          {
+            "type": "text",
+            "text": " events where "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "delta.type === \"text_delta\""
+          },
+          {
+            "type": "text",
+            "text": ". Anthropic\u2019s docs also note that streams may include "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ping"
+          },
+          {
+            "type": "text",
+            "text": " events, overloaded errors, tool-use JSON deltas, and thinking deltas, so production parsers should ignore what they do not render rather than crash on unfamiliar event types. This matters because Anthropic explicitly warns that new event types may be added over time, and clients should handle unknown events gracefully."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool use with chat UIs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you enable tools, the streaming surface becomes more than plain text because Claude can stop with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tool_use"
+          },
+          {
+            "type": "text",
+            "text": " and emit partial JSON for tool inputs. In a Next.js chat UI, that means your route may need a loop: stream assistant text, detect a tool request, execute the tool server-side, append a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tool_result"
+          },
+          {
+            "type": "text",
+            "text": ", then resume the conversation until the final assistant output is complete. The frontend should represent this as a stateful sequence such as \u201cthinking,\u201d \u201crunning tool,\u201d and then \u201canswer ready,\u201d rather than pretending the whole interaction was one uninterrupted text stream."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "UX patterns that matter"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming only feels good when the UI is designed for it. Good chat interfaces usually include an empty assistant bubble while waiting, auto-scroll with guardrails, disabled submit during active stream, cancel/retry, and a clear distinction between network failure, refusal, and a normal stop. Anthropic\u2019s streaming docs also mention stream-level error events like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "overloaded_error"
+          },
+          {
+            "type": "text",
+            "text": ", so a polished UI should convert that into a friendly retry affordance rather than a raw exception dump."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Refusals and stop reasons"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude streaming can end for different reasons, not just success. Anthropic documents "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_delta"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_stop"
+          },
+          {
+            "type": "text",
+            "text": " plus stop reasons such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "end_turn"
+          },
+          {
+            "type": "text",
+            "text": ", and related docs describe refusal behavior in streaming contexts, so your backend should capture stop metadata and your UI should distinguish \u201ccompleted answer\u201d from \u201csafety refusal\u201d or \u201cinterrupted stream.\u201d That distinction is important because the right recovery UX is different in each case: retry on overload, rephrase on refusal, resume or regenerate on network interruption."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cancellation and aborting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A production chat client should use "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "AbortController"
+          },
+          {
+            "type": "text",
+            "text": " so users can stop long generations. On the browser side, pass "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "signal"
+          },
+          {
+            "type": "text",
+            "text": " into "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "fetch"
+          },
+          {
+            "type": "text",
+            "text": "; on the server side, close the response stream when the request is aborted and avoid doing unnecessary downstream work after cancellation. This keeps costs lower and makes the interface feel responsive rather than trapped inside a long model call."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Persistence pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Do not save every token as a database write. A better pattern is to keep the partial assistant text in client memory during streaming, then persist the final assembled assistant message when the stream completes successfully, optionally with metadata such as token usage, latency, and stop reason. Server Actions are a strong fit for this final persistence step because they are mutation-oriented and easy to invoke after the stream ends."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Vercel AI SDK option"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you want a faster implementation with less stream plumbing, the Vercel AI SDK pattern is widely used with Next.js App Router and Anthropic. In that model, the server uses "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "streamText()"
+          },
+          {
+            "type": "text",
+            "text": " with the Anthropic provider and the client uses "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "useChat()"
+          },
+          {
+            "type": "text",
+            "text": ", which abstracts state handling, streaming consumption, and common chat UX behaviors. It is a very productive option for app teams, though the lower-level Anthropic SDK path gives you more direct control over raw Claude event semantics and tool flows."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended decision rule"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use a plain route handler plus Anthropic SDK when you need fine-grained control over Claude event types, tool-use loops, custom persistence, or provider-specific behavior. Use the Vercel AI SDK when you want the fastest route to a polished streaming chat in Next.js and your requirements fit its abstractions. Use Server Actions mainly for mutations around the chat lifecycle rather than as the sole transport for token streaming."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Production checklist"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a real Next.js + Claude streaming chat, make sure you have these pieces in place:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Secret API key only on the server."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Route handler that returns "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "text/event-stream"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or another real stream."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Client-side "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "fetch"
+                  },
+                  {
+                    "type": "text",
+                    "text": " stream reader, not "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "EventSource"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", for POST-based chats."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Graceful handling of "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "text_delta"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ping"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", unknown events, and stream errors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Abort/cancel support."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Conversation trimming and validation before model calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Separate persistence step, often via Server Actions, after successful completion."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Distinct UI states for loading, streaming, refused, overloaded, and interrupted."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Interview-ready explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If someone asks, \u201cHow do you build Claude streaming chat in Next.js App Router with Server Actions?\u201d, a strong answer is: use a route handler for the actual Claude stream because it maps directly to HTTP streaming and keeps the API key server-side, use the Anthropic SDK\u2019s streaming helpers to process "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_delta"
+          },
+          {
+            "type": "text",
+            "text": " text events, render those deltas incrementally in a client component with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ReadableStream"
+          },
+          {
+            "type": "text",
+            "text": ", and use Server Actions for adjacent mutations like saving completed chats and feedback."
+          }
+        ]
+      }
+    ]
+  }
+}

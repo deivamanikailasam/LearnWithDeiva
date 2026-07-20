@@ -1,1 +1,1701 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T09:41:21.983Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"For a "},{"type":"text","marks":[{"type":"bold"}],"text":"9,700-page static site generation pipeline"},{"type":"text","text":", Claude works best not as the page renderer itself, but as a "},{"type":"text","marks":[{"type":"bold"}],"text":"structured data extraction and normalization stage"},{"type":"text","text":" that turns messy source material into clean JSON your static site generator can trust. At that scale, the right architecture is usually an "},{"type":"text","marks":[{"type":"bold"}],"text":"offline extraction pipeline"},{"type":"text","text":" using Anthropic’s Message Batches API, structured outputs, validation/retry logic, and deterministic downstream page rendering, because batch processing is explicitly designed for large asynchronous workloads and cuts cost by 50 percent compared with synchronous calls."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core idea"}]},{"type":"paragraph","content":[{"type":"text","text":"The most important design principle is to separate "},{"type":"text","marks":[{"type":"bold"}],"text":"AI interpretation"},{"type":"text","text":" from "},{"type":"text","marks":[{"type":"bold"}],"text":"site rendering"},{"type":"text","text":". Claude should extract fields, classify content, normalize inconsistencies, and possibly generate summaries or metadata, while your static site generator handles URL creation, templates, pagination, SEO tags, and final HTML output deterministically. This separation is what keeps a 9,700-page build reproducible rather than fragile."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why Claude fits this job"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude is a strong fit when the source corpus is semi-structured or messy, such as PDFs, HTML exports, scanned documents, CMS dumps, or hand-authored records that do not already map neatly to your site schema. Anthropic’s structured outputs feature is specifically designed to constrain responses to schema-compliant JSON, reducing parsing errors, missing fields, and invalid types in downstream processing. That makes Claude useful as an extraction engine rather than a freeform text generator in this workflow."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why batch is the default"}]},{"type":"paragraph","content":[{"type":"text","text":"For 9,700 pages, synchronous per-page requests are usually the wrong default unless you are debugging or handling a small hotfix subset. Anthropic’s Message Batches API is built for large asynchronous workloads, supports up to 100,000 Message requests or 256 MB per batch, most batches finish within about an hour, and all usage is billed at 50 percent of standard API prices. The docs also say batch processing is particularly useful when you need to process large volumes of data and immediate responses are not required, which is exactly the static generation use case."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best high-level architecture"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong architecture for this kind of build usually looks like this:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Ingest raw source documents or records."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Preprocess and chunk them into page-level or entity-level inputs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Send extraction jobs to Claude using structured outputs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Validate returned JSON against your canonical schema."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Retry or route exceptions to a repair queue when validation fails."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Store clean normalized JSON in a content repository or database."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Run your static site generator from that normalized dataset."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Publish the resulting site."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is much safer than asking Claude to directly emit 9,700 HTML pages."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Pipeline stages"}]},{"type":"paragraph","content":[{"type":"text","text":"The extraction pipeline should usually be "},{"type":"text","marks":[{"type":"bold"}],"text":"multi-stage"},{"type":"text","text":", not one giant prompt. PADISO’s batch-processing guidance in the results explicitly recommends chaining batches for multi-stage workflows, such as extraction first, then enrichment, then scoring or ranking. For static-site generation, that often becomes: raw extraction, field normalization, taxonomy tagging, summary generation, and quality review."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Stage 1: source preparation"}]},{"type":"paragraph","content":[{"type":"text","text":"Before Claude sees anything, clean the source material. The "},{"type":"text","marks":[{"type":"code"}],"text":"unstructured"},{"type":"text","text":"-style extraction guidance in the results highlights format normalization and partitioning documents into typed elements like titles, tables, and narrative text, which is useful because Claude performs better on curated content slices than on raw mixed-format dumps. A good preprocessing stage can dramatically reduce token waste and extraction ambiguity."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Stage 2: schema-first extraction"}]},{"type":"paragraph","content":[{"type":"text","text":"The extraction prompt should be designed around a strict target schema rather than vague instructions. Anthropic’s structured outputs docs say JSON outputs guarantee valid JSON matching your schema, and they emphasize reliable field types, required fields, and constrained decoding to avoid malformed output. For a large static site, this means you should define the destination data model first and make Claude fill it, rather than asking “what seems important here?”"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Stage 3: validation and retry"}]},{"type":"paragraph","content":[{"type":"text","text":"Even with structured outputs, you still need application-level validation. Anthropic documents that structured outputs guarantee schema compliance in most cases, but refusals and "},{"type":"text","marks":[{"type":"code"}],"text":"max_tokens"},{"type":"text","text":" cutoffs can still produce outputs that do not match the schema, and the schema itself may be simplified during grammar compilation while SDK-level validation enforces the full original constraints. That is why robust extraction pipelines add validation-retry loops rather than assuming the first pass is always production-ready."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Stage 4: normalization"}]},{"type":"paragraph","content":[{"type":"text","text":"After extraction, normalize canonical fields such as dates, slugs, category IDs, names, locations, and cross-links before the static build runs. Claude can help interpret ambiguous source data, but deterministic code should own the final normalization where possible so the same input yields the same site output every build. Think of Claude as a smart parser and disambiguator, then your code as the final canonicalizer."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Stage 5: deterministic SSG build"}]},{"type":"paragraph","content":[{"type":"text","text":"Only after the content is clean should the static site generator create pages. At this point the build should behave like a normal SSG pipeline: read normalized content, generate routes, render templates, create search indexes, and output HTML artifacts deterministically. Keeping AI out of the final HTML assembly step is one of the best ways to make a 9,700-page site reliable."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why not direct HTML generation"}]},{"type":"paragraph","content":[{"type":"text","text":"Direct HTML generation by Claude sounds appealing but is usually the wrong pattern at this scale. It entangles extraction, presentation, layout, and content correctness in one probabilistic step, making validation, diffing, retries, and template evolution much harder. JSON-first extraction gives you far more control over testing, deduplication, and rebuilds."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Batch design details"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s batch docs provide several important constraints that matter operationally. A batch can contain up to 100,000 Message requests or 256 MB, results are returned as JSONL, results may not preserve input order, each request needs a unique "},{"type":"text","marks":[{"type":"code"}],"text":"custom_id"},{"type":"text","text":", and results should always be matched back by "},{"type":"text","marks":[{"type":"code"}],"text":"custom_id"},{"type":"text","text":" rather than array position. For 9,700 pages, this means you can fit the work into one or several batches, but in practice multiple batches are often safer for observability and retry management."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Use custom IDs aggressively"}]},{"type":"paragraph","content":[{"type":"text","text":"The "},{"type":"text","marks":[{"type":"code"}],"text":"custom_id"},{"type":"text","text":" field is critical at this scale. Anthropic explicitly says results may come back in any order and recommends meaningful "},{"type":"text","marks":[{"type":"code"}],"text":"custom_id"},{"type":"text","text":" values for easy mapping. For a static site pipeline, good IDs often encode source type, source record ID, locale, and pipeline stage, such as "},{"type":"text","marks":[{"type":"code"}],"text":"catalog_au_10452_extract_v1"},{"type":"text","text":"."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Split into manageable batches"}]},{"type":"paragraph","content":[{"type":"text","text":"Even though Anthropic allows very large batches, multiple smaller batches are often operationally better. Anthropic’s best practices suggest breaking very large datasets into multiple batches for manageability, and production guidance in the results echoes a four-phase prepare-submit-poll-retrieve cycle that is easier to monitor when chunks are not enormous. For 9,700 pages, splitting by section, language, content type, or source collection often simplifies retries and QA."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Prompt caching can help"}]},{"type":"paragraph","content":[{"type":"text","text":"If many extraction jobs share the same long system instructions or schema context, Anthropic’s batch docs say prompt caching can stack with batch discounts and may improve both cost and processing time, though hits are best-effort because processing is asynchronous. The docs recommend identical cacheable blocks across requests and note that users often see cache hit rates ranging from 30 percent to 98 percent depending on traffic patterns. For a 9,700-page extraction job with a stable schema and identical system instructions, this can materially reduce cost."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Structured output schema design"}]},{"type":"paragraph","content":[{"type":"text","text":"Schema design quality strongly affects extraction quality. Anthropic recommends using JSON Schema with required fields and "},{"type":"text","marks":[{"type":"code"}],"text":"additionalProperties: false"},{"type":"text","text":", while third-party extraction guidance in the search results recommends explicit types, null handling, and a flagging mechanism for uncertain extractions. For large SSG pipelines, it is wise to include fields like "},{"type":"text","marks":[{"type":"code"}],"text":"confidence_notes"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"missing_fields"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"code"}],"text":"source_warnings"},{"type":"text","text":" so uncertain records can be reviewed instead of silently passing through."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Keep schemas practical"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic also warns that structured outputs have schema complexity limits, including limits on strict tools, optional parameters, union types, and overall grammar size. That means one enormous schema for every possible page type can become brittle or even fail compilation; a better pattern is often separate schemas per content type or per pipeline stage. Simpler schemas also make validation and debugging easier."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Multi-type content strategy"}]},{"type":"paragraph","content":[{"type":"text","text":"If the 9,700 pages cover different content types, do not force them through one universal extraction format unless the shared structure is truly real. Use content-type-specific schemas such as "},{"type":"text","marks":[{"type":"code"}],"text":"person"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"location"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"article"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"product"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"policy-page"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"code"}],"text":"case-study"},{"type":"text","text":", and route source items to the correct extractor before batching. This improves quality and reduces schema complexity."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Batch plus synchronous mode"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong production pattern is "},{"type":"text","marks":[{"type":"bold"}],"text":"dual-mode processing"},{"type":"text","text":": synchronous for local testing, spot checks, and urgent single-page fixes; batch for full-site or large-section rebuilds. The production note in the search results describes exactly this kind of dual-mode architecture for cost savings and operational flexibility. This is ideal for editorial pipelines where some records need immediate correction while the nightly or weekly build processes everything else in bulk."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling model"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s batch results can be "},{"type":"text","marks":[{"type":"code"}],"text":"succeeded"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"errored"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"canceled"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"code"}],"text":"expired"},{"type":"text","text":", and errors in one request do not block the rest of the batch. This is very useful for a 9,700-page pipeline because you can treat failures as exceptions in a repair queue instead of aborting the full build. Good pipelines separate “site can build with degraded content” from “these 73 pages need reprocessing.”"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Refusals and cutoffs"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic explicitly notes that structured outputs can still fail to match schema when Claude refuses for safety reasons or when "},{"type":"text","marks":[{"type":"code"}],"text":"max_tokens"},{"type":"text","text":" is reached. In a static site pipeline, those cases should be captured as explicit failure states, not parsed optimistically. A good build system should quarantine those pages for retry, manual review, or alternate extraction strategy."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Data retention and compliance"}]},{"type":"paragraph","content":[{"type":"text","text":"One important operational caveat is that Anthropic’s batch processing is "},{"type":"text","marks":[{"type":"bold"}],"text":"not eligible for Zero Data Retention"},{"type":"text","text":", and batch request/response data is retained for up to 29 days after batch creation unless deleted earlier. By contrast, structured outputs qualify for ZDR with limited technical retention, but the batch path itself has different retention behavior. If the source material is sensitive, this retention difference can affect whether batch is acceptable for the workload."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Large-output use cases"}]},{"type":"paragraph","content":[{"type":"text","text":"If some pages require exhaustive extraction or very long structured outputs, Anthropic’s batch docs describe an "},{"type":"text","marks":[{"type":"code"}],"text":"output-300k-2026-03-24"},{"type":"text","text":" beta that raises the output cap to 300,000 tokens for supported models on the batch path. The docs specifically mention exhaustive structured data extraction as a fit for extended output, though they also warn that a single such generation can take over an hour and still sits within the 24-hour batch window. Most 9,700-page site pipelines will not need this on every item, but it is valuable for especially dense source documents."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Quality assurance strategy"}]},{"type":"paragraph","content":[{"type":"text","text":"You should never trust a pipeline of this size without layered QA. Good checks include schema validation, spot-review samples per content type, deterministic post-processing tests, duplicate detection, link validation, and comparing extraction drift between runs. A very practical tactic is to run a pilot on a few hundred representative pages before sending the full corpus through the batch pipeline."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended stack pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong implementation stack often looks like this:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Source ingester and chunker."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Extraction schema registry."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude batch request builder with stable "},{"type":"text","marks":[{"type":"code"}],"text":"custom_id "},{"type":"text","text":"s."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Result parser for JSONL outputs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Validation and retry queue."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Normalized content store."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Static site generator reading only canonical JSON."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"QA/reporting dashboard for failures and uncertain records."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That pattern treats Claude as one stage in a reliable content factory, not as the site generator itself."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Interview-ready explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong concise answer is: “For a 9,700-page static site, I use Claude as an offline data-extraction and normalization pipeline, not as a direct HTML renderer. I preprocess source documents, send page-level or entity-level extraction jobs through Anthropic’s Message Batches API, constrain responses with structured outputs, validate the returned JSON, retry failures, and then feed only canonical normalized content into the static site generator. Batch processing is the right default because it’s designed for large asynchronous workloads, supports up to 100,000 requests per batch, returns JSONL keyed by custom IDs, and costs 50 percent less than standard synchronous calls.”"}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T09:41:21.983Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "9,700-page static site generation pipeline"
+          },
+          {
+            "type": "text",
+            "text": ", Claude works best not as the page renderer itself, but as a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "structured data extraction and normalization stage"
+          },
+          {
+            "type": "text",
+            "text": " that turns messy source material into clean JSON your static site generator can trust. At that scale, the right architecture is usually an "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "offline extraction pipeline"
+          },
+          {
+            "type": "text",
+            "text": " using Anthropic\u2019s Message Batches API, structured outputs, validation/retry logic, and deterministic downstream page rendering, because batch processing is explicitly designed for large asynchronous workloads and cuts cost by 50 percent compared with synchronous calls."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5DbGF1ZGUgYXMgYSBkYXRhIGV4dHJhY3Rpb24gcGlwZWxpbmUgZm9yIHN0YXRpYyBzaSDigJQgS2V5IENvbmNlcHRzPC90ZXh0Pgo8cmVjdCB4PSIzMCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODUiIGZpbGw9IiMxZTQwYWYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjE0NSIgeT0iMTAwIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Db3JlIENvbmNlcHQ8L3RleHQ+CjxyZWN0IHg9IjI5NSIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODUiIGZpbGw9IiMwNjVmNDYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjQxMCIgeT0iMTAwIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Ib3cgSXQgV29ya3M8L3RleHQ+CjxyZWN0IHg9IjU2MCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODUiIGZpbGw9IiM3YzJkMTIiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjY3NSIgeT0iMTAwIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5CZXN0IFByYWN0aWNlczwvdGV4dD4KPGxpbmUgeDE9IjI2MCIgeTE9Ijk3IiB4Mj0iMjkzIiB5Mj0iOTciIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2EpIi8+CjxsaW5lIHgxPSI1MjUiIHkxPSI5NyIgeDI9IjU1OCIgeTI9Ijk3IiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8ZGVmcz48bWFya2VyIGlkPSJhIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI3IiByZWZZPSI0IiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDgsNCBMMCw4IFoiIGZpbGw9IiM0NzU1NjkiLz48L21hcmtlcj48L2RlZnM+Cjwvc3ZnPg==",
+          "alt": "Claude as a data extraction pipeline for static site generators concept diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core idea"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most important design principle is to separate "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "AI interpretation"
+          },
+          {
+            "type": "text",
+            "text": " from "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "site rendering"
+          },
+          {
+            "type": "text",
+            "text": ". Claude should extract fields, classify content, normalize inconsistencies, and possibly generate summaries or metadata, while your static site generator handles URL creation, templates, pagination, SEO tags, and final HTML output deterministically. This separation is what keeps a 9,700-page build reproducible rather than fragile."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why Claude fits this job"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude is a strong fit when the source corpus is semi-structured or messy, such as PDFs, HTML exports, scanned documents, CMS dumps, or hand-authored records that do not already map neatly to your site schema. Anthropic\u2019s structured outputs feature is specifically designed to constrain responses to schema-compliant JSON, reducing parsing errors, missing fields, and invalid types in downstream processing. That makes Claude useful as an extraction engine rather than a freeform text generator in this workflow."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why batch is the default"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For 9,700 pages, synchronous per-page requests are usually the wrong default unless you are debugging or handling a small hotfix subset. Anthropic\u2019s Message Batches API is built for large asynchronous workloads, supports up to 100,000 Message requests or 256 MB per batch, most batches finish within about an hour, and all usage is billed at 50 percent of standard API prices. The docs also say batch processing is particularly useful when you need to process large volumes of data and immediate responses are not required, which is exactly the static generation use case."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best high-level architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong architecture for this kind of build usually looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ingest raw source documents or records."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Preprocess and chunk them into page-level or entity-level inputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Send extraction jobs to Claude using structured outputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate returned JSON against your canonical schema."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Retry or route exceptions to a repair queue when validation fails."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Store clean normalized JSON in a content repository or database."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run your static site generator from that normalized dataset."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Publish the resulting site."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is much safer than asking Claude to directly emit 9,700 HTML pages."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pipeline stages"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The extraction pipeline should usually be "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "multi-stage"
+          },
+          {
+            "type": "text",
+            "text": ", not one giant prompt. PADISO\u2019s batch-processing guidance in the results explicitly recommends chaining batches for multi-stage workflows, such as extraction first, then enrichment, then scoring or ranking. For static-site generation, that often becomes: raw extraction, field normalization, taxonomy tagging, summary generation, and quality review."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stage 1: source preparation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Before Claude sees anything, clean the source material. The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "unstructured"
+          },
+          {
+            "type": "text",
+            "text": "-style extraction guidance in the results highlights format normalization and partitioning documents into typed elements like titles, tables, and narrative text, which is useful because Claude performs better on curated content slices than on raw mixed-format dumps. A good preprocessing stage can dramatically reduce token waste and extraction ambiguity."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stage 2: schema-first extraction"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The extraction prompt should be designed around a strict target schema rather than vague instructions. Anthropic\u2019s structured outputs docs say JSON outputs guarantee valid JSON matching your schema, and they emphasize reliable field types, required fields, and constrained decoding to avoid malformed output. For a large static site, this means you should define the destination data model first and make Claude fill it, rather than asking \u201cwhat seems important here?\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stage 3: validation and retry"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even with structured outputs, you still need application-level validation. Anthropic documents that structured outputs guarantee schema compliance in most cases, but refusals and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_tokens"
+          },
+          {
+            "type": "text",
+            "text": " cutoffs can still produce outputs that do not match the schema, and the schema itself may be simplified during grammar compilation while SDK-level validation enforces the full original constraints. That is why robust extraction pipelines add validation-retry loops rather than assuming the first pass is always production-ready."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stage 4: normalization"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "After extraction, normalize canonical fields such as dates, slugs, category IDs, names, locations, and cross-links before the static build runs. Claude can help interpret ambiguous source data, but deterministic code should own the final normalization where possible so the same input yields the same site output every build. Think of Claude as a smart parser and disambiguator, then your code as the final canonicalizer."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stage 5: deterministic SSG build"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Only after the content is clean should the static site generator create pages. At this point the build should behave like a normal SSG pipeline: read normalized content, generate routes, render templates, create search indexes, and output HTML artifacts deterministically. Keeping AI out of the final HTML assembly step is one of the best ways to make a 9,700-page site reliable."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why not direct HTML generation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Direct HTML generation by Claude sounds appealing but is usually the wrong pattern at this scale. It entangles extraction, presentation, layout, and content correctness in one probabilistic step, making validation, diffing, retries, and template evolution much harder. JSON-first extraction gives you far more control over testing, deduplication, and rebuilds."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Batch design details"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic\u2019s batch docs provide several important constraints that matter operationally. A batch can contain up to 100,000 Message requests or 256 MB, results are returned as JSONL, results may not preserve input order, each request needs a unique "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "custom_id"
+          },
+          {
+            "type": "text",
+            "text": ", and results should always be matched back by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "custom_id"
+          },
+          {
+            "type": "text",
+            "text": " rather than array position. For 9,700 pages, this means you can fit the work into one or several batches, but in practice multiple batches are often safer for observability and retry management."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Use custom IDs aggressively"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "custom_id"
+          },
+          {
+            "type": "text",
+            "text": " field is critical at this scale. Anthropic explicitly says results may come back in any order and recommends meaningful "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "custom_id"
+          },
+          {
+            "type": "text",
+            "text": " values for easy mapping. For a static site pipeline, good IDs often encode source type, source record ID, locale, and pipeline stage, such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "catalog_au_10452_extract_v1"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Split into manageable batches"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Even though Anthropic allows very large batches, multiple smaller batches are often operationally better. Anthropic\u2019s best practices suggest breaking very large datasets into multiple batches for manageability, and production guidance in the results echoes a four-phase prepare-submit-poll-retrieve cycle that is easier to monitor when chunks are not enormous. For 9,700 pages, splitting by section, language, content type, or source collection often simplifies retries and QA."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt caching can help"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If many extraction jobs share the same long system instructions or schema context, Anthropic\u2019s batch docs say prompt caching can stack with batch discounts and may improve both cost and processing time, though hits are best-effort because processing is asynchronous. The docs recommend identical cacheable blocks across requests and note that users often see cache hit rates ranging from 30 percent to 98 percent depending on traffic patterns. For a 9,700-page extraction job with a stable schema and identical system instructions, this can materially reduce cost."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Structured output schema design"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Schema design quality strongly affects extraction quality. Anthropic recommends using JSON Schema with required fields and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "additionalProperties: false"
+          },
+          {
+            "type": "text",
+            "text": ", while third-party extraction guidance in the search results recommends explicit types, null handling, and a flagging mechanism for uncertain extractions. For large SSG pipelines, it is wise to include fields like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "confidence_notes"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "missing_fields"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "source_warnings"
+          },
+          {
+            "type": "text",
+            "text": " so uncertain records can be reviewed instead of silently passing through."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Keep schemas practical"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic also warns that structured outputs have schema complexity limits, including limits on strict tools, optional parameters, union types, and overall grammar size. That means one enormous schema for every possible page type can become brittle or even fail compilation; a better pattern is often separate schemas per content type or per pipeline stage. Simpler schemas also make validation and debugging easier."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-type content strategy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If the 9,700 pages cover different content types, do not force them through one universal extraction format unless the shared structure is truly real. Use content-type-specific schemas such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "person"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "location"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "article"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "product"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "policy-page"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "case-study"
+          },
+          {
+            "type": "text",
+            "text": ", and route source items to the correct extractor before batching. This improves quality and reduces schema complexity."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Batch plus synchronous mode"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong production pattern is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "dual-mode processing"
+          },
+          {
+            "type": "text",
+            "text": ": synchronous for local testing, spot checks, and urgent single-page fixes; batch for full-site or large-section rebuilds. The production note in the search results describes exactly this kind of dual-mode architecture for cost savings and operational flexibility. This is ideal for editorial pipelines where some records need immediate correction while the nightly or weekly build processes everything else in bulk."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic\u2019s batch results can be "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "succeeded"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "errored"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "canceled"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "expired"
+          },
+          {
+            "type": "text",
+            "text": ", and errors in one request do not block the rest of the batch. This is very useful for a 9,700-page pipeline because you can treat failures as exceptions in a repair queue instead of aborting the full build. Good pipelines separate \u201csite can build with degraded content\u201d from \u201cthese 73 pages need reprocessing.\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Refusals and cutoffs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic explicitly notes that structured outputs can still fail to match schema when Claude refuses for safety reasons or when "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_tokens"
+          },
+          {
+            "type": "text",
+            "text": " is reached. In a static site pipeline, those cases should be captured as explicit failure states, not parsed optimistically. A good build system should quarantine those pages for retry, manual review, or alternate extraction strategy."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Data retention and compliance"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "One important operational caveat is that Anthropic\u2019s batch processing is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "not eligible for Zero Data Retention"
+          },
+          {
+            "type": "text",
+            "text": ", and batch request/response data is retained for up to 29 days after batch creation unless deleted earlier. By contrast, structured outputs qualify for ZDR with limited technical retention, but the batch path itself has different retention behavior. If the source material is sensitive, this retention difference can affect whether batch is acceptable for the workload."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Large-output use cases"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If some pages require exhaustive extraction or very long structured outputs, Anthropic\u2019s batch docs describe an "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "output-300k-2026-03-24"
+          },
+          {
+            "type": "text",
+            "text": " beta that raises the output cap to 300,000 tokens for supported models on the batch path. The docs specifically mention exhaustive structured data extraction as a fit for extended output, though they also warn that a single such generation can take over an hour and still sits within the 24-hour batch window. Most 9,700-page site pipelines will not need this on every item, but it is valuable for especially dense source documents."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Quality assurance strategy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "You should never trust a pipeline of this size without layered QA. Good checks include schema validation, spot-review samples per content type, deterministic post-processing tests, duplicate detection, link validation, and comparing extraction drift between runs. A very practical tactic is to run a pilot on a few hundred representative pages before sending the full corpus through the batch pipeline."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended stack pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong implementation stack often looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Source ingester and chunker."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Extraction schema registry."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude batch request builder with stable "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "custom_id "
+                  },
+                  {
+                    "type": "text",
+                    "text": "s."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Result parser for JSONL outputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validation and retry queue."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Normalized content store."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Static site generator reading only canonical JSON."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "QA/reporting dashboard for failures and uncertain records."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That pattern treats Claude as one stage in a reliable content factory, not as the site generator itself."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Interview-ready explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong concise answer is: \u201cFor a 9,700-page static site, I use Claude as an offline data-extraction and normalization pipeline, not as a direct HTML renderer. I preprocess source documents, send page-level or entity-level extraction jobs through Anthropic\u2019s Message Batches API, constrain responses with structured outputs, validate the returned JSON, retry failures, and then feed only canonical normalized content into the static site generator. Batch processing is the right default because it\u2019s designed for large asynchronous workloads, supports up to 100,000 requests per batch, returns JSONL keyed by custom IDs, and costs 50 percent less than standard synchronous calls.\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with claude as a data extraction pipeline for static site generators, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with claude as a data extraction pipeline for static site generators. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of claude as a data extraction pipeline for static site generators scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Concrete Python Implementation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The following end-to-end example shows how the extraction pipeline looks in code, from batch submission through result retrieval and validation."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport json\nimport time\n\nclient = anthropic.Anthropic()\n\nEXTRACTION_SCHEMA = {\n    \"type\": \"object\",\n    \"required\": [\"title\", \"slug\", \"content_type\", \"summary\", \"tags\", \"publication_date\"],\n    \"additionalProperties\": False,\n    \"properties\": {\n        \"title\": {\"type\": \"string\"},\n        \"slug\": {\"type\": \"string\"},\n        \"content_type\": {\"type\": \"string\", \"enum\": [\"article\", \"product\", \"person\", \"location\", \"policy\"]},\n        \"summary\": {\"type\": \"string\", \"maxLength\": 500},\n        \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n        \"publication_date\": {\"type\": [\"string\", \"null\"]},\n        \"confidence_notes\": {\"type\": \"string\"},\n        \"missing_fields\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}\n    }\n}\n\nSYSTEM_PROMPT = \"\"\"You are a structured data extraction specialist.\nGiven a raw source document, extract the fields defined in the schema.\nWhen a field is uncertain, add it to missing_fields and note the issue\nin confidence_notes. Never invent data; use null for genuinely missing values.\"\"\"\n\ndef build_batch_requests(source_records):\n    requests = []\n    for record_id, source_text in source_records:\n        requests.append({\n            \"custom_id\": f\"ssg_{record_id}\",\n            \"params\": {\n                \"model\": \"claude-opus-4-5-20251101\",\n                \"max_tokens\": 1024,\n                \"system\": [\n                    {\n                        \"type\": \"text\",\n                        \"text\": SYSTEM_PROMPT,\n                        \"cache_control\": {\"type\": \"ephemeral\", \"ttl\": \"1h\"}\n                    }\n                ],\n                \"messages\": [\n                    {\"role\": \"user\", \"content\": f\"Extract data from: {source_text}\"}\n                ],\n                \"tools\": [\n                    {\n                        \"name\": \"extract_page_data\",\n                        \"description\": \"Extract structured page data\",\n                        \"input_schema\": EXTRACTION_SCHEMA\n                    }\n                ],\n                \"tool_choice\": {\"type\": \"tool\", \"name\": \"extract_page_data\"}\n            }\n        })\n    return requests\n\ndef submit_and_poll(requests, max_wait_minutes=90):\n    batch = client.messages.batches.create(requests=requests)\n    print(f\"Batch {batch.id} submitted: {batch.request_counts.processing} requests\")\n\n    start = time.time()\n    while True:\n        batch = client.messages.batches.retrieve(batch.id)\n        if batch.processing_status == \"ended\":\n            break\n        elapsed = (time.time() - start) / 60\n        if elapsed > max_wait_minutes:\n            raise TimeoutError(f\"Batch did not finish in {max_wait_minutes} minutes\")\n        print(f\"Status: {batch.processing_status} -- {batch.request_counts.processing} pending\")\n        time.sleep(30)\n\n    print(f\"Complete: {batch.request_counts.succeeded} ok, \"\n          f\"{batch.request_counts.errored} errored\")\n    return batch\n\ndef retrieve_results(batch):\n    results = {}\n    for result in client.messages.batches.results(batch.id):\n        cid = result.custom_id\n        if result.result.type == \"succeeded\":\n            for block in result.result.message.content:\n                if block.type == \"tool_use\" and block.name == \"extract_page_data\":\n                    results[cid] = {\"status\": \"ok\", \"data\": block.input}\n                    break\n        else:\n            results[cid] = {\"status\": \"error\",\n                            \"error\": str(getattr(result.result, 'error', 'unknown'))}\n    return results"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Validation and Repair Queue"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import jsonschema\n\ndef validate_and_triage(results, schema):\n    valid = {}\n    repair = []\n\n    for cid, result in results.items():\n        record_id = cid.replace(\"ssg_\", \"\")\n\n        if result[\"status\"] == \"error\":\n            repair.append((record_id, f\"API error: {result['error']}\"))\n            continue\n\n        data = result[\"data\"]\n\n        try:\n            jsonschema.validate(data, schema)\n        except jsonschema.ValidationError as e:\n            repair.append((record_id, f\"Schema violation: {e.message}\"))\n            continue\n\n        if len(data.get(\"missing_fields\", [])) > 2:\n            repair.append((record_id, f\"Too many missing fields: {data['missing_fields']}\"))\n            continue\n\n        valid[record_id] = data\n\n    return valid, repair\n\nresults = retrieve_results(batch)\nvalid_records, repair_queue = validate_and_triage(results, EXTRACTION_SCHEMA)\nprint(f\"Valid: {len(valid_records)}, Needs repair: {len(repair_queue)}\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Integrating Extracted Data with Static Site Generators"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Once extraction produces a clean JSON store, the static site generator reads that normalized data rather than calling Claude at all. This section shows how the normalized output connects to three popular SSG frameworks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Next.js App Router"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "// lib/content.ts\nimport contentIndex from '../data/extracted/index.json'\n\nexport type PageData = {\n  title: string\n  slug: string\n  content_type: string\n  summary: string\n  tags: string[]\n  publication_date: string | null\n}\n\nexport function getAllSlugs(): string[] {\n  return Object.keys(contentIndex)\n}\n\nexport function getPageData(slug: string): PageData {\n  const record = (contentIndex as Record<string, PageData>)[slug]\n  if (!record) throw new Error(`No data for slug: ${slug}`)\n  return record\n}\n\n// app/[slug]/page.tsx\nexport async function generateStaticParams() {\n  return getAllSlugs().map(slug => ({ slug }))\n}\n\nexport default function Page({ params }: { params: { slug: string } }) {\n  const data = getPageData(params.slug)\n  return (\n    <article>\n      <h1>{data.title}</h1>\n      <p>{data.summary}</p>\n      <ul>{data.tags.map(tag => <li key={tag}>{tag}</li>)}</ul>\n    </article>\n  )\n}"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Incremental Rebuild Strategies"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running a full 9,700-page extraction batch on every build is wasteful. A well-designed pipeline only re-extracts records whose source has changed since the last run."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import hashlib\nimport json\nfrom pathlib import Path\n\ndef compute_hash(text: str) -> str:\n    return hashlib.sha256(text.encode()).hexdigest()[:16]\n\ndef load_hash_index(path=\"data/hash_index.json\") -> dict:\n    p = Path(path)\n    if p.exists():\n        return json.loads(p.read_text())\n    return {}\n\ndef save_hash_index(index: dict, path=\"data/hash_index.json\"):\n    Path(path).write_text(json.dumps(index, indent=2))\n\ndef find_changed_records(source_records, hash_index):\n    \"\"\"\n    Returns only records whose source content has changed since\n    the last extraction run.\n    \"\"\"\n    changed = []\n    new_hashes = {}\n\n    for record_id, source_text in source_records:\n        h = compute_hash(source_text)\n        new_hashes[record_id] = h\n        if hash_index.get(record_id) != h:\n            changed.append((record_id, source_text))\n\n    return changed, new_hashes\n\n# Workflow\nall_source_records = load_source_records()\nhash_index = load_hash_index()\nchanged_records, new_hashes = find_changed_records(all_source_records, hash_index)\n\nprint(f\"Changed records: {len(changed_records)} / {len(all_source_records)}\")\n\nif changed_records:\n    requests = build_batch_requests(changed_records)\n    batch = submit_and_poll(requests)\n    results = retrieve_results(batch)\n    valid, repair = validate_and_triage(results, EXTRACTION_SCHEMA)\n\n    existing_store = load_extraction_store()\n    existing_store.update(valid)\n    save_extraction_store(existing_store)\n\n    # Only update hashes for records that validated successfully\n    for record_id in valid:\n        hash_index[record_id] = new_hashes[record_id]\n    save_hash_index(hash_index)\n\n    print(f\"Updated {len(valid)} records, {len(repair)} queued for repair\")\nelse:\n    print(\"No changes detected -- skipping extraction\")"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      }
+    ]
+  }
+}

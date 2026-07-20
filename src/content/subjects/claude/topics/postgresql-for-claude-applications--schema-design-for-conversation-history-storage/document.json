@@ -1,1 +1,1326 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-19T06:21:12.415Z","doc":{"type":"doc","content":[]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Storing Claude conversation history in PostgreSQL requires a schema that balances read performance (loading the last N messages quickly), write throughput (appending every turn), auditability (preserving deleted messages), and the JSONB flexibility needed for tool calls. This document covers the full schema — tables, constraints, indexes, and access patterns — for production-grade conversation history storage."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A conversation history schema is a relational layout that persists every message exchanged between a user and Claude, together with the metadata needed to reconstruct conversation context, enforce billing limits, and support product features like branching, search, and audit trails. Unlike a simple append-only log, a well-designed schema tracks sessions (conversations), individual turns (messages), and the tool invocations that Claude makes during agentic tasks."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The core entity hierarchy is: a user owns many conversations; each conversation owns many ordered messages; each message may reference tool_calls that Claude executed. Every tier needs its own table because tool calls must be queryable independently (for cost attribution, debugging, and rate limiting), and messages must be paginated efficiently without loading entire conversations into memory."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The conversation history is the single most read and most written table in most Claude-powered applications. Every API call to Claude starts by loading the conversation context (often 10–100 messages), and every response appends at least two new messages (user turn + assistant turn). At moderate scale — 10,000 active users with 5 conversations each, 50 messages per conversation — the messages table already has 2.5 million rows and must support sub-10ms single-conversation reads."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Poor schema design manifests as: slow context loads when conversations grow long, inability to paginate without full table scans, token budget overruns because token_count is not tracked, and GDPR deletion failures when soft-delete is not properly indexed. Getting the schema right from the start prevents these problems at scale."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Relational integrity: foreign keys between conversations, messages, and tool_calls prevent orphaned records and enable cascading deletes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "JSONB flexibility: the metadata and tool_calls columns store arbitrary JSON, avoiding schema migrations when Claude's API adds new fields like cache_creation_input_tokens."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Index-driven performance: a composite index on (conversation_id, created_at DESC) enables keyset pagination in O(log N) time regardless of conversation length."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Soft-delete pattern: setting deleted_at instead of removing rows preserves audit history, enables undo, and simplifies GDPR erasure to a single UPDATE."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Token budget tracking: storing token_count per message allows summing the context window usage without calling the Anthropic token-counting endpoint repeatedly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Archival-ready: the deleted_at column and a separate archive strategy let you move cold conversations to cheaper storage without breaking active session reads."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Write amplification: every message requires at minimum one INSERT to messages, and tool-calling responses require additional rows in tool_calls. High-throughput streaming responses may need batched inserts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "JSONB query cost: GIN indexes on tool_calls JSONB add index maintenance overhead and increase WAL volume. Avoid indexing every JSONB column — only those you actually filter on."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Soft-delete index bloat: partial indexes excluding deleted_at IS NOT NULL keep active-only queries fast, but the table still accumulates rows. Periodic hard-deletion of expired rows with a background job is needed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sequence numbering: maintaining sequence_num per conversation requires either a SELECT MAX() before each insert (serialization hazard) or a per-conversation sequence object. The sequence approach is safer but adds schema complexity."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each conversation is a logical session identified by a UUID. Messages are appended to the conversation in order, each tagged with a role (user or assistant) enforced by a CHECK constraint. The sequence_num column provides a stable, gapless ordering that survives concurrent inserts better than relying on created_at alone (two messages in the same millisecond would otherwise have an undefined order)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool calls are stored in two ways: as a JSONB array on the assistant message row (tool_calls column, mirroring Claude's API response shape), and optionally as rows in the tool_calls table for queryability. The dual-storage approach lets you reconstruct the exact API request/response without a join, while still being able to query \"which conversations used the web_search tool this week\"."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The soft-delete pattern sets deleted_at to the current timestamp rather than removing rows. Active queries include a WHERE deleted_at IS NULL predicate. Partial indexes — indexes that include a WHERE clause — ensure these queries use an index rather than scanning deleted rows. When a conversation is \"deleted\" by the user, all its messages are soft-deleted in a single UPDATE."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODYwIiBoZWlnaHQ9IjUyMCIgdmlld0JveD0iMCAwIDg2MCA1MjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjUyMCIgZmlsbD0iI2Y4ZmFmYyIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWUyOTNiIj5Qb3N0Z3JlU1FMIEVSIERpYWdyYW06IENvbnZlcnNhdGlvbiBIaXN0b3J5IFN0b3JhZ2U8L3RleHQ+CgogIDwhLS0gY29udmVyc2F0aW9ucyB0YWJsZSAtLT4KICA8cmVjdCB4PSIzMCIgeT0iNTAiIHdpZHRoPSIyMzAiIGhlaWdodD0iMjAwIiByeD0iNiIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHJlY3QgeD0iMzAiIHk9IjUwIiB3aWR0aD0iMjMwIiBoZWlnaHQ9IjM0IiByeD0iNiIgZmlsbD0iIzNiODJmNiIvPgogIDx0ZXh0IHg9IjE0NSIgeT0iNzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMyI+Y29udmVyc2F0aW9uczwvdGV4dD4KICA8bGluZSB4MT0iMzAiIHkxPSI4NCIgeDI9IjI2MCIgeTI9Ijg0IiBzdHJva2U9IiMzYjgyZjYiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjUwIiB5PSIxMDIiIGZpbGw9IiM3YzNhZWQiIGZvbnQtc2l6ZT0iMTEiPlBLICBpZCBVVUlEIERFRkFVTFQgZ2VuX3JhbmRvbV91dWlkKCk8L3RleHQ+CiAgPHRleHQgeD0iNTAiIHk9IjEyMCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICB1c2VyX2lkIFVVSUQgTk9UIE5VTEw8L3RleHQ+CiAgPHRleHQgeD0iNTAiIHk9IjEzOCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICB0aXRsZSBURVhUPC90ZXh0PgogIDx0ZXh0IHg9IjUwIiB5PSIxNTYiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgY3JlYXRlZF9hdCBUSU1FU1RBTVBUWjwvdGV4dD4KICA8dGV4dCB4PSI1MCIgeT0iMTc0IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIHVwZGF0ZWRfYXQgVElNRVNUQU1QVFo8L3RleHQ+CiAgPHRleHQgeD0iNTAiIHk9IjE5MiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICBtZXRhZGF0YSBKU09OQjwvdGV4dD4KICA8dGV4dCB4PSI1MCIgeT0iMjEwIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIGRlbGV0ZWRfYXQgVElNRVNUQU1QVFo8L3RleHQ+CiAgPHRleHQgeD0iNTAiIHk9IjIyOCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICB0b2tlbl9idWRnZXQgSU5UPC90ZXh0PgoKICA8IS0tIG1lc3NhZ2VzIHRhYmxlIC0tPgogIDxyZWN0IHg9IjMzMCIgeT0iNTAiIHdpZHRoPSIyNDAiIGhlaWdodD0iMjYwIiByeD0iNiIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHJlY3QgeD0iMzMwIiB5PSI1MCIgd2lkdGg9IjI0MCIgaGVpZ2h0PSIzNCIgcng9IjYiIGZpbGw9IiMxMGI5ODEiLz4KICA8dGV4dCB4PSI0NTAiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0id2hpdGUiIGZvbnQtc2l6ZT0iMTMiPm1lc3NhZ2VzPC90ZXh0PgogIDxsaW5lIHgxPSIzMzAiIHkxPSI4NCIgeDI9IjU3MCIgeTI9Ijg0IiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjM1MCIgeT0iMTAyIiBmaWxsPSIjN2MzYWVkIiBmb250LXNpemU9IjExIj5QSyAgaWQgVVVJRCBERUZBVUxUIGdlbl9yYW5kb21fdXVpZCgpPC90ZXh0PgogIDx0ZXh0IHg9IjM1MCIgeT0iMTIwIiBmaWxsPSIjZGMyNjI2IiBmb250LXNpemU9IjExIj5GSyAgY29udmVyc2F0aW9uX2lkIFVVSUQgTk9UIE5VTEw8L3RleHQ+CiAgPHRleHQgeD0iMzUwIiB5PSIxMzgiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgcm9sZSBURVhUIENIRUNLIElOKHVzZXIsYXNzaXN0YW50KTwvdGV4dD4KICA8dGV4dCB4PSIzNTAiIHk9IjE1NiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICBjb250ZW50IFRFWFQgTk9UIE5VTEw8L3RleHQ+CiAgPHRleHQgeD0iMzUwIiB5PSIxNzQiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgY3JlYXRlZF9hdCBUSU1FU1RBTVBUWjwvdGV4dD4KICA8dGV4dCB4PSIzNTAiIHk9IjE5MiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICB0b2tlbl9jb3VudCBJTlQ8L3RleHQ+CiAgPHRleHQgeD0iMzUwIiB5PSIyMTAiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgc2VxdWVuY2VfbnVtIElOVCBOT1QgTlVMTDwvdGV4dD4KICA8dGV4dCB4PSIzNTAiIHk9IjIyOCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+ICAgICB0b29sX2NhbGxzIEpTT05CPC90ZXh0PgogIDx0ZXh0IHg9IjM1MCIgeT0iMjQ2IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIHRvb2xfY2FsbF9yZXN1bHRzIEpTT05CPC90ZXh0PgogIDx0ZXh0IHg9IjM1MCIgeT0iMjY0IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIGRlbGV0ZWRfYXQgVElNRVNUQU1QVFo8L3RleHQ+CiAgPHRleHQgeD0iMzUwIiB5PSIyODIiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgbWV0YWRhdGEgSlNPTkI8L3RleHQ+CgogIDwhLS0gdG9vbF9jYWxscyB0YWJsZSAtLT4KICA8cmVjdCB4PSI2MjAiIHk9IjUwIiB3aWR0aD0iMjIwIiBoZWlnaHQ9IjIyMCIgcng9IjYiIGZpbGw9IndoaXRlIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMiIvPgogIDxyZWN0IHg9IjYyMCIgeT0iNTAiIHdpZHRoPSIyMjAiIGhlaWdodD0iMzQiIHJ4PSI2IiBmaWxsPSIjZjU5ZTBiIi8+CiAgPHRleHQgeD0iNzMwIiB5PSI3MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IndoaXRlIiBmb250LXNpemU9IjEzIj50b29sX2NhbGxzPC90ZXh0PgogIDxsaW5lIHgxPSI2MjAiIHkxPSI4NCIgeDI9Ijg0MCIgeTI9Ijg0IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjY0MCIgeT0iMTAyIiBmaWxsPSIjN2MzYWVkIiBmb250LXNpemU9IjExIj5QSyAgaWQgVVVJRCBERUZBVUxUIGdlbl9yYW5kb21fdXVpZCgpPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMTIwIiBmaWxsPSIjZGMyNjI2IiBmb250LXNpemU9IjExIj5GSyAgbWVzc2FnZV9pZCBVVUlEIE5PVCBOVUxMPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMTM4IiBmaWxsPSIjZGMyNjI2IiBmb250LXNpemU9IjExIj5GSyAgY29udmVyc2F0aW9uX2lkIFVVSUQgTk9UIE5VTEw8L3RleHQ+CiAgPHRleHQgeD0iNjQwIiB5PSIxNTYiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgdG9vbF9uYW1lIFRFWFQgTk9UIE5VTEw8L3RleHQ+CiAgPHRleHQgeD0iNjQwIiB5PSIxNzQiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgaW5wdXQgSlNPTkIgTk9UIE5VTEw8L3RleHQ+CiAgPHRleHQgeD0iNjQwIiB5PSIxOTIiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPiAgICAgb3V0cHV0IEpTT05CPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMjEwIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIHN0YXR1cyBURVhUPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMjI4IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIGV4ZWN1dGVkX2F0IFRJTUVTVEFNUFRaPC90ZXh0PgogIDx0ZXh0IHg9IjY0MCIgeT0iMjQ2IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj4gICAgIGR1cmF0aW9uX21zIElOVDwvdGV4dD4KCiAgPCEtLSBSZWxhdGlvbnNoaXAgYXJyb3dzIC0tPgogIDwhLS0gY29udmVyc2F0aW9ucyAtPiBtZXNzYWdlcyAoMTpOKSAtLT4KICA8bGluZSB4MT0iMjYwIiB5MT0iMTMwIiB4Mj0iMzMwIiB5Mj0iMTMwIiBzdHJva2U9IiM2YjcyODAiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWRhc2hhcnJheT0iNSwzIi8+CiAgPHBvbHlnb24gcG9pbnRzPSIzMjUsMTI2IDMzMCwxMzAgMzI1LDEzNCIgZmlsbD0iIzZiNzI4MCIvPgogIDx0ZXh0IHg9IjI5MCIgeT0iMTI0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzc0MTUxIj4xPC90ZXh0PgogIDx0ZXh0IHg9IjMxNSIgeT0iMTI0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzc0MTUxIj5OPC90ZXh0PgoKICA8IS0tIG1lc3NhZ2VzIC0+IHRvb2xfY2FsbHMgKDE6TikgLS0+CiAgPGxpbmUgeDE9IjU3MCIgeTE9IjEzMCIgeDI9IjYyMCIgeTI9IjEzMCIgc3Ryb2tlPSIjNmI3MjgwIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1kYXNoYXJyYXk9IjUsMyIvPgogIDxwb2x5Z29uIHBvaW50cz0iNjE1LDEyNiA2MjAsMTMwIDYxNSwxMzQiIGZpbGw9IiM2YjcyODAiLz4KICA8dGV4dCB4PSI1OTAiIHk9IjEyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzM3NDE1MSI+MTwvdGV4dD4KICA8dGV4dCB4PSI2MTMiIHk9IjEyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzM3NDE1MSI+TjwvdGV4dD4KCiAgPCEtLSBJbmRleGVzIHNlY3Rpb24gLS0+CiAgPHJlY3QgeD0iMzAiIHk9IjMyMCIgd2lkdGg9IjM5MCIgaGVpZ2h0PSIxODAiIHJ4PSI2IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjNjM2NmYxIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxyZWN0IHg9IjMwIiB5PSIzMjAiIHdpZHRoPSIzOTAiIGhlaWdodD0iMjgiIHJ4PSI2IiBmaWxsPSIjNjM2NmYxIi8+CiAgPHRleHQgeD0iMjI1IiB5PSIzMzkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMiI+S2V5IEluZGV4ZXM8L3RleHQ+CiAgPHRleHQgeD0iNTAiIHk9IjM2NiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+aWR4X21lc3NhZ2VzX2NvbnZlcnNhdGlvbl9pZCAgT04gbWVzc2FnZXMoY29udmVyc2F0aW9uX2lkKTwvdGV4dD4KICA8dGV4dCB4PSI1MCIgeT0iMzg0IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj5pZHhfbWVzc2FnZXNfY29udl9jcmVhdGVkICAgICBPTiBtZXNzYWdlcyhjb252ZXJzYXRpb25faWQsIGNyZWF0ZWRfYXQgREVTQyk8L3RleHQ+CiAgPHRleHQgeD0iNTAiIHk9IjQwMiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+aWR4X21lc3NhZ2VzX3NlcXVlbmNlICAgICAgICAgT04gbWVzc2FnZXMoY29udmVyc2F0aW9uX2lkLCBzZXF1ZW5jZV9udW0pPC90ZXh0PgogIDx0ZXh0IHg9IjUwIiB5PSI0MjAiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPmlkeF9jb252ZXJzYXRpb25zX3VzZXIgICAgICAgIE9OIGNvbnZlcnNhdGlvbnModXNlcl9pZCwgY3JlYXRlZF9hdCBERVNDKTwvdGV4dD4KICA8dGV4dCB4PSI1MCIgeT0iNDM4IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj5pZHhfY29udl9hY3RpdmUgICAgICAgICAgICAgICBPTiBjb252ZXJzYXRpb25zKHVzZXJfaWQpIFdIRVJFIGRlbGV0ZWRfYXQgSVMgTlVMTDwvdGV4dD4KICA8dGV4dCB4PSI1MCIgeT0iNDU2IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjExIj5pZHhfdG9vbF9jYWxsc19tZXNzYWdlX2lkICAgICBPTiB0b29sX2NhbGxzKG1lc3NhZ2VfaWQpPC90ZXh0PgogIDx0ZXh0IHg9IjUwIiB5PSI0NzQiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTEiPmlkeF9tZXNzYWdlc19tZXRhZGF0YV9naW4gICAgIFVTSU5HIEdJTiBPTiBtZXNzYWdlcyh0b29sX2NhbGxzKTwvdGV4dD4KCiAgPCEtLSBLZXlzZXQgcGFnaW5hdGlvbiBwYXR0ZXJuIC0tPgogIDxyZWN0IHg9IjQ1MCIgeT0iMzIwIiB3aWR0aD0iMzkwIiBoZWlnaHQ9IjE4MCIgcng9IjYiIGZpbGw9IndoaXRlIiBzdHJva2U9IiM2YjcyODAiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHJlY3QgeD0iNDUwIiB5PSIzMjAiIHdpZHRoPSIzOTAiIGhlaWdodD0iMjgiIHJ4PSI2IiBmaWxsPSIjNDc1NTY5Ii8+CiAgPHRleHQgeD0iNjQ1IiB5PSIzMzkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSJ3aGl0ZSIgZm9udC1zaXplPSIxMiI+S2V5c2V0IFBhZ2luYXRpb24gUGF0dGVybjwvdGV4dD4KICA8dGV4dCB4PSI0NzAiIHk9IjM2NCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+U0VMRUNUICogRlJPTSBtZXNzYWdlczwvdGV4dD4KICA8dGV4dCB4PSI0NzAiIHk9IjM4MCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+V0hFUkUgY29udmVyc2F0aW9uX2lkID0gJDE8L3RleHQ+CiAgPHRleHQgeD0iNDcwIiB5PSIzOTYiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgQU5EIGRlbGV0ZWRfYXQgSVMgTlVMTDwvdGV4dD4KICA8dGV4dCB4PSI0NzAiIHk9IjQxMiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICBBTkQgKGNyZWF0ZWRfYXQsIGlkKSAmbHQ7ICgkY3Vyc29yX3RzLCAkY3Vyc29yX2lkKTwvdGV4dD4KICA8dGV4dCB4PSI0NzAiIHk9IjQyOCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+T1JERVIgQlkgY3JlYXRlZF9hdCBERVNDLCBpZCBERVNDPC90ZXh0PgogIDx0ZXh0IHg9IjQ3MCIgeT0iNDQ0IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj5MSU1JVCAkcGFnZV9zaXplOzwvdGV4dD4KICA8dGV4dCB4PSI0NzAiIHk9IjQ2NCIgZmlsbD0iIzZiNzI4MCIgZm9udC1zaXplPSIxMCI+LS0gSW5kZXg6IGlkeF9tZXNzYWdlc19jb252X2NyZWF0ZWQgaXMgdXNlZDwvdGV4dD4KICA8dGV4dCB4PSI0NzAiIHk9IjQ4MCIgZmlsbD0iIzZiNzI4MCIgZm9udC1zaXplPSIxMCI+LS0gTm8gT0ZGU0VUOiBPKDEpIGN1cnNvciBuYXZpZ2F0aW9uPC90ZXh0PgoKICA8IS0tIExlZ2VuZCAtLT4KICA8cmVjdCB4PSI1MCIgeT0iNTA0IiB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIGZpbGw9IiM3YzNhZWQiLz4KICA8dGV4dCB4PSI2OCIgeT0iNTE0IiBmb250LXNpemU9IjEwIiBmaWxsPSIjMzc0MTUxIj5QcmltYXJ5IEtleTwvdGV4dD4KICA8cmVjdCB4PSIxNjAiIHk9IjUwNCIgd2lkdGg9IjEyIiBoZWlnaHQ9IjEyIiBmaWxsPSIjZGMyNjI2Ii8+CiAgPHRleHQgeD0iMTc4IiB5PSI1MTQiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiMzNzQxNTEiPkZvcmVpZ24gS2V5PC90ZXh0PgogIDxsaW5lIHgxPSIyNzAiIHkxPSI1MTAiIHgyPSIzMDAiIHkyPSI1MTAiIHN0cm9rZT0iIzZiNzI4MCIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtZGFzaGFycmF5PSI1LDMiLz4KICA8dGV4dCB4PSIzMDgiIHk9IjUxNCIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzM3NDE1MSI+MTpOIFJlbGF0aW9uc2hpcDwvdGV4dD4KPC9zdmc+",
+          "alt": "ER diagram showing conversations table (PK id, user_id, metadata JSONB, deleted_at) linked 1:N to messages table (FK conversation_id, role, content, token_count, sequence_num, tool_calls JSONB) linked 1:N to tool_calls table (FK message_id, tool_name, input/output JSONB), plus key index definitions and keyset pagination pattern."
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The diagram shows the three-table hierarchy with primary/foreign key relationships, the key index set, and the keyset pagination query pattern. The conversations table is the root entity; messages link to it via conversation_id; tool_calls link to both message_id and conversation_id (the redundant FK to conversations enables efficient per-conversation tool-call queries without joining through messages)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use it"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This schema is appropriate when: you are already running PostgreSQL for other application data (avoids a second database); you need transactional guarantees (rolling back a partially saved turn is trivially a ROLLBACK); you need rich querying (find all conversations where a specific tool was used, or all messages from user X in the last 7 days)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "It is less appropriate when: message volume exceeds ~100M rows and sharding is needed (PostgreSQL's native sharding story via Citus or partitioning adds operational complexity); you need full-text semantic search over message content (add pgvector or a separate search index alongside, not instead of, this schema); or you need sub-millisecond read latency (add Redis as a write-through cache for recent messages)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Start with the DDL. Run this migration in order — conversations before messages (FK dependency), messages before tool_calls:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- Enable pgcrypto for gen_random_uuid() on Postgres < 13\n-- (Postgres 13+ has gen_random_uuid() built-in)\nCREATE EXTENSION IF NOT EXISTS pgcrypto;\n\nCREATE TABLE conversations (\n    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    user_id     UUID NOT NULL,\n    title       TEXT,\n    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),\n    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),\n    deleted_at  TIMESTAMPTZ,\n    token_budget INT,               -- max tokens before archival\n    metadata    JSONB NOT NULL DEFAULT '{}'\n);\n\nCREATE TABLE messages (\n    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,\n    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),\n    content         TEXT NOT NULL,\n    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),\n    deleted_at      TIMESTAMPTZ,\n    token_count     INT,\n    sequence_num    INT NOT NULL,\n    tool_calls      JSONB,          -- raw API response tool_calls array\n    tool_results    JSONB,          -- raw API tool_results content block\n    metadata        JSONB NOT NULL DEFAULT '{}',\n    UNIQUE (conversation_id, sequence_num)\n);\n\nCREATE TABLE tool_calls (\n    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    message_id      UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,\n    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,\n    tool_name       TEXT NOT NULL,\n    tool_use_id     TEXT NOT NULL,  -- Claude's tool_use_id for correlation\n    input           JSONB NOT NULL,\n    output          JSONB,\n    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','error')),\n    executed_at     TIMESTAMPTZ,\n    duration_ms     INT,\n    metadata        JSONB NOT NULL DEFAULT '{}'\n);"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Then create the indexes. The most critical are the composite index on (conversation_id, created_at DESC) for message pagination and the partial index on active conversations:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- Messages: primary access pattern — paginate within a conversation\nCREATE INDEX idx_messages_conv_created\n    ON messages (conversation_id, created_at DESC)\n    WHERE deleted_at IS NULL;\n\nCREATE INDEX idx_messages_conv_seq\n    ON messages (conversation_id, sequence_num)\n    WHERE deleted_at IS NULL;\n\n-- Conversations: load active conversations for a user\nCREATE INDEX idx_conversations_user_active\n    ON conversations (user_id, created_at DESC)\n    WHERE deleted_at IS NULL;\n\n-- Tool calls: find all tool calls in a conversation\nCREATE INDEX idx_tool_calls_conv\n    ON tool_calls (conversation_id, executed_at DESC);\n\n-- Tool calls: find all calls for a specific tool name\nCREATE INDEX idx_tool_calls_name\n    ON tool_calls (tool_name, executed_at DESC);\n\n-- JSONB GIN index only if you query tool_calls JSON deeply\nCREATE INDEX idx_messages_tool_calls_gin\n    ON messages USING GIN (tool_calls)\n    WHERE tool_calls IS NOT NULL;"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Loading conversation context for Claude API call"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport psycopg2\nfrom psycopg2.extras import RealDictCursor\n\ndef load_conversation_context(conn, conversation_id: str, limit: int = 100) -> list[dict]:\n    \"\"\"Load the last `limit` messages for the Claude API messages array.\"\"\"\n    with conn.cursor(cursor_factory=RealDictCursor) as cur:\n        cur.execute(\n            \"\"\"\n            SELECT role, content, tool_calls, tool_results\n            FROM messages\n            WHERE conversation_id = %s\n              AND deleted_at IS NULL\n            ORDER BY sequence_num ASC\n            LIMIT %s\n            \"\"\",\n            (conversation_id, limit)\n        )\n        rows = cur.fetchall()\n\n    messages = []\n    for row in rows:\n        if row['role'] == 'user':\n            messages.append({'role': 'user', 'content': row['content']})\n        else:\n            # Reconstruct assistant message with tool_calls if present\n            if row['tool_calls']:\n                content = [{'type': 'text', 'text': row['content']}] if row['content'] else []\n                content.extend(row['tool_calls'])  # stored as-is from API\n                messages.append({'role': 'assistant', 'content': content})\n            else:\n                messages.append({'role': 'assistant', 'content': row['content']})\n            # Append tool results as a user turn if present\n            if row['tool_results']:\n                messages.append({'role': 'user', 'content': row['tool_results']})\n    return messages\n\n\ndef append_message(conn, conversation_id: str, role: str, content: str,\n                   token_count: int = 0, tool_calls=None, tool_results=None):\n    \"\"\"Append a new message and return its id.\"\"\"\n    with conn.cursor() as cur:\n        # Atomic sequence increment\n        cur.execute(\n            \"\"\"\n            INSERT INTO messages\n                (conversation_id, role, content, token_count,\n                 sequence_num, tool_calls, tool_results)\n            VALUES (\n                %s, %s, %s, %s,\n                COALESCE((SELECT MAX(sequence_num) FROM messages\n                          WHERE conversation_id = %s), 0) + 1,\n                %s::jsonb, %s::jsonb\n            )\n            RETURNING id\n            \"\"\",\n            (conversation_id, role, content, token_count,\n             conversation_id,\n             __import__('json').dumps(tool_calls) if tool_calls else None,\n             __import__('json').dumps(tool_results) if tool_results else None)\n        )\n        row = cur.fetchone()\n        # Keep updated_at current on the conversation\n        cur.execute(\n            \"UPDATE conversations SET updated_at = now() WHERE id = %s\",\n            (conversation_id,)\n        )\n        conn.commit()\n    return row[0]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Keyset pagination (cursor-based)"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def get_messages_page(conn, conversation_id: str,\n                      cursor_ts=None, cursor_id=None,\n                      page_size: int = 20) -> tuple[list, dict | None]:\n    \"\"\"\n    Return a page of messages newest-first, plus the next cursor.\n    cursor_ts and cursor_id are the created_at/id of the last seen message.\n    \"\"\"\n    with conn.cursor(cursor_factory=RealDictCursor) as cur:\n        if cursor_ts is None:\n            cur.execute(\n                \"\"\"\n                SELECT id, role, content, created_at, token_count, sequence_num\n                FROM messages\n                WHERE conversation_id = %s AND deleted_at IS NULL\n                ORDER BY created_at DESC, id DESC\n                LIMIT %s\n                \"\"\",\n                (conversation_id, page_size + 1)\n            )\n        else:\n            # Compound cursor avoids duplicates when timestamps collide\n            cur.execute(\n                \"\"\"\n                SELECT id, role, content, created_at, token_count, sequence_num\n                FROM messages\n                WHERE conversation_id = %s\n                  AND deleted_at IS NULL\n                  AND (created_at, id) < (%s, %s)\n                ORDER BY created_at DESC, id DESC\n                LIMIT %s\n                \"\"\",\n                (conversation_id, cursor_ts, cursor_id, page_size + 1)\n            )\n        rows = cur.fetchall()\n\n    has_more = len(rows) > page_size\n    page = rows[:page_size]\n    next_cursor = None\n    if has_more:\n        last = page[-1]\n        next_cursor = {'ts': last['created_at'].isoformat(), 'id': str(last['id'])}\n    return [dict(r) for r in page], next_cursor"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A customer-support product serving 50,000 daily active users generates roughly 5 million messages per day. The conversations table has 2 million rows; messages has 80 million rows. With the schema above and proper indexes, single-conversation context loads (last 50 messages) run in under 5ms on a db.r6g.large RDS instance. The token_count column is used to reject new user messages that would push the context window over 200,000 tokens, and to route conversations with >100k tokens to a background summarization job that replaces early messages with a summary block."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool_calls table sees about 800,000 rows per day from agentic use cases. A weekly cron job aggregates tool_name, COUNT(*), AVG(duration_ms) into a reporting table for cost attribution, then hard-deletes tool_calls rows older than 90 days where the parent conversation is also soft-deleted."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- Summarize token usage per conversation for billing\nSELECT\n    c.user_id,\n    c.id AS conversation_id,\n    SUM(m.token_count) AS total_tokens,\n    COUNT(m.id)        AS message_count,\n    MAX(m.created_at)  AS last_activity\nFROM conversations c\nJOIN messages m ON m.conversation_id = c.id\nWHERE c.user_id = $1\n  AND c.deleted_at IS NULL\n  AND m.deleted_at IS NULL\nGROUP BY c.user_id, c.id\nORDER BY last_activity DESC\nLIMIT 20;"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Using OFFSET for pagination"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "OFFSET N scans and discards the first N rows every time. On a conversation with 500 messages, page 10 with OFFSET 180 reads 200 rows to return 20. At scale this compounds: loading page 50 of a long conversation triggers a full index scan of 1,000 rows. Keyset pagination eliminates this by using the last-seen (created_at, id) as the start point."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- WRONG: O(offset) cost that grows with page number\nSELECT * FROM messages\nWHERE conversation_id = $1 AND deleted_at IS NULL\nORDER BY created_at DESC\nOFFSET 180 LIMIT 20;\n\n-- RIGHT: O(log N) keyset cursor\nSELECT * FROM messages\nWHERE conversation_id = $1\n  AND deleted_at IS NULL\n  AND (created_at, id) < ($cursor_ts, $cursor_id)\nORDER BY created_at DESC, id DESC\nLIMIT 20;"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Storing content as JSONB instead of TEXT"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Message content is plain text or a content block array. If stored as JSONB, every read requires JSON parsing overhead and every write requires JSON serialization. Use TEXT for the content column and JSONB only for genuinely structured sub-fields like tool_calls and metadata."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Missing the soft-delete partial index"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A full index on (conversation_id, created_at DESC) includes deleted messages. The WHERE deleted_at IS NULL predicate in queries cannot use this index efficiently once many rows are soft-deleted. Create a partial index WITH the WHERE clause so the index only covers active rows."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always insert conversation + first message in a single transaction to prevent orphaned conversations with no messages."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Compute and store token_count at write time using tiktoken or the Anthropic token-counting endpoint — never compute it at read time."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use advisory locks or the lock: table column in Redis when concurrent agent steps might write to the same conversation simultaneously."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Partition the messages table by created_at month once it exceeds 50M rows; old partitions can be moved to tablespaces on slower storage."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enable autovacuum aggressively on the messages table — high-write tables accumulate dead tuples quickly and index bloat degrades performance if vacuum lags."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set statement_timeout = 5000 on application connections to prevent slow pagination queries from holding locks during traffic spikes."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The dominant read pattern — load last N messages for a conversation — has O(log N) cost with the composite index. Write throughput on a single PostgreSQL instance typically exceeds 10,000 message inserts per second with connection pooling (PgBouncer) and batch commit. The bottleneck shifts to WAL archiving and replication lag at high write rates."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For very high write throughput (>50k messages/sec), consider: (1) buffering writes to Redis and flushing to PostgreSQL asynchronously with at-most-5s lag; (2) using COPY for bulk inserts when replaying historical data; (3) partitioning by created_at to parallelize vacuum and enable partition pruning on time-range queries."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The GIN index on tool_calls JSONB adds approximately 15% write overhead on the messages table. If tool call querying is rare, defer creating this index and add it later on a low-traffic window."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "PgBouncer: connection pooler required for Python/Node applications that open many short-lived database connections. Set pool_mode=transaction for stateless query traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Alembic (Python) / Flyway (JVM): migration tools that track DDL changes in version control. Run migrations as part of the deployment pipeline, not at application startup."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "pg_partman: automates time-based partition creation and maintenance for the messages table."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "pganalyze: continuous index advisor that surfaces missing indexes and slow queries based on real pg_stat_statements data."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "psycopg3 (Python): the modern async PostgreSQL driver with native binary protocol support, reducing serialization overhead for JSONB columns."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Approach"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pros"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cons"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PostgreSQL (this schema)",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "ACID, rich queries, no extra infra, JSONB"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single-node write ceiling, schema migrations"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Most applications up to ~100M messages"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "DynamoDB",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Infinite scale, managed, single-digit ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No joins, query flexibility requires GSIs, cost unpredictable"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High-scale serverless, simple access patterns"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "MongoDB",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Document-native for nested content, flexible schema"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Weaker ACID guarantees, no native joins for cross-conversation queries"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Unstructured content, prototype speed"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Redis (as primary store)",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sub-ms reads, TTL-based cleanup"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No persistence guarantees, no rich queries, data loss on OOM"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cache tier only, never as primary store"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Row-level security (RLS): enable RLS on the conversations and messages tables so that application queries automatically scope to the authenticated user_id. This prevents one user from reading another user's conversations even if the application code has a bug."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;\nCREATE POLICY conversations_user_isolation ON conversations\n    USING (user_id = current_setting('app.user_id')::uuid);\n\nALTER TABLE messages ENABLE ROW LEVEL SECURITY;\nCREATE POLICY messages_user_isolation ON messages\n    USING (\n        conversation_id IN (\n            SELECT id FROM conversations\n            WHERE user_id = current_setting('app.user_id')::uuid\n        )\n    );"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Encryption: sensitive message content should be encrypted at rest using PostgreSQL's pgcrypto extension or, preferably, handled at the storage layer (AWS RDS encryption, GCP Cloud SQL CMEK). Do not encrypt the content column at the application layer unless you have specific compliance requirements — it prevents full-text search and complicates debugging."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Backup and recovery: enable continuous WAL archiving (pg_basebackup + WAL-G) so that any conversation can be recovered to a point in time. For GDPR erasure, the soft-delete pattern is not sufficient — the hard-delete job must also invalidate or overwrite the corresponding WAL segments, which typically means using logical replication to a separate anonymized replica and expiring the physical backups after your retention period."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Design three tables — conversations, messages, tool_calls — with foreign key relationships that enforce hierarchy and enable cascade operations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a composite partial index on (conversation_id, created_at DESC) WHERE deleted_at IS NULL as the core access pattern index; it powers both keyset pagination and context loading."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Store message content in TEXT and use JSONB only for tool_calls, tool_results, and metadata — keeping structured data separate from prose avoids unnecessary parsing overhead."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement keyset pagination with a compound (created_at, id) cursor — never use OFFSET, which degrades to O(N) as pages advance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Soft-delete with deleted_at and partial indexes gives you audit history, undo capability, and GDPR compliance without sacrificing query performance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Track token_count per message at write time so you can enforce context window budgets and route long conversations to summarization without expensive re-counting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enable row-level security so that even a buggy application query cannot return another user's conversation history."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

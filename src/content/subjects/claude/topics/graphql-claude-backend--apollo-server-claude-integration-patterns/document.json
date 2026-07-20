@@ -1,1 +1,2542 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T07:35:36.258Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Apollo Server + Claude works best when Apollo is your typed API and orchestration layer, while Claude stays behind a dedicated service boundary that handles Messages API calls, streaming, tool loops, usage capture, and provider-specific errors. The strongest production pattern is: thin Apollo resolvers, request-scoped auth/context, a "},{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"RunService"},{"type":"text","text":" for provider logic, and pub/sub-backed subscriptions for streaming responses."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core architecture"}]},{"type":"paragraph","content":[{"type":"text","text":"Apollo Server is well-suited to expose a conversational API because it gives you schema-first contracts, context-based auth, resolver composition, and subscription support via external pub/sub integrations rather than built-in magic. Claude’s Messages API is stateless, so Apollo should not try to “be the conversation memory”; instead, Apollo resolvers should load conversation state from your own stores, assemble the right history, call Claude, and persist the result."}]},{"type":"paragraph","content":[{"type":"text","text":"A clean production stack usually looks like this:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Apollo Server"},{"type":"text","text":": GraphQL schema, resolvers, auth context, error normalization.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Conversation service"},{"type":"text","text":": session history, summaries, persistence.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Claude service"},{"type":"text","text":": builds Messages API requests, handles streaming and tool calls.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Usage/metrics service"},{"type":"text","text":": token usage, latency, quota checks.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Pub/Sub layer"},{"type":"text","text":": Redis or similar for subscription events across instances."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Resolver pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"The right Apollo pattern is “thin resolvers, thick services.” Apollo resolver code should mainly:\n- Validate auth and tenant context from "},{"type":"text","marks":[{"type":"code"}],"text":"context"},{"type":"text","text":".\n- Load or persist app objects.\n- Call a typed service.\n- Return domain objects mapped to GraphQL types."}]},{"type":"paragraph","content":[{"type":"text","text":"Bad pattern:\n- Building Anthropic requests inline inside every resolver.\n- Mixing auth, quota logic, prompt construction, persistence, and provider calls in one resolver."}]},{"type":"paragraph","content":[{"type":"text","text":"Good pattern:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"sendMessage"},{"type":"text","text":" resolver calls "},{"type":"text","marks":[{"type":"code"}],"text":"conversationService.appendUserMessage(...)"},{"type":"text","text":".\n- Then "},{"type":"text","marks":[{"type":"code"}],"text":"runService.startClaudeRun(...)"},{"type":"text","text":".\n- That service builds the Claude request and returns normalized results.\n- Resolver returns "},{"type":"text","marks":[{"type":"code"}],"text":"conversation"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"message"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"run"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","text":"This follows general Apollo Server guidance around maintainable resolver layering and matches the Claude backend pattern of keeping provider-specific code out of transport handlers."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Context and authentication"}]},{"type":"paragraph","content":[{"type":"text","text":"Apollo Server’s "},{"type":"text","marks":[{"type":"code"}],"text":"context"},{"type":"text","text":" object should carry trusted request-scoped information into every resolver. For a Claude backend, that usually includes:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"tenantId"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"userId"},{"type":"text","text":"\n- roles/scopes\n- request ID / trace ID\n- quota policy\n- service dependencies"}]},{"type":"paragraph","content":[{"type":"text","text":"This is important because multi-tenant GraphQL systems should derive tenant scope from authentication context, not from user-supplied GraphQL arguments. It also lets the Claude service enforce tenant-aware history loading, prompt policy, quota checks, and tool permissions consistently."}]},{"type":"paragraph","content":[{"type":"text","text":"A typical pattern is:\n- HTTP auth middleware verifies JWT/session.\n- Apollo "},{"type":"text","marks":[{"type":"code"}],"text":"context"},{"type":"text","text":" maps identity into a typed object.\n- Resolvers and services consume "},{"type":"text","marks":[{"type":"code"}],"text":"context.auth"},{"type":"text","text":" instead of re-reading headers."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Schema-to-service mapping"}]},{"type":"paragraph","content":[{"type":"text","text":"A useful Apollo + Claude schema usually has:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"Query"},{"type":"text","text":" for conversations, runs, messages, models.\n- "},{"type":"text","marks":[{"type":"code"}],"text":"Mutation"},{"type":"text","text":" for "},{"type":"text","marks":[{"type":"code"}],"text":"createConversation"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"sendMessage"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"createRun"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"submitToolResult"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"cancelRun"},{"type":"text","text":".\n- "},{"type":"text","marks":[{"type":"code"}],"text":"Subscription"},{"type":"text","text":" for "},{"type":"text","marks":[{"type":"code"}],"text":"runEvents"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"conversationEvents"},{"type":"text","text":" streaming deltas and lifecycle updates."}]},{"type":"paragraph","content":[{"type":"text","text":"The strong integration pattern is to map each mutation to a business workflow, not directly to a Claude SDK method. For example:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"sendMessage"},{"type":"text","text":" does not equal "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.create(...)"},{"type":"text","text":".\n- It means: authorize, persist user turn, assemble context, enforce quota, call Claude, persist assistant turn, emit events, return normalized domain objects."}]},{"type":"paragraph","content":[{"type":"text","text":"That separation keeps your GraphQL API stable even if Claude provider details change later."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Streaming with subscriptions"}]},{"type":"paragraph","content":[{"type":"text","text":"Apollo Server does not magically stream Claude tokens by itself; subscriptions are implemented through long-lived GraphQL reads backed by a pub/sub model, which Apollo documents and community tooling like "},{"type":"text","marks":[{"type":"code"}],"text":"graphql-subscriptions"},{"type":"text","text":" support. The clean pattern for Claude is:\n1. Mutation starts a run.\n2. Claude service opens provider streaming.\n3. Service publishes typed run events to pub/sub.\n4. Apollo subscription resolver exposes those events to authorized clients."}]},{"type":"paragraph","content":[{"type":"text","text":"This gives you a neat bridge:\n- Claude provider stream in.\n- Apollo pub/sub events out."}]},{"type":"paragraph","content":[{"type":"text","text":"It is much cleaner than trying to stream directly from a mutation response."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended event model"}]},{"type":"paragraph","content":[{"type":"text","text":"Do not expose raw Claude SSE events in GraphQL. Apollo works best when subscription payloads are domain events such as:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"RunStarted"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"TextDelta"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"ToolUseRequested"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"RunCompleted"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"RunFailed"}]},{"type":"paragraph","content":[{"type":"text","text":"This makes frontend code simpler and keeps your GraphQL contract independent of provider wire formats. It also lets you normalize direct Anthropic, Bedrock, or future providers behind the same event schema."}]},{"type":"paragraph","content":[{"type":"text","text":"A typical Apollo subscription might be:"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"type Subscription {\n  runEvents(runId: ID!): RunEvent!\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"with tenant-aware filtering in the resolver so clients only receive events for runs they are authorized to see."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Pub/Sub and horizontal scale"}]},{"type":"paragraph","content":[{"type":"text","text":"Apollo’s common starter examples use in-memory pub/sub, but production Claude backends should usually use Redis, Kafka, NATS, or another shared event bus once you have multiple server instances. This matters because AI streaming is long-lived and instance-local memory breaks quickly under horizontal scaling, failover, or background workers."}]},{"type":"paragraph","content":[{"type":"text","text":"A strong production topology is:\n- Apollo instance handles GraphQL connections.\n- Worker or resolver starts Claude stream.\n- Stream events go to Redis pub/sub.\n- All Apollo instances can deliver the events to whichever node owns the WebSocket/subscription connection."}]},{"type":"paragraph","content":[{"type":"text","text":"This avoids sticky-session dependence and makes streaming more resilient."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tool use pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"For Apollo + Claude with tools, do not let resolvers become tool orchestrators themselves. Instead:\n- Resolver starts or continues a run.\n- Claude service detects tool-use requests.\n- Tool executor validates tenant/user permissions.\n- Tool results are persisted and optionally sent back through another run step.\n- Apollo emits tool-related events so the client can show progress or approval UI."}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern is important because tools often require stronger authorization than plain chat. Apollo should be the typed boundary; the actual tool policy belongs in backend services."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling"}]},{"type":"paragraph","content":[{"type":"text","text":"Apollo resolvers should normalize Claude/provider failures into stable GraphQL errors or typed result objects rather than leaking raw SDK exceptions. Good practice includes:\n- Distinguish auth failures, quota failures, provider timeouts, validation errors, and internal errors.\n- Return retryable vs non-retryable hints where useful.\n- Preserve provider request IDs in logs and maybe structured error fields for support/debugging.\n- Surface typed "},{"type":"text","marks":[{"type":"code"}],"text":"RunError"},{"type":"text","text":" objects for subscription lifecycle failures."}]},{"type":"paragraph","content":[{"type":"text","text":"This is especially important in chat apps because a failed run is still part of the conversation lifecycle and often needs to be rendered in the UI, not just thrown as a transport-level exception."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"DataLoader and N+1"}]},{"type":"paragraph","content":[{"type":"text","text":"Apollo Server patterns commonly emphasize DataLoader or equivalent batching for resolver efficiency. This matters in conversational apps because pages often query:\n- a list of conversations,\n- each conversation’s latest message,\n- each message’s author,\n- each conversation’s latest run,\n- each run’s usage."}]},{"type":"paragraph","content":[{"type":"text","text":"Without batching, your GraphQL API will issue many duplicate reads. Good use of DataLoader improves:\n- conversation/message joins,\n- user lookups,\n- run-to-message associations,\n- tenant-scoped permission checks."}]},{"type":"paragraph","content":[{"type":"text","text":"This keeps Apollo performant even when the AI layer itself is slower and more expensive."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Persistence pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"A very solid Apollo + Claude pattern is to treat the final assistant message in your DB as the source of truth, while the subscription stream is just the live UX path. That means:\n- During streaming, publish deltas via pub/sub.\n- At completion, persist the final assistant message and usage.\n- Clients can reconcile or refetch the final message if needed."}]},{"type":"paragraph","content":[{"type":"text","text":"This avoids making WebSocket streams the only copy of reality and helps with reconnection, auditing, and analytics."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Multi-tenant enforcement"}]},{"type":"paragraph","content":[{"type":"text","text":"For Apollo + Claude, tenant safety must be enforced in three places:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Context creation"},{"type":"text","text":": derive trusted tenant/user identity.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Resolver/service layer"},{"type":"text","text":": scope all conversation/run/message lookups to tenant.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Subscription filtering"},{"type":"text","text":": ensure streamed events match tenant and authorization."}]},{"type":"paragraph","content":[{"type":"text","text":"A common anti-pattern is securing queries and mutations but forgetting subscriptions. In a multi-tenant AI system, a subscription bug can leak live assistant output across tenants even if your query resolvers are perfect."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Good mutation patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong Apollo mutation set for Claude often includes:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"createConversation"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"sendMessage"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"retryRun"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"submitToolResult"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"cancelRun"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"These are product actions, not provider actions. That matters because:\n- You may switch Claude models or providers later.\n- One “send message” action may involve multiple backend steps.\n- The GraphQL API should describe your app’s workflow, not Anthropic’s transport API."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Good implementation pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"A good Node/Apollo structure might be:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"schema/"},{"type":"text","text":" — SDL types for conversation, run, subscription events."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"resolvers/"},{"type":"text","text":" — thin field resolvers and mutations."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"context/"},{"type":"text","text":" — auth and request-scoped dependency creation."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"services/claude-service.ts"},{"type":"text","text":" — Anthropic SDK calls, streaming, usage normalization."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"services/conversation-service.ts"},{"type":"text","text":" — history persistence and summarization."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"services/run-service.ts"},{"type":"text","text":" — orchestration for send/retry/cancel/tool flows."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"pubsub/"},{"type":"text","text":" — Redis-based event publishing for subscriptions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"loaders/"},{"type":"text","text":" — DataLoader instances for common entity joins."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This structure keeps Apollo transport concerns separate from Claude concerns."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Common failure modes"}]},{"type":"paragraph","content":[{"type":"text","text":"The main Apollo + Claude integration mistakes are:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Putting Anthropic SDK calls directly in resolvers."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"No request-scoped auth/tenant context."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Using in-memory pub/sub in production multi-instance deployments."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Exposing provider event formats directly to clients."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Treating subscriptions as optional afterthoughts rather than part of the run lifecycle."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"No final persistence of assistant messages."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"No DataLoader, causing N+1 explosions in chat-heavy views."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Forgetting tenant-aware subscription filtering."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Layman’s explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of Apollo Server as the receptionist and workflow desk for your app, and Claude as the specialist consultant in the back office. The receptionist should verify who the caller is, find the right case file, start the consultation, and relay updates cleanly. The receptionist should not also become the consultant, the file archive, the billing system, and the tool operator all at once."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Study questions with answers"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"What is Apollo Server’s main role in a Claude backend?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"It should be the typed API and orchestration boundary, not the place where all raw Claude logic lives."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why keep resolvers thin?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because thin resolvers are easier to test, reason about, and evolve, while Claude-specific logic changes more frequently and belongs in services."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"How should streaming be implemented?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Use a mutation to start the run and Apollo subscriptions backed by pub/sub to stream typed events."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why is Redis or shared pub/sub important?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because in-memory pub/sub does not scale safely across multiple Apollo instances or workers."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Where should tenant isolation be enforced?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"In context creation, resolver/service data access, and subscription event filtering."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T07:35:36.258Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server + Claude works best when Apollo is your typed API and orchestration layer, while Claude stays behind a dedicated service boundary that handles Messages API calls, streaming, tool loops, usage capture, and provider-specific errors. The strongest production pattern is: thin Apollo resolvers, request-scoped auth/context, a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ClaudeService"
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunService"
+          },
+          {
+            "type": "text",
+            "text": " for provider logic, and pub/sub-backed subscriptions for streaming responses."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzgiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5BcG9sbG8gU2VydmVyICsgQ2xhdWRlIGludGVncmF0aW9uIHBhdHRlcm5zPC90ZXh0Pgo8cmVjdCB4PSIzMCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iOTAiIGZpbGw9IiMxZTQwYWYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjE0NSIgeT0iMTA1IiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Db3JlIENvbmNlcHQ8L3RleHQ+CjxyZWN0IHg9IjI5NSIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iOTAiIGZpbGw9IiMwNjVmNDYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjQxMCIgeT0iMTA1IiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5JbXBsZW1lbnRhdGlvbjwvdGV4dD4KPHJlY3QgeD0iNTYwIiB5PSI1NSIgd2lkdGg9IjIzMCIgaGVpZ2h0PSI5MCIgZmlsbD0iIzdjMmQxMiIgcng9IjgiLz4KPHRleHQgeD0iNjc1IiB5PSIxMDUiIGZpbGw9IiNmZmYiIGZvbnQtc2l6ZT0iMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkJlc3QgUHJhY3RpY2VzPC90ZXh0Pgo8bGluZSB4MT0iMjYwIiB5MT0iMTAwIiB4Mj0iMjkzIiB5Mj0iMTAwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8bGluZSB4MT0iNTI1IiB5MT0iMTAwIiB4Mj0iNTU4IiB5Mj0iMTAwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8ZGVmcz48bWFya2VyIGlkPSJhIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI3IiByZWZZPSI0IiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDgsNCBMMCw4IFoiIGZpbGw9IiM0NzU1NjkiLz48L21hcmtlcj48L2RlZnM+Cjwvc3ZnPg==",
+          "alt": "Apollo Server + Claude integration patterns diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server is well-suited to expose a conversational API because it gives you schema-first contracts, context-based auth, resolver composition, and subscription support via external pub/sub integrations rather than built-in magic. Claude\u2019s Messages API is stateless, so Apollo should not try to \u201cbe the conversation memory\u201d; instead, Apollo resolvers should load conversation state from your own stores, assemble the right history, call Claude, and persist the result."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A clean production stack usually looks like this:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Apollo Server"
+          },
+          {
+            "type": "text",
+            "text": ": GraphQL schema, resolvers, auth context, error normalization.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Conversation service"
+          },
+          {
+            "type": "text",
+            "text": ": session history, summaries, persistence.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Claude service"
+          },
+          {
+            "type": "text",
+            "text": ": builds Messages API requests, handles streaming and tool calls.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Usage/metrics service"
+          },
+          {
+            "type": "text",
+            "text": ": token usage, latency, quota checks.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Pub/Sub layer"
+          },
+          {
+            "type": "text",
+            "text": ": Redis or similar for subscription events across instances."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Resolver pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The right Apollo pattern is \u201cthin resolvers, thick services.\u201d Apollo resolver code should mainly:\n- Validate auth and tenant context from "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "context"
+          },
+          {
+            "type": "text",
+            "text": ".\n- Load or persist app objects.\n- Call a typed service.\n- Return domain objects mapped to GraphQL types."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Bad pattern:\n- Building Anthropic requests inline inside every resolver.\n- Mixing auth, quota logic, prompt construction, persistence, and provider calls in one resolver."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Good pattern:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "sendMessage"
+          },
+          {
+            "type": "text",
+            "text": " resolver calls "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "conversationService.appendUserMessage(...)"
+          },
+          {
+            "type": "text",
+            "text": ".\n- Then "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "runService.startClaudeRun(...)"
+          },
+          {
+            "type": "text",
+            "text": ".\n- That service builds the Claude request and returns normalized results.\n- Resolver returns "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "conversation"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "run"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This follows general Apollo Server guidance around maintainable resolver layering and matches the Claude backend pattern of keeping provider-specific code out of transport handlers."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Context and authentication"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server\u2019s "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "context"
+          },
+          {
+            "type": "text",
+            "text": " object should carry trusted request-scoped information into every resolver. For a Claude backend, that usually includes:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenantId"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "userId"
+          },
+          {
+            "type": "text",
+            "text": "\n- roles/scopes\n- request ID / trace ID\n- quota policy\n- service dependencies"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is important because multi-tenant GraphQL systems should derive tenant scope from authentication context, not from user-supplied GraphQL arguments. It also lets the Claude service enforce tenant-aware history loading, prompt policy, quota checks, and tool permissions consistently."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A typical pattern is:\n- HTTP auth middleware verifies JWT/session.\n- Apollo "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "context"
+          },
+          {
+            "type": "text",
+            "text": " maps identity into a typed object.\n- Resolvers and services consume "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "context.auth"
+          },
+          {
+            "type": "text",
+            "text": " instead of re-reading headers."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Schema-to-service mapping"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A useful Apollo + Claude schema usually has:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Query"
+          },
+          {
+            "type": "text",
+            "text": " for conversations, runs, messages, models.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Mutation"
+          },
+          {
+            "type": "text",
+            "text": " for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "createConversation"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "sendMessage"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "createRun"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "submitToolResult"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "cancelRun"
+          },
+          {
+            "type": "text",
+            "text": ".\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "Subscription"
+          },
+          {
+            "type": "text",
+            "text": " for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "runEvents"
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "conversationEvents"
+          },
+          {
+            "type": "text",
+            "text": " streaming deltas and lifecycle updates."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The strong integration pattern is to map each mutation to a business workflow, not directly to a Claude SDK method. For example:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "sendMessage"
+          },
+          {
+            "type": "text",
+            "text": " does not equal "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.create(...)"
+          },
+          {
+            "type": "text",
+            "text": ".\n- It means: authorize, persist user turn, assemble context, enforce quota, call Claude, persist assistant turn, emit events, return normalized domain objects."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That separation keeps your GraphQL API stable even if Claude provider details change later."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming with subscriptions"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server does not magically stream Claude tokens by itself; subscriptions are implemented through long-lived GraphQL reads backed by a pub/sub model, which Apollo documents and community tooling like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "graphql-subscriptions"
+          },
+          {
+            "type": "text",
+            "text": " support. The clean pattern for Claude is:\n1. Mutation starts a run.\n2. Claude service opens provider streaming.\n3. Service publishes typed run events to pub/sub.\n4. Apollo subscription resolver exposes those events to authorized clients."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This gives you a neat bridge:\n- Claude provider stream in.\n- Apollo pub/sub events out."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "It is much cleaner than trying to stream directly from a mutation response."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended event model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Do not expose raw Claude SSE events in GraphQL. Apollo works best when subscription payloads are domain events such as:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunStarted"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "TextDelta"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ToolUseRequested"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunCompleted"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunFailed"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This makes frontend code simpler and keeps your GraphQL contract independent of provider wire formats. It also lets you normalize direct Anthropic, Bedrock, or future providers behind the same event schema."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A typical Apollo subscription might be:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "type Subscription {\n  runEvents(runId: ID!): RunEvent!\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "with tenant-aware filtering in the resolver so clients only receive events for runs they are authorized to see."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pub/Sub and horizontal scale"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo\u2019s common starter examples use in-memory pub/sub, but production Claude backends should usually use Redis, Kafka, NATS, or another shared event bus once you have multiple server instances. This matters because AI streaming is long-lived and instance-local memory breaks quickly under horizontal scaling, failover, or background workers."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong production topology is:\n- Apollo instance handles GraphQL connections.\n- Worker or resolver starts Claude stream.\n- Stream events go to Redis pub/sub.\n- All Apollo instances can deliver the events to whichever node owns the WebSocket/subscription connection."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This avoids sticky-session dependence and makes streaming more resilient."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool use pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For Apollo + Claude with tools, do not let resolvers become tool orchestrators themselves. Instead:\n- Resolver starts or continues a run.\n- Claude service detects tool-use requests.\n- Tool executor validates tenant/user permissions.\n- Tool results are persisted and optionally sent back through another run step.\n- Apollo emits tool-related events so the client can show progress or approval UI."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern is important because tools often require stronger authorization than plain chat. Apollo should be the typed boundary; the actual tool policy belongs in backend services."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo resolvers should normalize Claude/provider failures into stable GraphQL errors or typed result objects rather than leaking raw SDK exceptions. Good practice includes:\n- Distinguish auth failures, quota failures, provider timeouts, validation errors, and internal errors.\n- Return retryable vs non-retryable hints where useful.\n- Preserve provider request IDs in logs and maybe structured error fields for support/debugging.\n- Surface typed "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunError"
+          },
+          {
+            "type": "text",
+            "text": " objects for subscription lifecycle failures."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is especially important in chat apps because a failed run is still part of the conversation lifecycle and often needs to be rendered in the UI, not just thrown as a transport-level exception."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "DataLoader and N+1"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server patterns commonly emphasize DataLoader or equivalent batching for resolver efficiency. This matters in conversational apps because pages often query:\n- a list of conversations,\n- each conversation\u2019s latest message,\n- each message\u2019s author,\n- each conversation\u2019s latest run,\n- each run\u2019s usage."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without batching, your GraphQL API will issue many duplicate reads. Good use of DataLoader improves:\n- conversation/message joins,\n- user lookups,\n- run-to-message associations,\n- tenant-scoped permission checks."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This keeps Apollo performant even when the AI layer itself is slower and more expensive."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Persistence pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A very solid Apollo + Claude pattern is to treat the final assistant message in your DB as the source of truth, while the subscription stream is just the live UX path. That means:\n- During streaming, publish deltas via pub/sub.\n- At completion, persist the final assistant message and usage.\n- Clients can reconcile or refetch the final message if needed."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This avoids making WebSocket streams the only copy of reality and helps with reconnection, auditing, and analytics."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-tenant enforcement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For Apollo + Claude, tenant safety must be enforced in three places:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Context creation"
+          },
+          {
+            "type": "text",
+            "text": ": derive trusted tenant/user identity.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Resolver/service layer"
+          },
+          {
+            "type": "text",
+            "text": ": scope all conversation/run/message lookups to tenant.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Subscription filtering"
+          },
+          {
+            "type": "text",
+            "text": ": ensure streamed events match tenant and authorization."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A common anti-pattern is securing queries and mutations but forgetting subscriptions. In a multi-tenant AI system, a subscription bug can leak live assistant output across tenants even if your query resolvers are perfect."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Good mutation patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong Apollo mutation set for Claude often includes:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "createConversation"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "sendMessage"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "retryRun"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "submitToolResult"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "cancelRun"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These are product actions, not provider actions. That matters because:\n- You may switch Claude models or providers later.\n- One \u201csend message\u201d action may involve multiple backend steps.\n- The GraphQL API should describe your app\u2019s workflow, not Anthropic\u2019s transport API."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Good implementation pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A good Node/Apollo structure might be:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "schema/"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 SDL types for conversation, run, subscription events."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "resolvers/"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 thin field resolvers and mutations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "context/"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 auth and request-scoped dependency creation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "services/claude-service.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 Anthropic SDK calls, streaming, usage normalization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "services/conversation-service.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 history persistence and summarization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "services/run-service.ts"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 orchestration for send/retry/cancel/tool flows."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "pubsub/"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 Redis-based event publishing for subscriptions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "loaders/"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 DataLoader instances for common entity joins."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This structure keeps Apollo transport concerns separate from Claude concerns."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common failure modes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The main Apollo + Claude integration mistakes are:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Putting Anthropic SDK calls directly in resolvers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No request-scoped auth/tenant context."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Using in-memory pub/sub in production multi-instance deployments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Exposing provider event formats directly to clients."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treating subscriptions as optional afterthoughts rather than part of the run lifecycle."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No final persistence of assistant messages."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No DataLoader, causing N+1 explosions in chat-heavy views."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Forgetting tenant-aware subscription filtering."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layman\u2019s explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of Apollo Server as the receptionist and workflow desk for your app, and Claude as the specialist consultant in the back office. The receptionist should verify who the caller is, find the right case file, start the consultation, and relay updates cleanly. The receptionist should not also become the consultant, the file archive, the billing system, and the tool operator all at once."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Study questions with answers"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "What is Apollo Server\u2019s main role in a Claude backend?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "It should be the typed API and orchestration boundary, not the place where all raw Claude logic lives."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why keep resolvers thin?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because thin resolvers are easier to test, reason about, and evolve, while Claude-specific logic changes more frequently and belongs in services."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "How should streaming be implemented?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use a mutation to start the run and Apollo subscriptions backed by pub/sub to stream typed events."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why is Redis or shared pub/sub important?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because in-memory pub/sub does not scale safely across multiple Apollo instances or workers."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Where should tenant isolation be enforced?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In context creation, resolver/service data access, and subscription event filtering."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works in Practice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Understanding the internals of apollo server + claude integration patterns helps you predict its behavior and debug issues effectively."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a request is processed, several layers of the system interact: the client library validates inputs and manages retries, the transport layer handles HTTP/2 connection multiplexing, and the API server routes to the appropriate model instance. Each layer introduces latency that you can measure and optimize."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For production deployments, understanding this pipeline helps you allocate timeout budgets appropriately. The network round-trip typically adds 50-100ms, while model processing time scales with output length. A response generating 1,000 tokens takes 2-4x longer than one generating 250 tokens for the same model."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production experience with apollo server + claude integration patterns has surfaced these practices that consistently improve reliability and performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use async clients for concurrent workloads \u2014 Python's AsyncAnthropic and TypeScript's async/await patterns avoid blocking the event loop during API calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache system prompts with cache_control \u2014 stable system prompts hit the cache ~90% of the time after the first call, reducing both latency and cost significantly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stream responses for interactive use \u2014 streaming reduces time-to-first-token from seconds to milliseconds, dramatically improving perceived responsiveness."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement structured retry logic \u2014 use exponential backoff starting at 1 second, with jitter to prevent thundering herd problems under rate limiting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log structured metadata \u2014 capture model, input_tokens, output_tokens, latency, and request_id in every log entry for effective debugging and cost tracking."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set explicit max_tokens \u2014 always specify max_tokens to bound cost and prevent unexpectedly long responses that consume your token budget."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Pitfalls"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Awareness of these common failure modes prevents hours of debugging in production."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not validating response structure \u2014 even when you request JSON, parse it with a try/catch. Models occasionally produce malformed output under high load or edge-case inputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Accumulating conversation history without truncation \u2014 after 10-20 turns, conversations can exceed context windows. Implement a sliding window or summarization strategy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Mixing prompt concerns \u2014 put behavior instructions in system prompts, task-specific content in user turns. Mixing them reduces clarity and makes iteration harder."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring stop_reason \u2014 check if stop_reason is \"max_tokens\" rather than \"end_turn\". Truncated responses need handling differently than complete ones."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Creating new client instances per request \u2014 instantiate the Anthropic client once at module load time to benefit from connection pooling across requests."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance Benchmarks and Cost Analysis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Making informed architectural decisions requires concrete numbers. These benchmarks are representative of typical production workloads."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Haiku 3.5: ~$0.80/MTok input, ~$4/MTok output. Best for high-volume, simple tasks like classification, extraction, and summarization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Sonnet 4: ~$3/MTok input, ~$15/MTok output. The best quality-to-cost ratio for most production use cases requiring reasoning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt cache hit rate: After the first call, 85-95% of requests hit the cache for stable prompts. Cache tokens cost 10% of normal input token price."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Message Batches API: 50% cost reduction for async workloads processed within 24 hours. Ideal for nightly data processing, evaluation runs, and bulk content generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Typical latency: 1-3s for Haiku, 3-10s for Sonnet, 10-30s for Opus. Streaming makes all models feel 2-5x faster from the user's perspective."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security Considerations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Deploying apollo server + claude integration patterns in production requires careful attention to security boundaries and trust models."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "API key management \u2014 store keys in environment variables or secrets managers (AWS Secrets Manager, HashiCorp Vault). Never commit to version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt injection prevention \u2014 when embedding user input in prompts, use XML tags to clearly delimit user content from instructions, reducing injection attack surface."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output sanitization \u2014 before rendering AI-generated content in web UIs, escape HTML to prevent XSS attacks from model-produced content."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limiting user requests \u2014 implement per-user rate limits in addition to API limits to prevent cost abuse and ensure fair service distribution."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server + Claude integration patterns is a foundational capability for building production-ready Claude integrations. By following the patterns in this guide \u2014 proper error handling, async clients, prompt caching, and structured monitoring \u2014 you can build reliable, cost-efficient applications that scale gracefully from prototype to production."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Advanced Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production experience with apollo server + claude integration patterns has surfaced these practices that consistently improve reliability and performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use async clients for concurrent workloads \u2014 Python's AsyncAnthropic and TypeScript's async/await patterns avoid blocking the event loop during API calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache system prompts with cache_control \u2014 stable system prompts hit the cache ~90% of the time after the first call, reducing both latency and cost significantly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stream responses for interactive use \u2014 streaming reduces time-to-first-token from seconds to milliseconds, dramatically improving perceived responsiveness."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement structured retry logic \u2014 use exponential backoff starting at 1 second, with jitter to prevent thundering herd problems under rate limiting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log structured metadata \u2014 capture model, input_tokens, output_tokens, latency, and request_id in every log entry for effective debugging and cost tracking."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set explicit max_tokens \u2014 always specify max_tokens to bound cost and prevent unexpectedly long responses that consume your token budget."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Advanced Common Pitfalls"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Awareness of these common failure modes prevents hours of debugging in production."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not validating response structure \u2014 even when you request JSON, parse it with a try/catch. Models occasionally produce malformed output under high load or edge-case inputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Accumulating conversation history without truncation \u2014 after 10-20 turns, conversations can exceed context windows. Implement a sliding window or summarization strategy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Mixing prompt concerns \u2014 put behavior instructions in system prompts, task-specific content in user turns. Mixing them reduces clarity and makes iteration harder."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring stop_reason \u2014 check if stop_reason is \"max_tokens\" rather than \"end_turn\". Truncated responses need handling differently than complete ones."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Creating new client instances per request \u2014 instantiate the Anthropic client once at module load time to benefit from connection pooling across requests."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance Benchmarks and Cost Analysis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Making informed architectural decisions requires concrete numbers. These benchmarks are representative of typical production workloads."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Haiku 3.5: ~$0.80/MTok input, ~$4/MTok output. Best for high-volume, simple tasks like classification, extraction, and summarization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Sonnet 4: ~$3/MTok input, ~$15/MTok output. The best quality-to-cost ratio for most production use cases requiring reasoning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt cache hit rate: After the first call, 85-95% of requests hit the cache for stable prompts. Cache tokens cost 10% of normal input token price."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Message Batches API: 50% cost reduction for async workloads processed within 24 hours. Ideal for nightly data processing, evaluation runs, and bulk content generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Typical latency: 1-3s for Haiku, 3-10s for Sonnet, 10-30s for Opus. Streaming makes all models feel 2-5x faster from the user's perspective."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security Considerations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Deploying apollo server + claude integration patterns in production requires careful attention to security boundaries and trust models."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "API key management \u2014 store keys in environment variables or secrets managers (AWS Secrets Manager, HashiCorp Vault). Never commit to version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt injection prevention \u2014 when embedding user input in prompts, use XML tags to clearly delimit user content from instructions, reducing injection attack surface."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output sanitization \u2014 before rendering AI-generated content in web UIs, escape HTML to prevent XSS attacks from model-produced content."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limiting user requests \u2014 implement per-user rate limits in addition to API limits to prevent cost abuse and ensure fair service distribution."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Apollo Server + Claude integration patterns is a foundational capability for building production-ready Claude integrations. By following the patterns in this guide \u2014 proper error handling, async clients, prompt caching, and structured monitoring \u2014 you can build reliable, cost-efficient applications that scale gracefully from prototype to production."
+          }
+        ]
+      }
+    ]
+  }
+}

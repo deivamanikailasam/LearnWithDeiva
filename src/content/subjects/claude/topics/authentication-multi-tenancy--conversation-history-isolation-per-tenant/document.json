@@ -1,1 +1,2491 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T07:15:37.340Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Conversation history isolation per tenant means every stored turn, summary, cache entry, retrieved memory, and session lookup used to build a Claude request must be partitioned and authorized by tenant context before it is added to the "},{"type":"text","marks":[{"type":"code"}],"text":"messages"},{"type":"text","text":" array. This matters especially with Claude because the Messages API is stateless: your backend must resend the right history every time, so one bad lookup can leak another tenant’s private context directly into the model input."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core principle"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude’s Messages API has no built-in conversation memory, no server-side conversation object, and no provider-managed tenant boundary for your chat state; the application is responsible for carrying forward the full relevant history on each call. That means conversation isolation is not a UI concern or just a database concern; it is the core backend guarantee that the history assembled for tenant A can never include turns, summaries, cached prompts, or retrieved memory from tenant B."}]},{"type":"paragraph","content":[{"type":"text","text":"In plain language, Claude only knows what folder of papers you hand it. If your backend pulls one page from the wrong tenant’s folder, the model will treat it as valid context."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What must be isolated"}]},{"type":"paragraph","content":[{"type":"text","text":"Tenant isolation applies to more than the obvious chat table."}]},{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Component"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Why it matters"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Isolation rule"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Raw conversation turns"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Direct user/assistant history"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Store and query by tenant scope, not session alone."}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Session summaries"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Used for context compression"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Namespace summaries by tenant and session."}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Short-term caches"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Fast lookup of current context"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Include tenant in every cache key."}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"RAG context and embeddings"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Often merged into conversation history"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Filter or namespace retrieval strictly by tenant."}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Tool outputs and memories"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Frequently appended as assistant/tool turns"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Persist under same tenant/session boundary."}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Runtime/session state"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"In-memory agent state between turns"}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Bind session runtime to tenant-aware session IDs."}]}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The expert point is that “conversation history” is really a composed artifact built from several state sources, so all of them must share the same isolation contract."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Identity model"}]},{"type":"paragraph","content":[{"type":"text","text":"A safe design begins with a trusted tenant identity derived from authentication, typically a verified JWT or equivalent identity token propagated through the request path. That tenant identity must become part of every storage key, lookup predicate, cache key, and runtime session attribute, rather than trusting a client-provided "},{"type":"text","marks":[{"type":"code"}],"text":"tenant_id"},{"type":"text","text":" field in the request body."}]},{"type":"paragraph","content":[{"type":"text","text":"For example, your effective conversation namespace should be at least:"}]},{"type":"blockMath","attrs":{"latex":"\\text{conversation\\_scope} = \\text{tenant\\_id} + \\text{user\\_id} + \\text{session\\_id}"}},{"type":"paragraph","content":[{"type":"text","text":"Some systems isolate only by tenant, but in user-facing apps it is usually safer to scope by tenant and session, and often by tenant, user, and session together, to prevent both cross-tenant and unintended cross-user history reuse inside the same tenant."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Storage patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"There are three major storage patterns."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"1. Shared table, strict tenant predicates"}]},{"type":"paragraph","content":[{"type":"text","text":"All tenants use the same table, but every row has "},{"type":"text","marks":[{"type":"code"}],"text":"tenant_id"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"session_id"},{"type":"text","text":", and often "},{"type":"text","marks":[{"type":"code"}],"text":"user_id"},{"type":"text","text":", with all reads and writes filtered accordingly. This is common in pooled SaaS models because it is operationally simple, but it only works if every query, background job, and cache respects the tenant boundary consistently."}]},{"type":"paragraph","content":[{"type":"text","text":"Example schema:"}]},{"type":"codeBlock","attrs":{"language":"sql"},"content":[{"type":"text","text":"CREATE TABLE conversation_messages (\n  id UUID PRIMARY KEY,\n  tenant_id TEXT NOT NULL,\n  user_id TEXT NOT NULL,\n  session_id TEXT NOT NULL,\n  role TEXT NOT NULL,\n  content JSONB NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nCREATE INDEX idx_conv_scope\n  ON conversation_messages (tenant_id, user_id, session_id, created_at);"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"2. Namespaced or partitioned storage"}]},{"type":"paragraph","content":[{"type":"text","text":"Tenant data is separated by namespace, partition key, or storage prefix, such as Redis prefixes, S3 prefixes, vector store namespaces, or DynamoDB partition keys based on tenant ID. AWS examples repeatedly describe prefixing and session attributes to keep data and logs tenant-specific."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"3. Dedicated store per tenant"}]},{"type":"paragraph","content":[{"type":"text","text":"High-regulation or premium tenants may get isolated databases, collections, or even isolated runtimes. This reduces blast radius but increases cost and management complexity."}]},{"type":"paragraph","content":[{"type":"text","text":"For most production apps, shared infrastructure with hard tenant predicates and namespacing is the default; use dedicated stores only when compliance or contract requirements justify it."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Query discipline"}]},{"type":"paragraph","content":[{"type":"text","text":"The most important practical rule is: never fetch conversation history by "},{"type":"text","marks":[{"type":"code"}],"text":"session_id"},{"type":"text","text":" alone. Multi-turn design references and multi-tenant guidance both emphasize tenant-aware session lookups and returning “not found” rather than disclosing whether another tenant’s session exists."}]},{"type":"paragraph","content":[{"type":"text","text":"Bad:"}]},{"type":"codeBlock","attrs":{"language":"sql"},"content":[{"type":"text","text":"SELECT * FROM conversation_messages\nWHERE session_id = $1\nORDER BY created_at;"}]},{"type":"paragraph","content":[{"type":"text","text":"Good:"}]},{"type":"codeBlock","attrs":{"language":"sql"},"content":[{"type":"text","text":"SELECT * FROM conversation_messages\nWHERE tenant_id = $1\n  AND user_id = $2\n  AND session_id = $3\nORDER BY created_at;"}]},{"type":"paragraph","content":[{"type":"text","text":"That change is small in code, but it is the difference between correct isolation and a catastrophic leak."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Session lifecycle"}]},{"type":"paragraph","content":[{"type":"text","text":"Because Claude itself does not own the session, your backend must manage session creation, continuation, expiration, and deletion. In Bedrock AgentCore-style systems, AWS explicitly recommends unique session IDs per user or conversation and routes each session to isolated runtime state, with session attributes carrying tenant context across invocations."}]},{"type":"paragraph","content":[{"type":"text","text":"Applied generally, that means:\n- Generate session IDs server-side or validate them strictly.\n- Bind them to tenant context at creation time.\n- Expire idle sessions with clear retention rules.\n- Never allow a session to “change tenants.”\n- If using in-memory workers, ensure restarts do not accidentally reload another tenant’s context."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"In-memory and runtime isolation"}]},{"type":"paragraph","content":[{"type":"text","text":"A hidden risk is in-memory session state. If your backend or agent runtime holds prior turns in process memory, then worker reuse, sticky sessions, or shared containers can accidentally mix histories unless session-to-runtime mapping is explicit. AWS AgentCore documentation and examples highlight isolated session runtimes and tenant-bound session attributes precisely because runtime memory contamination is a real concern in multi-tenant agents."}]},{"type":"paragraph","content":[{"type":"text","text":"If you are not using a managed runtime with guaranteed session isolation, assume you must build it yourself:\n- Scope all in-memory maps by tenant + session.\n- Never use global “current conversation” state.\n- Clear state aggressively on session end or timeout.\n- Treat background streams and tool loops as part of the same session boundary."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Context compaction and summarization"}]},{"type":"paragraph","content":[{"type":"text","text":"As conversations grow, many backends summarize older turns to reduce tokens before sending history to Claude. Those summaries are just as sensitive as raw turns because they may contain tenant-private facts, user intent, and internal references. Therefore:\n- Summaries must be stored under the same tenant/user/session scope.\n- Summary regeneration jobs must load only tenant-scoped source turns.\n- Cache keys for summaries must include tenant identifiers.\n- Deleted sessions must also delete or invalidate their summaries."}]},{"type":"paragraph","content":[{"type":"text","text":"A common leak pattern is that raw turns are tenant-scoped but a “summary cache” is keyed only by session slug or conversation title."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"RAG and retrieved memory"}]},{"type":"paragraph","content":[{"type":"text","text":"Conversation history isolation is incomplete if your retrieval layer is global. Multi-tenant AI security guidance stresses that embeddings and retrieval results must be isolated via separate indices, namespaces, or strict metadata filters, because retrieved context is often merged straight into the model prompt alongside prior chat turns."}]},{"type":"paragraph","content":[{"type":"text","text":"Safe patterns:\n- Per-tenant vector index or namespace.\n- Shared index with mandatory "},{"type":"text","marks":[{"type":"code"}],"text":"tenant_id"},{"type":"text","text":" filter.\n- Prefix namespacing for object stores and document logs.\n- Tenant-aware memory stores for “chat memory” features."}]},{"type":"paragraph","content":[{"type":"text","text":"Unsafe pattern:\n- Correctly isolated chat transcript, but retrieval query runs against all tenants’ embeddings and appends top-k results to Claude’s context."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Cache isolation"}]},{"type":"paragraph","content":[{"type":"text","text":"Caches are one of the most common leak points. A context cache or summary cache keyed only by "},{"type":"text","marks":[{"type":"code"}],"text":"conversation_id"},{"type":"text","text":", prompt hash, or “last chat” can silently hand another tenant’s state to the current request."}]},{"type":"paragraph","content":[{"type":"text","text":"Safer cache keys look like:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"tenant:{tenant_id}:user:{user_id}:session:{session_id}:messages"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"tenant:{tenant_id}:session:{session_id}:summary"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"tenant:{tenant_id}:rag:{docset}:{query_hash}"}]},{"type":"paragraph","content":[{"type":"text","text":"The general rule is: every reusable artifact that could affect a Claude request must be tenant-namespaced."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Deletion and retention"}]},{"type":"paragraph","content":[{"type":"text","text":"Conversation isolation also includes lifecycle governance. Enterprises evaluating AI vendors explicitly ask whether conversation logs are stored separately and what retention policies apply. For your own backend, define:\n- Retention period per tenant/plan.\n- Soft delete vs hard delete rules.\n- Whether summaries, embeddings, and audit trails are retained after conversation deletion.\n- Legal hold or compliance exceptions for enterprise tenants."}]},{"type":"paragraph","content":[{"type":"text","text":"The subtle point is that deleting only the visible chat messages but leaving tenant-scoped summaries, caches, or derived embeddings behind is incomplete isolation."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling and side-channel safety"}]},{"type":"paragraph","content":[{"type":"text","text":"A good multi-tenant backend should avoid telling a user whether another tenant’s conversation exists. Session lookup failures should usually return a generic not-found or unauthorized-safe response rather than revealing “this session exists but belongs to another tenant.” Multi-turn design guidance often recommends returning a neutral "},{"type":"text","marks":[{"type":"code"}],"text":"ErrSessionNotFound"},{"type":"text","text":" style outcome for unauthorized accesses to reduce information leakage."}]},{"type":"paragraph","content":[{"type":"text","text":"That is important because metadata leaks matter too. Even confirming the existence of a conversation title, session count, or last activity time can reveal sensitive business activity."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Good backend structure"}]},{"type":"paragraph","content":[{"type":"text","text":"A clean structure for tenant-safe history assembly is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"AuthMiddleware"},{"type":"text","text":" resolves trusted tenant/user identity."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ConversationRepository"},{"type":"text","text":" queries only by tenant-scoped composite keys."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"SummaryService"},{"type":"text","text":" compresses history within the same scope."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"RagService"},{"type":"text","text":" retrieves only tenant-scoped documents."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService"},{"type":"text","text":" assembles final "},{"type":"text","marks":[{"type":"code"}],"text":"messages"},{"type":"text","text":" from already-isolated inputs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"Usage/AuditService"},{"type":"text","text":" writes logs under the same tenant context."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This mirrors the standard Claude pattern of thin routes and a service layer, but with a stronger rule: the "},{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService"},{"type":"text","text":" should not be deciding tenancy. It should receive tenant-safe history that has already been authorized."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Failure modes"}]},{"type":"paragraph","content":[{"type":"text","text":"The main failure modes are:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Looking up history by session ID only."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Reusing cached summaries across tenants because the cache key lacks tenant scope."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Merging tenant-safe transcripts with tenant-unsafe RAG results."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Letting background workers regenerate titles or summaries without tenant context in the job payload."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Sharing one in-memory runtime across sessions without strong isolation guarantees."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Keeping logs, exports, or analytics tables without tenant identifiers, which later become a secondary leakage source."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The pattern behind all of them is the same: tenant context was not treated as a first-class key in every data path."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Layman’s explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of each tenant as a separate law firm, and each conversation as a case file. Claude has no filing cabinet of its own. Every time you ask it a question, your backend has to pull the right case notes, old messages, summaries, and evidence, then hand that packet over."}]},{"type":"paragraph","content":[{"type":"text","text":"Conversation history isolation means your filing clerk must never mix pages from Firm A’s case into Firm B’s file. Not in the transcript, not in the summary, not in the search results, not in the temporary notes, and not in the archive boxes."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Design checklist"}]},{"type":"paragraph","content":[{"type":"text","text":"Use this checklist in reviews:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Messages API history is always assembled server-side from tenant-scoped storage."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Every conversation record includes "},{"type":"text","marks":[{"type":"code"}],"text":"tenant_id"},{"type":"text","text":" and usually "},{"type":"text","marks":[{"type":"code"}],"text":"user_id"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"session_id"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"No session lookup happens without tenant scope."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Summaries, caches, and memory layers are tenant-namespaced."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"RAG retrieval uses tenant-specific namespaces or metadata filters."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Runtime/in-memory state is isolated per session and tied to tenant context."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Retention and deletion rules cover transcripts, summaries, embeddings, and caches."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Unauthorized access does not reveal whether another tenant’s conversation exists."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Study questions with answers"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why is conversation history isolation especially important with Claude?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because Claude’s Messages API is stateless, so the backend must supply history each time, and any bad history lookup becomes direct model input."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"What is the minimum safe lookup key?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Usually tenant + session, and often tenant + user + session for user-facing systems."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why are caches dangerous here?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because even if the DB is correctly filtered, a tenant-unsafe cache key can return another tenant’s summary or context."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Does isolating the chat table solve everything?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"No. Retrieval, summaries, embeddings, runtime memory, tool outputs, and logs can all reintroduce cross-tenant leakage."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"What is the best mental model?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Treat every Claude call as assembling a confidential dossier, and tenant isolation means every page in that dossier must come from the same tenant-owned folder."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T07:15:37.340Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conversation history isolation per tenant means every stored turn, summary, cache entry, retrieved memory, and session lookup used to build a Claude request must be partitioned and authorized by tenant context before it is added to the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "messages"
+          },
+          {
+            "type": "text",
+            "text": " array. This matters especially with Claude because the Messages API is stateless: your backend must resend the right history every time, so one bad lookup can leak another tenant\u2019s private context directly into the model input."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Db252ZXJzYXRpb24gaGlzdG9yeSBpc29sYXRpb24gcGVyIHRlbmFudCDigJQgS2V5IENvbmNlcHRzPC90ZXh0Pgo8cmVjdCB4PSIzMCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODUiIGZpbGw9IiMxZTQwYWYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjE0NSIgeT0iMTAwIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Db3JlIENvbmNlcHQ8L3RleHQ+CjxyZWN0IHg9IjI5NSIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODUiIGZpbGw9IiMwNjVmNDYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjQxMCIgeT0iMTAwIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Ib3cgSXQgV29ya3M8L3RleHQ+CjxyZWN0IHg9IjU2MCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODUiIGZpbGw9IiM3YzJkMTIiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjY3NSIgeT0iMTAwIiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5CZXN0IFByYWN0aWNlczwvdGV4dD4KPGxpbmUgeDE9IjI2MCIgeTE9Ijk3IiB4Mj0iMjkzIiB5Mj0iOTciIHN0cm9rZT0iIzQ3NTU2OSIgc3Ryb2tlLXdpZHRoPSIyIiBtYXJrZXItZW5kPSJ1cmwoI2EpIi8+CjxsaW5lIHgxPSI1MjUiIHkxPSI5NyIgeDI9IjU1OCIgeTI9Ijk3IiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8ZGVmcz48bWFya2VyIGlkPSJhIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI3IiByZWZZPSI0IiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDgsNCBMMCw4IFoiIGZpbGw9IiM0NzU1NjkiLz48L21hcmtlcj48L2RlZnM+Cjwvc3ZnPg==",
+          "alt": "Conversation history isolation per tenant concept diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core principle"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s Messages API has no built-in conversation memory, no server-side conversation object, and no provider-managed tenant boundary for your chat state; the application is responsible for carrying forward the full relevant history on each call. That means conversation isolation is not a UI concern or just a database concern; it is the core backend guarantee that the history assembled for tenant A can never include turns, summaries, cached prompts, or retrieved memory from tenant B."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In plain language, Claude only knows what folder of papers you hand it. If your backend pulls one page from the wrong tenant\u2019s folder, the model will treat it as valid context."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What must be isolated"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Tenant isolation applies to more than the obvious chat table."
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Component"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Why it matters"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Isolation rule"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Raw conversation turns"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Direct user/assistant history"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Store and query by tenant scope, not session alone."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Session summaries"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Used for context compression"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Namespace summaries by tenant and session."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Short-term caches"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fast lookup of current context"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Include tenant in every cache key."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "RAG context and embeddings"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Often merged into conversation history"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Filter or namespace retrieval strictly by tenant."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Tool outputs and memories"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Frequently appended as assistant/tool turns"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Persist under same tenant/session boundary."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Runtime/session state"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "In-memory agent state between turns"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Bind session runtime to tenant-aware session IDs."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The expert point is that \u201cconversation history\u201d is really a composed artifact built from several state sources, so all of them must share the same isolation contract."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Identity model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A safe design begins with a trusted tenant identity derived from authentication, typically a verified JWT or equivalent identity token propagated through the request path. That tenant identity must become part of every storage key, lookup predicate, cache key, and runtime session attribute, rather than trusting a client-provided "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant_id"
+          },
+          {
+            "type": "text",
+            "text": " field in the request body."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For example, your effective conversation namespace should be at least:"
+          }
+        ]
+      },
+      {
+        "type": "blockMath",
+        "attrs": {
+          "latex": "\\text{conversation\\_scope} = \\text{tenant\\_id} + \\text{user\\_id} + \\text{session\\_id}"
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Some systems isolate only by tenant, but in user-facing apps it is usually safer to scope by tenant and session, and often by tenant, user, and session together, to prevent both cross-tenant and unintended cross-user history reuse inside the same tenant."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Storage patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "There are three major storage patterns."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "1. Shared table, strict tenant predicates"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "All tenants use the same table, but every row has "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant_id"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "session_id"
+          },
+          {
+            "type": "text",
+            "text": ", and often "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "user_id"
+          },
+          {
+            "type": "text",
+            "text": ", with all reads and writes filtered accordingly. This is common in pooled SaaS models because it is operationally simple, but it only works if every query, background job, and cache respects the tenant boundary consistently."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example schema:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "CREATE TABLE conversation_messages (\n  id UUID PRIMARY KEY,\n  tenant_id TEXT NOT NULL,\n  user_id TEXT NOT NULL,\n  session_id TEXT NOT NULL,\n  role TEXT NOT NULL,\n  content JSONB NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nCREATE INDEX idx_conv_scope\n  ON conversation_messages (tenant_id, user_id, session_id, created_at);"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "2. Namespaced or partitioned storage"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Tenant data is separated by namespace, partition key, or storage prefix, such as Redis prefixes, S3 prefixes, vector store namespaces, or DynamoDB partition keys based on tenant ID. AWS examples repeatedly describe prefixing and session attributes to keep data and logs tenant-specific."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "3. Dedicated store per tenant"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "High-regulation or premium tenants may get isolated databases, collections, or even isolated runtimes. This reduces blast radius but increases cost and management complexity."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For most production apps, shared infrastructure with hard tenant predicates and namespacing is the default; use dedicated stores only when compliance or contract requirements justify it."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Query discipline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most important practical rule is: never fetch conversation history by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "session_id"
+          },
+          {
+            "type": "text",
+            "text": " alone. Multi-turn design references and multi-tenant guidance both emphasize tenant-aware session lookups and returning \u201cnot found\u201d rather than disclosing whether another tenant\u2019s session exists."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Bad:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "SELECT * FROM conversation_messages\nWHERE session_id = $1\nORDER BY created_at;"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Good:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "SELECT * FROM conversation_messages\nWHERE tenant_id = $1\n  AND user_id = $2\n  AND session_id = $3\nORDER BY created_at;"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That change is small in code, but it is the difference between correct isolation and a catastrophic leak."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Session lifecycle"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because Claude itself does not own the session, your backend must manage session creation, continuation, expiration, and deletion. In Bedrock AgentCore-style systems, AWS explicitly recommends unique session IDs per user or conversation and routes each session to isolated runtime state, with session attributes carrying tenant context across invocations."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Applied generally, that means:\n- Generate session IDs server-side or validate them strictly.\n- Bind them to tenant context at creation time.\n- Expire idle sessions with clear retention rules.\n- Never allow a session to \u201cchange tenants.\u201d\n- If using in-memory workers, ensure restarts do not accidentally reload another tenant\u2019s context."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "In-memory and runtime isolation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A hidden risk is in-memory session state. If your backend or agent runtime holds prior turns in process memory, then worker reuse, sticky sessions, or shared containers can accidentally mix histories unless session-to-runtime mapping is explicit. AWS AgentCore documentation and examples highlight isolated session runtimes and tenant-bound session attributes precisely because runtime memory contamination is a real concern in multi-tenant agents."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you are not using a managed runtime with guaranteed session isolation, assume you must build it yourself:\n- Scope all in-memory maps by tenant + session.\n- Never use global \u201ccurrent conversation\u201d state.\n- Clear state aggressively on session end or timeout.\n- Treat background streams and tool loops as part of the same session boundary."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Context compaction and summarization"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As conversations grow, many backends summarize older turns to reduce tokens before sending history to Claude. Those summaries are just as sensitive as raw turns because they may contain tenant-private facts, user intent, and internal references. Therefore:\n- Summaries must be stored under the same tenant/user/session scope.\n- Summary regeneration jobs must load only tenant-scoped source turns.\n- Cache keys for summaries must include tenant identifiers.\n- Deleted sessions must also delete or invalidate their summaries."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A common leak pattern is that raw turns are tenant-scoped but a \u201csummary cache\u201d is keyed only by session slug or conversation title."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "RAG and retrieved memory"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conversation history isolation is incomplete if your retrieval layer is global. Multi-tenant AI security guidance stresses that embeddings and retrieval results must be isolated via separate indices, namespaces, or strict metadata filters, because retrieved context is often merged straight into the model prompt alongside prior chat turns."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Safe patterns:\n- Per-tenant vector index or namespace.\n- Shared index with mandatory "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant_id"
+          },
+          {
+            "type": "text",
+            "text": " filter.\n- Prefix namespacing for object stores and document logs.\n- Tenant-aware memory stores for \u201cchat memory\u201d features."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Unsafe pattern:\n- Correctly isolated chat transcript, but retrieval query runs against all tenants\u2019 embeddings and appends top-k results to Claude\u2019s context."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cache isolation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Caches are one of the most common leak points. A context cache or summary cache keyed only by "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "conversation_id"
+          },
+          {
+            "type": "text",
+            "text": ", prompt hash, or \u201clast chat\u201d can silently hand another tenant\u2019s state to the current request."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Safer cache keys look like:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant:{tenant_id}:user:{user_id}:session:{session_id}:messages"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant:{tenant_id}:session:{session_id}:summary"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant:{tenant_id}:rag:{docset}:{query_hash}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The general rule is: every reusable artifact that could affect a Claude request must be tenant-namespaced."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Deletion and retention"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conversation isolation also includes lifecycle governance. Enterprises evaluating AI vendors explicitly ask whether conversation logs are stored separately and what retention policies apply. For your own backend, define:\n- Retention period per tenant/plan.\n- Soft delete vs hard delete rules.\n- Whether summaries, embeddings, and audit trails are retained after conversation deletion.\n- Legal hold or compliance exceptions for enterprise tenants."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The subtle point is that deleting only the visible chat messages but leaving tenant-scoped summaries, caches, or derived embeddings behind is incomplete isolation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling and side-channel safety"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A good multi-tenant backend should avoid telling a user whether another tenant\u2019s conversation exists. Session lookup failures should usually return a generic not-found or unauthorized-safe response rather than revealing \u201cthis session exists but belongs to another tenant.\u201d Multi-turn design guidance often recommends returning a neutral "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ErrSessionNotFound"
+          },
+          {
+            "type": "text",
+            "text": " style outcome for unauthorized accesses to reduce information leakage."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That is important because metadata leaks matter too. Even confirming the existence of a conversation title, session count, or last activity time can reveal sensitive business activity."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Good backend structure"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A clean structure for tenant-safe history assembly is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "AuthMiddleware"
+                  },
+                  {
+                    "type": "text",
+                    "text": " resolves trusted tenant/user identity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ConversationRepository"
+                  },
+                  {
+                    "type": "text",
+                    "text": " queries only by tenant-scoped composite keys."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "SummaryService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " compresses history within the same scope."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "RagService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " retrieves only tenant-scoped documents."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " assembles final "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "messages"
+                  },
+                  {
+                    "type": "text",
+                    "text": " from already-isolated inputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "Usage/AuditService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " writes logs under the same tenant context."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This mirrors the standard Claude pattern of thin routes and a service layer, but with a stronger rule: the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ClaudeService"
+          },
+          {
+            "type": "text",
+            "text": " should not be deciding tenancy. It should receive tenant-safe history that has already been authorized."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Failure modes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The main failure modes are:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Looking up history by session ID only."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reusing cached summaries across tenants because the cache key lacks tenant scope."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Merging tenant-safe transcripts with tenant-unsafe RAG results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Letting background workers regenerate titles or summaries without tenant context in the job payload."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sharing one in-memory runtime across sessions without strong isolation guarantees."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Keeping logs, exports, or analytics tables without tenant identifiers, which later become a secondary leakage source."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The pattern behind all of them is the same: tenant context was not treated as a first-class key in every data path."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layman\u2019s explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of each tenant as a separate law firm, and each conversation as a case file. Claude has no filing cabinet of its own. Every time you ask it a question, your backend has to pull the right case notes, old messages, summaries, and evidence, then hand that packet over."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conversation history isolation means your filing clerk must never mix pages from Firm A\u2019s case into Firm B\u2019s file. Not in the transcript, not in the summary, not in the search results, not in the temporary notes, and not in the archive boxes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Design checklist"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use this checklist in reviews:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Messages API history is always assembled server-side from tenant-scoped storage."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Every conversation record includes "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "tenant_id"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and usually "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "user_id"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "session_id"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No session lookup happens without tenant scope."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Summaries, caches, and memory layers are tenant-namespaced."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "RAG retrieval uses tenant-specific namespaces or metadata filters."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Runtime/in-memory state is isolated per session and tied to tenant context."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Retention and deletion rules cover transcripts, summaries, embeddings, and caches."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Unauthorized access does not reveal whether another tenant\u2019s conversation exists."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Study questions with answers"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why is conversation history isolation especially important with Claude?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because Claude\u2019s Messages API is stateless, so the backend must supply history each time, and any bad history lookup becomes direct model input."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "What is the minimum safe lookup key?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Usually tenant + session, and often tenant + user + session for user-facing systems."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why are caches dangerous here?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because even if the DB is correctly filtered, a tenant-unsafe cache key can return another tenant\u2019s summary or context."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Does isolating the chat table solve everything?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "No. Retrieval, summaries, embeddings, runtime memory, tool outputs, and logs can all reintroduce cross-tenant leakage."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "What is the best mental model?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Treat every Claude call as assembling a confidential dossier, and tenant isolation means every page in that dossier must come from the same tenant-owned folder."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with conversation history isolation per tenant, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with conversation history isolation per tenant. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of conversation history isolation per tenant scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with conversation history isolation per tenant, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with conversation history isolation per tenant. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of conversation history isolation per tenant scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

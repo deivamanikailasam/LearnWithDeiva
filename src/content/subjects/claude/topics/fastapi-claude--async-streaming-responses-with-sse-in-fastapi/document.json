@@ -1,1 +1,2156 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T06:50:30.942Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"In FastAPI, the clean async SSE pattern for Claude is: use "},{"type":"text","marks":[{"type":"code"}],"text":"AsyncAnthropic"},{"type":"text","text":", open "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream(...)"},{"type":"text","text":" inside an async generator, iterate over "},{"type":"text","marks":[{"type":"code"}],"text":"stream.text_stream"},{"type":"text","text":", and return that generator through "},{"type":"text","marks":[{"type":"code"}],"text":"StreamingResponse"},{"type":"text","text":" with "},{"type":"text","marks":[{"type":"code"}],"text":"media_type=\"text/event-stream\""},{"type":"text","text":". The Anthropic Python SDK explicitly supports this pattern and notes that "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream()"},{"type":"text","text":" is a context manager yielding a stream with "},{"type":"text","marks":[{"type":"code"}],"text":".text_stream"},{"type":"text","text":", while "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.create(..., stream=True)"},{"type":"text","text":" is a lower-memory alternative that returns raw stream events."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core idea"}]},{"type":"paragraph","content":[{"type":"text","text":"SSE works well for Claude because the browser can receive incremental text over a single long-lived HTTP response, while your FastAPI backend stays fully async and simply relays the model’s output as it arrives. Claude’s Python SDK already abstracts the underlying stream and exposes a convenient iterator over text deltas, so your FastAPI code does not need to manually parse low-level event frames for the simplest case."}]},{"type":"paragraph","content":[{"type":"text","text":"The main architectural shape is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"FastAPI route receives request."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Route returns "},{"type":"text","marks":[{"type":"code"}],"text":"StreamingResponse"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"StreamingResponse"},{"type":"text","text":" wraps an async generator."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"That generator opens "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream(...)"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Inside it, "},{"type":"text","marks":[{"type":"code"}],"text":"async for text in stream.text_stream"},{"type":"text","text":" yields SSE frames to the client."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Minimal FastAPI example"}]},{"type":"paragraph","content":[{"type":"text","text":"Here is the canonical structure:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"import os\nfrom fastapi import FastAPI, Request\nfrom fastapi.responses import StreamingResponse\nfrom anthropic import AsyncAnthropic\n\napp = FastAPI()\nclient = AsyncAnthropic(api_key=os.environ[\"ANTHROPIC_API_KEY\"])\n\n@app.post(\"/chat/stream\")\nasync def chat_stream(request: Request, body: dict):\n    prompt = body[\"message\"]\n\n    async def event_stream():\n        async with client.messages.stream(\n            model=\"claude-sonnet-4-6\",\n            max_tokens=1024,\n            messages=[\n                {\"role\": \"user\", \"content\": prompt}\n            ],\n        ) as stream:\n            async for text in stream.text_stream:\n                if await request.is_disconnected():\n                    await stream.close()\n                    break\n                yield f\"data: {text}\\n\\n\"\n\n        yield \"event: done\\ndata: {}\\n\\n\"\n\n    return StreamingResponse(\n        event_stream(),\n        media_type=\"text/event-stream\",\n        headers={\n            \"Cache-Control\": \"no-cache\",\n            \"X-Accel-Buffering\": \"no\",\n        },\n    )"}]},{"type":"paragraph","content":[{"type":"text","text":"This follows the SDK’s documented async usage of "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream(...)"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"async for text in stream.text_stream"},{"type":"text","text":" directly. The SDK also documents that the stream can be closed early with "},{"type":"text","marks":[{"type":"code"}],"text":"stream.close()"},{"type":"text","text":", which is useful when the client disconnects or cancels the request."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why this is the best default"}]},{"type":"paragraph","content":[{"type":"text","text":"The "},{"type":"text","marks":[{"type":"code"}],"text":".text_stream"},{"type":"text","text":" lens is the best default when your frontend only needs progressive text output, because it gives you just the text deltas without requiring manual handling of every event type. That keeps your route small and focused on HTTP transport, while Anthropic’s SDK handles stream accumulation and event decoding."}]},{"type":"paragraph","content":[{"type":"text","text":"This is especially clean in FastAPI because:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The route remains thin."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The generator is naturally backpressure-aware."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Cancellation and disconnect handling fit the async model well."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The frontend can consume it with "},{"type":"text","marks":[{"type":"code"}],"text":"EventSource"},{"type":"text","text":" or any SSE-capable client."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Lower-memory alternative"}]},{"type":"paragraph","content":[{"type":"text","text":"If you want lower memory overhead, the SDK documentation says you can use "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.create(..., stream=True)"},{"type":"text","text":" instead of "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream(...)"},{"type":"text","text":", because it does not accumulate a final message object for you. This is useful when you only care about forwarding raw events and do not need helpers like "},{"type":"text","marks":[{"type":"code"}],"text":".get_final_message()"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":".get_final_text()"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","text":"Conceptually:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"stream = await client.messages.create(\n    model=\"claude-sonnet-4-6\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": prompt}],\n    stream=True,\n)"}]},{"type":"paragraph","content":[{"type":"text","text":"Then you iterate through raw events rather than using "},{"type":"text","marks":[{"type":"code"}],"text":".text_stream"},{"type":"text","text":". The tradeoff is convenience versus memory efficiency: "},{"type":"text","marks":[{"type":"code"}],"text":"messages.stream()"},{"type":"text","text":" is easier, while "},{"type":"text","marks":[{"type":"code"}],"text":"create(..., stream=True)"},{"type":"text","text":" is more bare-metal."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Richer event handling"}]},{"type":"paragraph","content":[{"type":"text","text":"The SDK also supports iterating over the stream itself to access structured events such as "},{"type":"text","marks":[{"type":"code"}],"text":"text"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"input_json"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_stop"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"message_stop"},{"type":"text","text":". That matters when you want richer SSE semantics, like sending distinct event types to the browser instead of plain text chunks."}]},{"type":"paragraph","content":[{"type":"text","text":"For example, Anthropic documents this event iteration pattern:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"async with client.messages.stream(\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Say hello there!\"}],\n    model=\"claude-3-5-sonnet-latest\",\n) as stream:\n    async for event in stream:\n        if event.type == \"text\":\n            print(event.text, end=\"\", flush=True)\n        elif event.type == \"content_block_stop\":\n            print(event.content_block)"}]},{"type":"paragraph","content":[{"type":"text","text":"That means you can map SDK event types to SSE event names:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"async def event_stream():\n    async with client.messages.stream(...) as stream:\n        async for event in stream:\n            if event.type == \"text\":\n                yield f\"event: token\\ndata: {event.text}\\n\\n\"\n            elif event.type == \"message_stop\":\n                yield \"event: done\\ndata: {}\\n\\n\""}]},{"type":"paragraph","content":[{"type":"text","text":"This is a stronger pattern when you want the client to distinguish token output, tool JSON, and completion states."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tool-use and JSON streaming"}]},{"type":"paragraph","content":[{"type":"text","text":"If you later move beyond plain text streaming into tool-use flows, the SDK exposes "},{"type":"text","marks":[{"type":"code"}],"text":"input_json"},{"type":"text","text":" events containing "},{"type":"text","marks":[{"type":"code"}],"text":"partial_json"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"snapshot"},{"type":"text","text":" values for incremental JSON input construction. In FastAPI SSE terms, that means you can stream tool-call argument construction live to the frontend or to an internal observer UI, instead of waiting for the full tool input object."}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic documents that "},{"type":"text","marks":[{"type":"code"}],"text":"input_json"},{"type":"text","text":" events include:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"event.partial_json"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"event.snapshot"},{"type":"text","text":"."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"So an advanced SSE relay could do this:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"elif event.type == \"input_json\":\n    yield f\"event: tool_input\\ndata: {event.partial_json}\\n\\n\""}]},{"type":"paragraph","content":[{"type":"text","text":"This is especially useful for debugging agent loops or building live developer consoles."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Completion helpers"}]},{"type":"paragraph","content":[{"type":"text","text":"One of the advantages of "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream()"},{"type":"text","text":" over raw "},{"type":"text","marks":[{"type":"code"}],"text":"stream=True"},{"type":"text","text":" is that the SDK can accumulate a final message for you, and the docs describe helper methods such as "},{"type":"text","marks":[{"type":"code"}],"text":"await stream.get_final_message()"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"await stream.get_final_text()"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"await stream.until_done()"},{"type":"text","text":". These are useful if your FastAPI route needs to both stream live output and persist the final assistant message after the stream completes."}]},{"type":"paragraph","content":[{"type":"text","text":"Example pattern:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"async def event_stream():\n    async with client.messages.stream(...) as stream:\n        async for text in stream.text_stream:\n            yield f\"data: {text}\\n\\n\"\n\n        final_text = await stream.get_final_text()\n        # persist final_text to DB here\n\n    yield \"event: done\\ndata: {}\\n\\n\""}]},{"type":"paragraph","content":[{"type":"text","text":"That gives you a clean “stream now, save later” architecture using the SDK’s documented helpers."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"FastAPI-specific advice"}]},{"type":"paragraph","content":[{"type":"text","text":"For FastAPI, keep these practical rules:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"code"}],"text":"AsyncAnthropic"},{"type":"text","text":", not the sync client, inside async routes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Put Claude streaming code in a service function, not directly in every route."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use "},{"type":"text","marks":[{"type":"code"}],"text":"request.is_disconnected()"},{"type":"text","text":" to stop work when the client leaves."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Return proper SSE headers so proxies do not buffer the stream."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Send a final completion event like "},{"type":"text","marks":[{"type":"code"}],"text":"done"},{"type":"text","text":" so the frontend can close cleanly."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"These are standard FastAPI SSE practices, and the Anthropic SDK’s async stream interface fits them naturally because it is already built around async iteration and explicit close semantics."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended production structure"}]},{"type":"paragraph","content":[{"type":"text","text":"A clean FastAPI module layout for SSE with Claude is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"schemas.py"},{"type":"text","text":" — request models such as "},{"type":"text","marks":[{"type":"code"}],"text":"StreamChatRequest"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"services/claude.py"},{"type":"text","text":" — "},{"type":"text","marks":[{"type":"code"}],"text":"stream_text()"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"stream_events()"},{"type":"text","text":" wrappers around "},{"type":"text","marks":[{"type":"code"}],"text":"AsyncAnthropic"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"routes/chat.py"},{"type":"text","text":" — "},{"type":"text","marks":[{"type":"code"}],"text":"POST /chat/stream"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"persistence.py"},{"type":"text","text":" — optional final-message saving after stream completion."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"In that design:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The route handles HTTP and headers."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The service handles Anthropic API calls."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Persistence and audit happen after "},{"type":"text","marks":[{"type":"code"}],"text":"get_final_text()"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"get_final_message()"},{"type":"text","text":"."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Mental model"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of the whole system as two nested streams:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude streams tokens/events to your FastAPI backend."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"FastAPI reformats those into SSE frames and streams them to the browser."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The simplest reliable implementation is therefore “Claude async stream in, SSE async stream out,” using "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream(...)"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":".text_stream"},{"type":"text","text":" as the bridge."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T06:50:30.942Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In FastAPI, the clean async SSE pattern for Claude is: use "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "AsyncAnthropic"
+          },
+          {
+            "type": "text",
+            "text": ", open "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream(...)"
+          },
+          {
+            "type": "text",
+            "text": " inside an async generator, iterate over "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream.text_stream"
+          },
+          {
+            "type": "text",
+            "text": ", and return that generator through "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "StreamingResponse"
+          },
+          {
+            "type": "text",
+            "text": " with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "media_type=\"text/event-stream\""
+          },
+          {
+            "type": "text",
+            "text": ". The Anthropic Python SDK explicitly supports this pattern and notes that "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream()"
+          },
+          {
+            "type": "text",
+            "text": " is a context manager yielding a stream with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".text_stream"
+          },
+          {
+            "type": "text",
+            "text": ", while "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.create(..., stream=True)"
+          },
+          {
+            "type": "text",
+            "text": " is a lower-memory alternative that returns raw stream events."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Bc3luYyBzdHJlYW1pbmcgcmVzcG9uc2VzIHdpdGggU1NFIGluIEZhc3RBUEkg4oCUIEtleSBDb25jZXB0czwvdGV4dD4KPHJlY3QgeD0iMzAiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjMWU0MGFmIiByeD0iOCIvPgo8dGV4dCB4PSIxNDUiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Q29yZSBDb25jZXB0PC90ZXh0Pgo8cmVjdCB4PSIyOTUiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjMDY1ZjQ2IiByeD0iOCIvPgo8dGV4dCB4PSI0MTAiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+SG93IEl0IFdvcmtzPC90ZXh0Pgo8cmVjdCB4PSI1NjAiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjN2MyZDEyIiByeD0iOCIvPgo8dGV4dCB4PSI2NzUiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+QmVzdCBQcmFjdGljZXM8L3RleHQ+CjxsaW5lIHgxPSIyNjAiIHkxPSI5NyIgeDI9IjI5MyIgeTI9Ijk3IiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8bGluZSB4MT0iNTI1IiB5MT0iOTciIHgyPSI1NTgiIHkyPSI5NyIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYSkiLz4KPGRlZnM+PG1hcmtlciBpZD0iYSIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNyIgcmVmWT0iNCIgb3JpZW50PSJhdXRvIj48cGF0aCBkPSJNMCwwIEw4LDQgTDAsOCBaIiBmaWxsPSIjNDc1NTY5Ii8+PC9tYXJrZXI+PC9kZWZzPgo8L3N2Zz4=",
+          "alt": "Async streaming responses with SSE in FastAPI concept diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core idea"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "SSE works well for Claude because the browser can receive incremental text over a single long-lived HTTP response, while your FastAPI backend stays fully async and simply relays the model\u2019s output as it arrives. Claude\u2019s Python SDK already abstracts the underlying stream and exposes a convenient iterator over text deltas, so your FastAPI code does not need to manually parse low-level event frames for the simplest case."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The main architectural shape is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FastAPI route receives request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Route returns "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "StreamingResponse"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "StreamingResponse"
+                  },
+                  {
+                    "type": "text",
+                    "text": " wraps an async generator."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "That generator opens "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "client.messages.stream(...)"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Inside it, "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "async for text in stream.text_stream"
+                  },
+                  {
+                    "type": "text",
+                    "text": " yields SSE frames to the client."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Minimal FastAPI example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Here is the canonical structure:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import os\nfrom fastapi import FastAPI, Request\nfrom fastapi.responses import StreamingResponse\nfrom anthropic import AsyncAnthropic\n\napp = FastAPI()\nclient = AsyncAnthropic(api_key=os.environ[\"ANTHROPIC_API_KEY\"])\n\n@app.post(\"/chat/stream\")\nasync def chat_stream(request: Request, body: dict):\n    prompt = body[\"message\"]\n\n    async def event_stream():\n        async with client.messages.stream(\n            model=\"claude-sonnet-4-6\",\n            max_tokens=1024,\n            messages=[\n                {\"role\": \"user\", \"content\": prompt}\n            ],\n        ) as stream:\n            async for text in stream.text_stream:\n                if await request.is_disconnected():\n                    await stream.close()\n                    break\n                yield f\"data: {text}\\n\\n\"\n\n        yield \"event: done\\ndata: {}\\n\\n\"\n\n    return StreamingResponse(\n        event_stream(),\n        media_type=\"text/event-stream\",\n        headers={\n            \"Cache-Control\": \"no-cache\",\n            \"X-Accel-Buffering\": \"no\",\n        },\n    )"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This follows the SDK\u2019s documented async usage of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream(...)"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "async for text in stream.text_stream"
+          },
+          {
+            "type": "text",
+            "text": " directly. The SDK also documents that the stream can be closed early with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream.close()"
+          },
+          {
+            "type": "text",
+            "text": ", which is useful when the client disconnects or cancels the request."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why this is the best default"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".text_stream"
+          },
+          {
+            "type": "text",
+            "text": " lens is the best default when your frontend only needs progressive text output, because it gives you just the text deltas without requiring manual handling of every event type. That keeps your route small and focused on HTTP transport, while Anthropic\u2019s SDK handles stream accumulation and event decoding."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is especially clean in FastAPI because:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The route remains thin."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The generator is naturally backpressure-aware."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cancellation and disconnect handling fit the async model well."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The frontend can consume it with "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "EventSource"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or any SSE-capable client."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Lower-memory alternative"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you want lower memory overhead, the SDK documentation says you can use "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.create(..., stream=True)"
+          },
+          {
+            "type": "text",
+            "text": " instead of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream(...)"
+          },
+          {
+            "type": "text",
+            "text": ", because it does not accumulate a final message object for you. This is useful when you only care about forwarding raw events and do not need helpers like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".get_final_message()"
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".get_final_text()"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conceptually:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "stream = await client.messages.create(\n    model=\"claude-sonnet-4-6\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": prompt}],\n    stream=True,\n)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Then you iterate through raw events rather than using "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".text_stream"
+          },
+          {
+            "type": "text",
+            "text": ". The tradeoff is convenience versus memory efficiency: "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "messages.stream()"
+          },
+          {
+            "type": "text",
+            "text": " is easier, while "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "create(..., stream=True)"
+          },
+          {
+            "type": "text",
+            "text": " is more bare-metal."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Richer event handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The SDK also supports iterating over the stream itself to access structured events such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "text"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "input_json"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_stop"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_stop"
+          },
+          {
+            "type": "text",
+            "text": ". That matters when you want richer SSE semantics, like sending distinct event types to the browser instead of plain text chunks."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For example, Anthropic documents this event iteration pattern:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async with client.messages.stream(\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Say hello there!\"}],\n    model=\"claude-3-5-sonnet-latest\",\n) as stream:\n    async for event in stream:\n        if event.type == \"text\":\n            print(event.text, end=\"\", flush=True)\n        elif event.type == \"content_block_stop\":\n            print(event.content_block)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That means you can map SDK event types to SSE event names:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def event_stream():\n    async with client.messages.stream(...) as stream:\n        async for event in stream:\n            if event.type == \"text\":\n                yield f\"event: token\\ndata: {event.text}\\n\\n\"\n            elif event.type == \"message_stop\":\n                yield \"event: done\\ndata: {}\\n\\n\""
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is a stronger pattern when you want the client to distinguish token output, tool JSON, and completion states."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool-use and JSON streaming"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you later move beyond plain text streaming into tool-use flows, the SDK exposes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "input_json"
+          },
+          {
+            "type": "text",
+            "text": " events containing "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "partial_json"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "snapshot"
+          },
+          {
+            "type": "text",
+            "text": " values for incremental JSON input construction. In FastAPI SSE terms, that means you can stream tool-call argument construction live to the frontend or to an internal observer UI, instead of waiting for the full tool input object."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic documents that "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "input_json"
+          },
+          {
+            "type": "text",
+            "text": " events include:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "event.partial_json"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "event.snapshot"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "So an advanced SSE relay could do this:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "elif event.type == \"input_json\":\n    yield f\"event: tool_input\\ndata: {event.partial_json}\\n\\n\""
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is especially useful for debugging agent loops or building live developer consoles."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Completion helpers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "One of the advantages of "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream()"
+          },
+          {
+            "type": "text",
+            "text": " over raw "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream=True"
+          },
+          {
+            "type": "text",
+            "text": " is that the SDK can accumulate a final message for you, and the docs describe helper methods such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "await stream.get_final_message()"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "await stream.get_final_text()"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "await stream.until_done()"
+          },
+          {
+            "type": "text",
+            "text": ". These are useful if your FastAPI route needs to both stream live output and persist the final assistant message after the stream completes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example pattern:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def event_stream():\n    async with client.messages.stream(...) as stream:\n        async for text in stream.text_stream:\n            yield f\"data: {text}\\n\\n\"\n\n        final_text = await stream.get_final_text()\n        # persist final_text to DB here\n\n    yield \"event: done\\ndata: {}\\n\\n\""
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That gives you a clean \u201cstream now, save later\u201d architecture using the SDK\u2019s documented helpers."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FastAPI-specific advice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For FastAPI, keep these practical rules:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "AsyncAnthropic"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", not the sync client, inside async routes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Put Claude streaming code in a service function, not directly in every route."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "request.is_disconnected()"
+                  },
+                  {
+                    "type": "text",
+                    "text": " to stop work when the client leaves."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return proper SSE headers so proxies do not buffer the stream."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Send a final completion event like "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "done"
+                  },
+                  {
+                    "type": "text",
+                    "text": " so the frontend can close cleanly."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These are standard FastAPI SSE practices, and the Anthropic SDK\u2019s async stream interface fits them naturally because it is already built around async iteration and explicit close semantics."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended production structure"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A clean FastAPI module layout for SSE with Claude is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "schemas.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 request models such as "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "StreamChatRequest"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "services/claude.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "stream_text()"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "stream_events()"
+                  },
+                  {
+                    "type": "text",
+                    "text": " wrappers around "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "AsyncAnthropic"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "routes/chat.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /chat/stream"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "persistence.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 optional final-message saving after stream completion."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In that design:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The route handles HTTP and headers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The service handles Anthropic API calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Persistence and audit happen after "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "get_final_text()"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "get_final_message()"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of the whole system as two nested streams:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude streams tokens/events to your FastAPI backend."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FastAPI reformats those into SSE frames and streams them to the browser."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The simplest reliable implementation is therefore \u201cClaude async stream in, SSE async stream out,\u201d using "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream(...)"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".text_stream"
+          },
+          {
+            "type": "text",
+            "text": " as the bridge."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with async streaming responses with sse in fastapi, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with async streaming responses with sse in fastapi. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of async streaming responses with sse in fastapi scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with async streaming responses with sse in fastapi, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with async streaming responses with sse in fastapi. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of async streaming responses with sse in fastapi scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

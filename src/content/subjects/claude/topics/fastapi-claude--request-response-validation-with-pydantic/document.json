@@ -1,1 +1,1802 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T06:54:26.587Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"For FastAPI + Claude, Pydantic should validate both the inbound API contract from your clients and the outbound contract your backend promises to return, while your Claude service separately maps those models to and from the Messages API shape. The goal is to make invalid requests fail early, keep route contracts stable, and avoid leaking raw Claude SDK objects or provider-specific quirks directly to your frontend."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why validate both directions"}]},{"type":"paragraph","content":[{"type":"text","text":"FastAPI uses Pydantic models to validate request bodies, coerce types, and generate OpenAPI docs automatically. It can also validate and serialize responses through return type annotations or "},{"type":"text","marks":[{"type":"code"}],"text":"response_model"},{"type":"text","text":", ensuring clients only see the fields and types you intend to expose."}]},{"type":"paragraph","content":[{"type":"text","text":"In a Claude-backed backend, this matters because there are really "},{"type":"text","marks":[{"type":"bold"}],"text":"two schemas"},{"type":"text","text":" in play:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Your app’s public API schema."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s Messages API schema."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"You usually do "},{"type":"text","marks":[{"type":"bold"}],"text":"not"},{"type":"text","text":" want these to be identical, because your public API should be simpler, safer, and more stable than the provider’s raw request format."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Validation layers"}]},{"type":"paragraph","content":[{"type":"text","text":"A robust FastAPI + Claude app usually has four validation layers:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Inbound request validation"},{"type":"text","text":" with Pydantic models in your FastAPI route."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Domain/service validation"},{"type":"text","text":" for business rules like tenant policy, prompt size, allowed tools, or model allowlists."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Claude request shaping"},{"type":"text","text":" where your service maps validated app models into the Messages API format."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Outbound response validation"},{"type":"text","text":" with Pydantic response models so clients receive normalized output."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This layered approach prevents “garbage in, garbage out” and keeps failures easier to debug."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Request models"}]},{"type":"paragraph","content":[{"type":"text","text":"The most common pattern is to define request schemas that closely resemble your feature contract rather than Claude’s entire request surface. For example, if your feature is a chat endpoint, your frontend might only need "},{"type":"text","marks":[{"type":"code"}],"text":"message"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"session_id"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"system"},{"type":"text","text":", and maybe a small set of tuning parameters."}]},{"type":"paragraph","content":[{"type":"text","text":"Example request model:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from pydantic import BaseModel, Field, ConfigDict\nfrom typing import Literal\n\nclass UserMessageRequest(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n    session_id: str | None = None\n    message: str = Field(min_length=1, max_length=20000)\n    system: str | None = Field(default=None, max_length=10000)\n    model: str = Field(default=\"claude-sonnet-4-6\")\n    max_tokens: int = Field(default=1024, ge=1, le=8192)\n    temperature: float | None = Field(default=None, ge=0, le=1)"}]},{"type":"paragraph","content":[{"type":"text","text":"Important design choices here:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"extra=\"forbid\""},{"type":"text","text":" rejects unexpected fields instead of silently accepting them."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"min_length"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"max_length"},{"type":"text","text":", and numeric bounds catch invalid input before it reaches Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"You validate the values that matter to your product contract, not every possible Messages API option."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is often better than exposing raw Claude-style "},{"type":"text","marks":[{"type":"code"}],"text":"messages"},{"type":"text","text":" arrays unless your consumers truly need that flexibility."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Message-array request models"}]},{"type":"paragraph","content":[{"type":"text","text":"If you are building a general-purpose backend wrapper around Claude, then modeling the Messages API shape more directly makes sense. In that case, use Pydantic models for roles and content blocks."}]},{"type":"paragraph","content":[{"type":"text","text":"Example:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from pydantic import BaseModel, Field, ConfigDict\nfrom typing import Literal\n\nclass TextBlock(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n    type: Literal[\"text\"] = \"text\"\n    text: str = Field(min_length=1)\n\nclass ChatMessage(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n    role: Literal[\"user\", \"assistant\"]\n    content: list[TextBlock]\n\nclass CreateMessageRequest(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n    model: str\n    max_tokens: int = Field(ge=1, le=8192)\n    messages: list[ChatMessage] = Field(min_length=1)\n    system: str | None = None\n    temperature: float | None = Field(default=None, ge=0, le=1)"}]},{"type":"paragraph","content":[{"type":"text","text":"This aligns well with the documented Messages API structure, where "},{"type":"text","marks":[{"type":"code"}],"text":"model"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"max_tokens"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"messages"},{"type":"text","text":" are core fields, and each message has a "},{"type":"text","marks":[{"type":"code"}],"text":"role"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"content"},{"type":"text","text":"."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Custom validators for business rules"}]},{"type":"paragraph","content":[{"type":"text","text":"Pydantic field validation handles basic shape and type constraints, but Claude integrations usually need higher-level rules too. Examples include:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Preventing empty conversation histories."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Restricting allowed models."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Enforcing “assistant messages cannot appear first.”"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Rejecting unsupported tool names."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Ensuring the prompt does not exceed your app’s internal size budget before tokenization."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Example validator pattern:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from pydantic import BaseModel, Field, field_validator\n\nALLOWED_MODELS = {\"claude-sonnet-4-6\", \"claude-haiku-4-5\"}\n\nclass CreateMessageRequest(BaseModel):\n    model: str\n    max_tokens: int = Field(ge=1, le=8192)\n    messages: list[ChatMessage]\n\n    @field_validator(\"model\")\n    @classmethod\n    def validate_model(cls, v: str) -> str:\n        if v not in ALLOWED_MODELS:\n            raise ValueError(\"Unsupported model\")\n        return v\n\n    @field_validator(\"messages\")\n    @classmethod\n    def validate_messages(cls, v: list[ChatMessage]) -> list[ChatMessage]:\n        if not v:\n            raise ValueError(\"messages must not be empty\")\n        if v[0].role != \"user\":\n            raise ValueError(\"first message must be from user\")\n        return v"}]},{"type":"paragraph","content":[{"type":"text","text":"This is where your backend becomes opinionated and product-safe, instead of just being a raw passthrough."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Route-level request validation"}]},{"type":"paragraph","content":[{"type":"text","text":"FastAPI automatically recognizes Pydantic model parameters as request bodies and validates them before your handler runs. That means the route stays very simple:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from fastapi import APIRouter, Depends\nfrom app.schemas import CreateMessageRequest, MessageResponse\nfrom app.services.claude import ClaudeService\n\nrouter = APIRouter(prefix=\"/messages\", tags=[\"messages\"])\n\n@router.post(\"\", response_model=MessageResponse)\nasync def create_message(\n    body: CreateMessageRequest,\n    claude: ClaudeService = Depends(get_claude_service),\n):\n    return await claude.create_message(body)"}]},{"type":"paragraph","content":[{"type":"text","text":"If validation fails, FastAPI returns a structured 422 error automatically, which is one of the biggest advantages of using Pydantic for your API boundary."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Response models"}]},{"type":"paragraph","content":[{"type":"text","text":"Response validation is just as important as request validation. Claude SDK responses contain many fields you may not want to expose directly, and raw content blocks can vary depending on streaming, tools, or provider changes."}]},{"type":"paragraph","content":[{"type":"text","text":"A response model lets you define a stable contract:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from pydantic import BaseModel\n\nclass UsageResponse(BaseModel):\n    input_tokens: int\n    output_tokens: int\n\nclass MessageResponse(BaseModel):\n    id: str\n    model: str\n    text: str\n    stop_reason: str | None\n    usage: UsageResponse"}]},{"type":"paragraph","content":[{"type":"text","text":"Your service then transforms the Claude response into this normalized structure:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"async def create_message(self, body: CreateMessageRequest) -> MessageResponse:\n    response = await self.client.messages.create(\n        model=body.model,\n        max_tokens=body.max_tokens,\n        system=body.system,\n        messages=[m.model_dump() for m in body.messages],\n        temperature=body.temperature,\n    )\n\n    text = \"\".join(\n        block.text for block in response.content\n        if getattr(block, \"type\", None) == \"text\"\n    )\n\n    return MessageResponse(\n        id=response.id,\n        model=response.model,\n        text=text,\n        stop_reason=response.stop_reason,\n        usage=UsageResponse(\n            input_tokens=response.usage.input_tokens,\n            output_tokens=response.usage.output_tokens,\n        ),\n    )"}]},{"type":"paragraph","content":[{"type":"text","text":"This protects your clients from needing to understand Anthropic content block internals."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Response filtering and safety"}]},{"type":"paragraph","content":[{"type":"text","text":"One reason response models matter in FastAPI is that they filter output to match the schema, so you do not accidentally expose extra fields or internal metadata. That is useful in Claude integrations because your internal service may carry:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Full prompt history."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Tool call traces."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Internal reasoning metadata."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Debug fields."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Tenant or billing context."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Your public response model should expose only what the client truly needs, such as "},{"type":"text","marks":[{"type":"code"}],"text":"text"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"usage"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"stop_reason"},{"type":"text","text":"."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Structured output validation"}]},{"type":"paragraph","content":[{"type":"text","text":"When you want Claude to return machine-readable data instead of free text, use a dedicated Pydantic model for the expected output shape and validate Claude’s structured response against it. Anthropic tooling and ecosystem guidance increasingly emphasize schema-driven structured outputs, where Claude is asked to emit JSON matching a provided schema."}]},{"type":"paragraph","content":[{"type":"text","text":"Example app-level output schema:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"class TicketClassification(BaseModel):\n    category: str\n    priority: Literal[\"low\", \"medium\", \"high\"]\n    sentiment: Literal[\"negative\", \"neutral\", \"positive\"]\n    summary: str"}]},{"type":"paragraph","content":[{"type":"text","text":"Then your Claude service can:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Ask Claude for strict JSON matching that structure."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Parse the returned JSON."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Validate it with "},{"type":"text","marks":[{"type":"code"}],"text":"TicketClassification.model_validate(...)"},{"type":"text","text":"."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is much safer than trusting arbitrary JSON text from the model without validation."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Separate public schemas from provider schemas"}]},{"type":"paragraph","content":[{"type":"text","text":"A very important design principle is to maintain different schema layers for:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Transport/API schemas"},{"type":"text","text":": what your FastAPI endpoints accept and return."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Provider schemas"},{"type":"text","text":": what the Anthropic SDK expects."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Domain schemas"},{"type":"text","text":": internal business objects used by your application."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"For example:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"CreateSupportReplyRequest"},{"type":"text","text":" is your route model."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ClaudeMessagePayload"},{"type":"text","text":" is an internal mapping shape."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"SupportReplyResponse"},{"type":"text","text":" is your route response model."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This separation keeps the rest of your codebase insulated from Messages API churn and lets you redesign your product API without rewriting your Claude integration every time."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Common validation rules worth adding"}]},{"type":"paragraph","content":[{"type":"text","text":"For Claude-backed routes, these Pydantic checks are especially useful:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"extra=\"forbid\""},{"type":"text","text":" on all external request models."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"min_length=1"},{"type":"text","text":" for required user text."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Maximum prompt lengths for user/system strings."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Allowed model enum or allowlist validator."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"max_tokens"},{"type":"text","text":" numeric bounds."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Valid role enums for message arrays."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Minimum one message in a conversation."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Tool names validated against a registry."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Metadata size and key restrictions if you expose metadata fields."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"These catch many integration bugs before they become provider errors or wasted token spend."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"Pydantic and FastAPI will automatically produce 422 validation errors for malformed requests. That means you should reserve your own custom exceptions for business-level failures like:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Conversation too large for plan tier."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Model not allowed for this tenant."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Feature flag disabled."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude returned invalid structured JSON after retries."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This cleanly separates “bad input shape” from “valid input, but rejected by business logic or downstream behavior.”"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Testing advantages"}]},{"type":"paragraph","content":[{"type":"text","text":"Strong Pydantic request and response models make tests much easier because they define the contract in executable code. You can test:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Valid input passes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Invalid input returns 422."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Response serialization hides internal fields."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude structured output parsing fails correctly on malformed model output."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"For example, a test can assert that an unexpected field is rejected when "},{"type":"text","marks":[{"type":"code"}],"text":"extra=\"forbid\""},{"type":"text","text":" is active, which protects your API from drift over time."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended blueprint"}]},{"type":"paragraph","content":[{"type":"text","text":"A clean FastAPI + Claude validation stack looks like this:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"schemas/requests.py"},{"type":"text","text":" — external request models."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"schemas/responses.py"},{"type":"text","text":" — public response models."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"schemas/domain.py"},{"type":"text","text":" — optional internal business models."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"services/claude.py"},{"type":"text","text":" — converts request models into Messages API calls and normalizes outputs."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"routes/*.py"},{"type":"text","text":" — declare Pydantic request bodies and response models only."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That pattern gives you a strict, explicit API contract at the FastAPI boundary and a separately controlled mapping layer for Claude’s Messages API, which is the safest and most maintainable way to do request/response validation with Pydantic."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T06:54:26.587Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For FastAPI + Claude, Pydantic should validate both the inbound API contract from your clients and the outbound contract your backend promises to return, while your Claude service separately maps those models to and from the Messages API shape. The goal is to make invalid requests fail early, keep route contracts stable, and avoid leaking raw Claude SDK objects or provider-specific quirks directly to your frontend."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why validate both directions"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5SZXF1ZXN0L3Jlc3BvbnNlIHZhbGlkYXRpb24gd2l0aCBQeWRhbnRpYzwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjEwNSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjE0IgogICAgICAgIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBvcGFjaXR5PSIwLjc1Ij5DbGF1ZGUgTGVhcm5pbmcgUGF0aDwvdGV4dD4KICA8Y2lyY2xlIGN4PSI2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KICA8Y2lyY2xlIGN4PSI3NjAiIGN5PSI4MCIgcj0iMjgiIGZpbGw9IndoaXRlIiBvcGFjaXR5PSIwLjE1Ii8+Cjwvc3ZnPg==",
+          "alt": "Diagram for Request/response validation with Pydantic",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FastAPI uses Pydantic models to validate request bodies, coerce types, and generate OpenAPI docs automatically. It can also validate and serialize responses through return type annotations or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "response_model"
+          },
+          {
+            "type": "text",
+            "text": ", ensuring clients only see the fields and types you intend to expose."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In a Claude-backed backend, this matters because there are really "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "two schemas"
+          },
+          {
+            "type": "text",
+            "text": " in play:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Your app\u2019s public API schema."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Anthropic\u2019s Messages API schema."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "You usually do "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "not"
+          },
+          {
+            "type": "text",
+            "text": " want these to be identical, because your public API should be simpler, safer, and more stable than the provider\u2019s raw request format."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Validation layers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A robust FastAPI + Claude app usually has four validation layers:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Inbound request validation"
+                  },
+                  {
+                    "type": "text",
+                    "text": " with Pydantic models in your FastAPI route."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Domain/service validation"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for business rules like tenant policy, prompt size, allowed tools, or model allowlists."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Claude request shaping"
+                  },
+                  {
+                    "type": "text",
+                    "text": " where your service maps validated app models into the Messages API format."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Outbound response validation"
+                  },
+                  {
+                    "type": "text",
+                    "text": " with Pydantic response models so clients receive normalized output."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This layered approach prevents \u201cgarbage in, garbage out\u201d and keeps failures easier to debug."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Request models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most common pattern is to define request schemas that closely resemble your feature contract rather than Claude\u2019s entire request surface. For example, if your feature is a chat endpoint, your frontend might only need "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "session_id"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "system"
+          },
+          {
+            "type": "text",
+            "text": ", and maybe a small set of tuning parameters."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example request model:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pydantic import BaseModel, Field, ConfigDict\nfrom typing import Literal\n\nclass UserMessageRequest(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n    session_id: str | None = None\n    message: str = Field(min_length=1, max_length=20000)\n    system: str | None = Field(default=None, max_length=10000)\n    model: str = Field(default=\"claude-sonnet-4-6\")\n    max_tokens: int = Field(default=1024, ge=1, le=8192)\n    temperature: float | None = Field(default=None, ge=0, le=1)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Important design choices here:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "extra=\"forbid\""
+                  },
+                  {
+                    "type": "text",
+                    "text": " rejects unexpected fields instead of silently accepting them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "min_length"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "max_length"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", and numeric bounds catch invalid input before it reaches Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "You validate the values that matter to your product contract, not every possible Messages API option."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is often better than exposing raw Claude-style "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "messages"
+          },
+          {
+            "type": "text",
+            "text": " arrays unless your consumers truly need that flexibility."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Message-array request models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you are building a general-purpose backend wrapper around Claude, then modeling the Messages API shape more directly makes sense. In that case, use Pydantic models for roles and content blocks."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pydantic import BaseModel, Field, ConfigDict\nfrom typing import Literal\n\nclass TextBlock(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n    type: Literal[\"text\"] = \"text\"\n    text: str = Field(min_length=1)\n\nclass ChatMessage(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n    role: Literal[\"user\", \"assistant\"]\n    content: list[TextBlock]\n\nclass CreateMessageRequest(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n    model: str\n    max_tokens: int = Field(ge=1, le=8192)\n    messages: list[ChatMessage] = Field(min_length=1)\n    system: str | None = None\n    temperature: float | None = Field(default=None, ge=0, le=1)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This aligns well with the documented Messages API structure, where "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "model"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_tokens"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "messages"
+          },
+          {
+            "type": "text",
+            "text": " are core fields, and each message has a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "role"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Custom validators for business rules"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pydantic field validation handles basic shape and type constraints, but Claude integrations usually need higher-level rules too. Examples include:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Preventing empty conversation histories."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Restricting allowed models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enforcing \u201cassistant messages cannot appear first.\u201d"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rejecting unsupported tool names."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ensuring the prompt does not exceed your app\u2019s internal size budget before tokenization."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example validator pattern:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pydantic import BaseModel, Field, field_validator\n\nALLOWED_MODELS = {\"claude-sonnet-4-6\", \"claude-haiku-4-5\"}\n\nclass CreateMessageRequest(BaseModel):\n    model: str\n    max_tokens: int = Field(ge=1, le=8192)\n    messages: list[ChatMessage]\n\n    @field_validator(\"model\")\n    @classmethod\n    def validate_model(cls, v: str) -> str:\n        if v not in ALLOWED_MODELS:\n            raise ValueError(\"Unsupported model\")\n        return v\n\n    @field_validator(\"messages\")\n    @classmethod\n    def validate_messages(cls, v: list[ChatMessage]) -> list[ChatMessage]:\n        if not v:\n            raise ValueError(\"messages must not be empty\")\n        if v[0].role != \"user\":\n            raise ValueError(\"first message must be from user\")\n        return v"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is where your backend becomes opinionated and product-safe, instead of just being a raw passthrough."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Route-level request validation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "FastAPI automatically recognizes Pydantic model parameters as request bodies and validates them before your handler runs. That means the route stays very simple:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from fastapi import APIRouter, Depends\nfrom app.schemas import CreateMessageRequest, MessageResponse\nfrom app.services.claude import ClaudeService\n\nrouter = APIRouter(prefix=\"/messages\", tags=[\"messages\"])\n\n@router.post(\"\", response_model=MessageResponse)\nasync def create_message(\n    body: CreateMessageRequest,\n    claude: ClaudeService = Depends(get_claude_service),\n):\n    return await claude.create_message(body)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If validation fails, FastAPI returns a structured 422 error automatically, which is one of the biggest advantages of using Pydantic for your API boundary."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Response models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Response validation is just as important as request validation. Claude SDK responses contain many fields you may not want to expose directly, and raw content blocks can vary depending on streaming, tools, or provider changes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A response model lets you define a stable contract:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pydantic import BaseModel\n\nclass UsageResponse(BaseModel):\n    input_tokens: int\n    output_tokens: int\n\nclass MessageResponse(BaseModel):\n    id: str\n    model: str\n    text: str\n    stop_reason: str | None\n    usage: UsageResponse"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Your service then transforms the Claude response into this normalized structure:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def create_message(self, body: CreateMessageRequest) -> MessageResponse:\n    response = await self.client.messages.create(\n        model=body.model,\n        max_tokens=body.max_tokens,\n        system=body.system,\n        messages=[m.model_dump() for m in body.messages],\n        temperature=body.temperature,\n    )\n\n    text = \"\".join(\n        block.text for block in response.content\n        if getattr(block, \"type\", None) == \"text\"\n    )\n\n    return MessageResponse(\n        id=response.id,\n        model=response.model,\n        text=text,\n        stop_reason=response.stop_reason,\n        usage=UsageResponse(\n            input_tokens=response.usage.input_tokens,\n            output_tokens=response.usage.output_tokens,\n        ),\n    )"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This protects your clients from needing to understand Anthropic content block internals."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Response filtering and safety"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "One reason response models matter in FastAPI is that they filter output to match the schema, so you do not accidentally expose extra fields or internal metadata. That is useful in Claude integrations because your internal service may carry:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Full prompt history."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tool call traces."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Internal reasoning metadata."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Debug fields."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tenant or billing context."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Your public response model should expose only what the client truly needs, such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "text"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "usage"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stop_reason"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Structured output validation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When you want Claude to return machine-readable data instead of free text, use a dedicated Pydantic model for the expected output shape and validate Claude\u2019s structured response against it. Anthropic tooling and ecosystem guidance increasingly emphasize schema-driven structured outputs, where Claude is asked to emit JSON matching a provided schema."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example app-level output schema:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "class TicketClassification(BaseModel):\n    category: str\n    priority: Literal[\"low\", \"medium\", \"high\"]\n    sentiment: Literal[\"negative\", \"neutral\", \"positive\"]\n    summary: str"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Then your Claude service can:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ask Claude for strict JSON matching that structure."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Parse the returned JSON."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate it with "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "TicketClassification.model_validate(...)"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is much safer than trusting arbitrary JSON text from the model without validation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Separate public schemas from provider schemas"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A very important design principle is to maintain different schema layers for:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Transport/API schemas"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": what your FastAPI endpoints accept and return."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Provider schemas"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": what the Anthropic SDK expects."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Domain schemas"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": internal business objects used by your application."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For example:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "CreateSupportReplyRequest"
+                  },
+                  {
+                    "type": "text",
+                    "text": " is your route model."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeMessagePayload"
+                  },
+                  {
+                    "type": "text",
+                    "text": " is an internal mapping shape."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "SupportReplyResponse"
+                  },
+                  {
+                    "type": "text",
+                    "text": " is your route response model."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This separation keeps the rest of your codebase insulated from Messages API churn and lets you redesign your product API without rewriting your Claude integration every time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common validation rules worth adding"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For Claude-backed routes, these Pydantic checks are especially useful:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "extra=\"forbid\""
+                  },
+                  {
+                    "type": "text",
+                    "text": " on all external request models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "min_length=1"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for required user text."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Maximum prompt lengths for user/system strings."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Allowed model enum or allowlist validator."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "max_tokens"
+                  },
+                  {
+                    "type": "text",
+                    "text": " numeric bounds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Valid role enums for message arrays."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Minimum one message in a conversation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tool names validated against a registry."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Metadata size and key restrictions if you expose metadata fields."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These catch many integration bugs before they become provider errors or wasted token spend."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pydantic and FastAPI will automatically produce 422 validation errors for malformed requests. That means you should reserve your own custom exceptions for business-level failures like:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Conversation too large for plan tier."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model not allowed for this tenant."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Feature flag disabled."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude returned invalid structured JSON after retries."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This cleanly separates \u201cbad input shape\u201d from \u201cvalid input, but rejected by business logic or downstream behavior.\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Testing advantages"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Strong Pydantic request and response models make tests much easier because they define the contract in executable code. You can test:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Valid input passes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Invalid input returns 422."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Response serialization hides internal fields."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude structured output parsing fails correctly on malformed model output."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For example, a test can assert that an unexpected field is rejected when "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "extra=\"forbid\""
+          },
+          {
+            "type": "text",
+            "text": " is active, which protects your API from drift over time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended blueprint"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A clean FastAPI + Claude validation stack looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "schemas/requests.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 external request models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "schemas/responses.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 public response models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "schemas/domain.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 optional internal business models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "services/claude.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 converts request models into Messages API calls and normalizes outputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "routes/*.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 declare Pydantic request bodies and response models only."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That pattern gives you a strict, explicit API contract at the FastAPI boundary and a separately controlled mapping layer for Claude\u2019s Messages API, which is the safest and most maintainable way to do request/response validation with Pydantic."
+          }
+        ]
+      }
+    ]
+  }
+}
