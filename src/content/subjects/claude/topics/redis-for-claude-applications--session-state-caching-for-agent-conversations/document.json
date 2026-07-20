@@ -1,1 +1,1343 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-19T06:31:50.818Z","doc":{"type":"doc","content":[]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a Claude-powered agent runs multi-step tasks, it accumulates session state that must survive across API calls: the accumulated message history, the outputs of tool calls already executed, intermediate reasoning context, and metadata like token counts and user preferences. Loading this state from PostgreSQL on every agent step is too slow; caching it in Redis with careful TTL strategy gives sub-millisecond reads while keeping the database as the durable source of truth."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Session state caching for agent conversations is a Redis-backed layer that sits between the Claude agent code and the PostgreSQL persistence layer. It stores the working state of active conversations in memory so that agent steps can load context in under 1ms and write new turns without a synchronous database round-trip on the critical path. The cache is write-through: every mutation is written to Redis immediately and to PostgreSQL asynchronously within a configurable lag window."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Redis is chosen over other in-memory stores because it provides native data structures (HASH, LIST, STREAM, JSON) that map directly to agent state components, atomic operations that prevent race conditions in concurrent tool-calling scenarios, and a TTL mechanism that automatically expires idle sessions without requiring a separate cleanup job."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A multi-step Claude agent may execute 10–30 tool calls before producing a final response. Each tool call requires loading the conversation context to build the next API request, and each tool result must be appended before the next call. Without caching, each of those 10–30 steps hits PostgreSQL — a 3–10ms database read on every iteration adds 30–300ms to every agent response, compounding into several seconds of avoidable latency for complex tasks."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Beyond latency, database connection pooling under concurrent agent workloads can exhaust PgBouncer pools if every agent step holds a connection for the duration of a tool call execution. Caching eliminates the need for persistent connections during the agentic loop — the database is only accessed for cache misses and async writes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Benefits"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sub-millisecond context loads: HGET and LRANGE on Redis return in under 1ms even for large session hashes, compared to 3–10ms PostgreSQL reads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Automatic TTL-based cleanup: idle sessions expire without a cron job, and the TTL is reset on each access to keep active sessions alive."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Atomic operations: RPUSH is atomic, so concurrent agent steps appending messages do not corrupt the list order."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tool call deduplication: caching tool results with a content-addressed key (hash of tool name + input) avoids re-executing idempotent tools when a session is resumed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Session recovery: if the agent process crashes mid-task, the Redis state (including partial tool call results) survives and can be resumed on the next request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reduced database load: async write-through decouples agent step latency from PostgreSQL write latency, especially important during write spikes."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Data loss risk: in-memory data can be lost if Redis restarts before the async PostgreSQL write completes. Mitigate with Redis persistence (AOF with fsync=everysec) and a write lag SLA of under 5 seconds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache invalidation complexity: if the database is updated directly (admin operations, migrations), the Redis cache becomes stale. Establish a rule: all writes go through the caching layer, never direct to PostgreSQL."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Memory pressure: long conversations with many tool call results can fill Redis memory. Set a maxmemory policy (allkeys-lru or volatile-lru) and monitor eviction rate."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Operational overhead: Redis is an additional service to provision, monitor, and back up. On AWS this means ElastiCache; on GCP, Memorystore — both add cost and configuration complexity."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each active conversation is represented by multiple Redis keys, each using a different data structure suited to its access pattern. The session HASH stores scalar metadata about the session (user_id, model, system prompt, token count, last_active_at) that needs to be read and updated atomically. The message LIST stores the ordered sequence of recent messages as JSON strings, optimized for RPUSH at the tail and LRANGE reads from both ends. The distributed lock STRING prevents concurrent writes to the same conversation. The Streams key logs every agent step for observability."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The write-through pattern works as follows: when the agent appends a new message, it writes to Redis synchronously (RPUSH + HSET), then publishes a write job to a background queue. A separate worker dequeues the job and persists to PostgreSQL. If the worker fails, it retries with exponential backoff. The PostgreSQL record is eventually consistent with Redis — the gap is bounded by the worker's retry interval and is typically under 5 seconds."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODYwIiBoZWlnaHQ9IjUwMCIgdmlld0JveD0iMCAwIDg2MCA1MDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjUwMCIgZmlsbD0iI2Y4ZmFmYyIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWUyOTNiIj5SZWRpcyBTZXNzaW9uIFN0YXRlIEFyY2hpdGVjdHVyZTogQWdlbnQg4oaUIFJlZGlzIOKGlCBQb3N0Z3JlU1FMPC90ZXh0PgoKICA8IS0tIENsaWVudCB0aWVyIC0tPgogIDxyZWN0IHg9IjIwIiB5PSI1NSIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI4MCIgcng9IjgiIGZpbGw9IiNkYmVhZmUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iOTUiIHk9Ijg1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzFlNDBhZiIgZm9udC1zaXplPSIxMiI+QVBJIENsaWVudDwvdGV4dD4KICA8dGV4dCB4PSI5NSIgeT0iMTAzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj5IVFRQIFJlcXVlc3Q8L3RleHQ+CiAgPHRleHQgeD0iOTUiIHk9IjExOCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+c2Vzc2lvbl9pZCBoZWFkZXI8L3RleHQ+CgogIDwhLS0gQWdlbnQgdGllciAtLT4KICA8cmVjdCB4PSIyMjAiIHk9IjQwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjM0MCIgcng9IjgiIGZpbGw9IiNmMGZkZjQiIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHRleHQgeD0iMzA1IiB5PSI2NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiMwNjVmNDYiIGZvbnQtc2l6ZT0iMTMiPkNsYXVkZSBBZ2VudDwvdGV4dD4KICA8cmVjdCB4PSIyMzUiIHk9Ijc1IiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjU1IiByeD0iNSIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMzA1IiB5PSI5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+MS4gTG9hZCBzZXNzaW9uIHN0YXRlPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMTEyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gICBmcm9tIFJlZGlzIEhHRVQ8L3RleHQ+CiAgPHRleHQgeD0iMzA1IiB5PSIxMjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgIChtaXNzIOKGkiBsb2FkIGZyb20gREIpPC90ZXh0PgogIDxyZWN0IHg9IjIzNSIgeT0iMTQwIiB3aWR0aD0iMTQwIiBoZWlnaHQ9IjU1IiByeD0iNSIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iMzA1IiB5PSIxNjEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPjIuIEZldGNoIHJlY2VudCBtc2dzPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMTc3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gICBMUkFOR0UgaGlzdCAwIDQ5PC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMTkzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gICAobGFzdCA1MCBtZXNzYWdlcyk8L3RleHQ+CiAgPHJlY3QgeD0iMjM1IiB5PSIyMDUiIHdpZHRoPSIxNDAiIGhlaWdodD0iNTUiIHJ4PSI1IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjMTBiOTgxIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzMDUiIHk9IjIyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+My4gQ2FsbCBDbGF1ZGUgQVBJPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMjQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gICBleGVjdXRlIHRvb2wgY2FsbHM8L3RleHQ+CiAgPHRleHQgeD0iMzA1IiB5PSIyNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgIGdldCByZXNwb25zZTwvdGV4dD4KICA8cmVjdCB4PSIyMzUiIHk9IjI3MCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSI1NSIgcng9IjUiIGZpbGw9IndoaXRlIiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjMwNSIgeT0iMjkxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj40LiBSUFVTSCBuZXcgbXNnczwvdGV4dD4KICA8dGV4dCB4PSIzMDUiIHk9IjMwNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICAgSFNFVCBzZXNzaW9uIHN0YXRlPC90ZXh0PgogIDx0ZXh0IHg9IjMwNSIgeT0iMzIzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gICBFWFBJUkUga2V5cyAxNDQwMHM8L3RleHQ+CiAgPHJlY3QgeD0iMjM1IiB5PSIzMzUiIHdpZHRoPSIxNDAiIGhlaWdodD0iMzUiIHJ4PSI1IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjMTBiOTgxIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSIzMDUiIHk9IjM1MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+NS4gQXN5bmMgd3JpdGUtdGhyb3VnaDwvdGV4dD4KICA8dGV4dCB4PSIzMDUiIHk9IjM2NSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICAgdG8gUG9zdGdyZVNRTDwvdGV4dD4KCiAgPCEtLSBSZWRpcyB0aWVyIC0tPgogIDxyZWN0IHg9IjQ1MCIgeT0iNDAiIHdpZHRoPSIyMDAiIGhlaWdodD0iMzgwIiByeD0iOCIgZmlsbD0iI2ZmZjdlZCIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI1NTAiIHk9IjY1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSIgZm9udC1zaXplPSIxMyI+UmVkaXM8L3RleHQ+CiAgPHJlY3QgeD0iNDY1IiB5PSI3NSIgd2lkdGg9IjE3MCIgaGVpZ2h0PSI2NSIgcng9IjUiIGZpbGw9IndoaXRlIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjU1MCIgeT0iOTQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjOTI0MDBlIiBmb250LXNpemU9IjExIj5IQVNIOiBzZXNzaW9uOntpZH08L3RleHQ+CiAgPHRleHQgeD0iNDY1IiB5PSIxMTAiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgdXNlcl9pZCwgbW9kZWwsIHN5c3RlbV9wcm9tcHQ8L3RleHQ+CiAgPHRleHQgeD0iNDY1IiB5PSIxMjQiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgdG9rZW5fY291bnQsIGxhc3RfYWN0aXZlX2F0PC90ZXh0PgogIDx0ZXh0IHg9IjQ2NSIgeT0iMTM4IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gIFRUTDogMTQ0MDBzICg0IGhyIGlkbGUpPC90ZXh0PgogIDxyZWN0IHg9IjQ2NSIgeT0iMTUwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjY1IiByeD0iNSIgZmlsbD0id2hpdGUiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTUwIiB5PSIxNjkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjOTI0MDBlIiBmb250LXNpemU9IjExIj5MSVNUOiBoaXN0Ontjb252X2lkfTwvdGV4dD4KICA8dGV4dCB4PSI0NjUiIHk9IjE4NiIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICBKU09OIG1zZ3MgKHJvbGUrY29udGVudCk8L3RleHQ+CiAgPHRleHQgeD0iNDY1IiB5PSIyMDAiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgUlBVU0ggLyBMUkFOR0UgMCA0OTwvdGV4dD4KICA8dGV4dCB4PSI0NjUiIHk9IjIxNCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICBUVEw6IDE4MDBzICgzMCBtaW4gYWN0aXZlKTwvdGV4dD4KICA8cmVjdCB4PSI0NjUiIHk9IjIyNSIgd2lkdGg9IjE3MCIgaGVpZ2h0PSI2NSIgcng9IjUiIGZpbGw9IndoaXRlIiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjU1MCIgeT0iMjQ0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSIgZm9udC1zaXplPSIxMSI+U1RSSU5HOiBsb2NrOntjb252X2lkfTwvdGV4dD4KICA8dGV4dCB4PSI0NjUiIHk9IjI2MSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICBTRVQgTlggRVggMzAgKGRpc3QuIGxvY2spPC90ZXh0PgogIDx0ZXh0IHg9IjQ2NSIgeT0iMjc1IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gIHByZXZlbnRzIGNvbmN1cnJlbnQgd3JpdGVzPC90ZXh0PgogIDx0ZXh0IHg9IjQ2NSIgeT0iMjg5IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gIHRvIHNhbWUgY29udmVyc2F0aW9uPC90ZXh0PgogIDxyZWN0IHg9IjQ2NSIgeT0iMzAwIiB3aWR0aD0iMTcwIiBoZWlnaHQ9IjY1IiByeD0iNSIgZmlsbD0id2hpdGUiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNTUwIiB5PSIzMTkiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjOTI0MDBlIiBmb250LXNpemU9IjExIj5TVFJFQU06IGFnZW50OnN0ZXBzPC90ZXh0PgogIDx0ZXh0IHg9IjQ2NSIgeT0iMzM2IiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4gIFhBREQgc3RlcCBldmVudHM8L3RleHQ+CiAgPHRleHQgeD0iNDY1IiB5PSIzNTAiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgdG9vbF9uYW1lLCBzdGF0dXMsIGR1cl9tczwvdGV4dD4KICA8dGV4dCB4PSI0NjUiIHk9IjM2NCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+ICBNQVhMRU4gfjEwMDAgcGVyIGNvbnY8L3RleHQ+CiAgPHJlY3QgeD0iNDY1IiB5PSIzNzUiIHdpZHRoPSIxNzAiIGhlaWdodD0iMzUiIHJ4PSI1IiBmaWxsPSJ3aGl0ZSIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjEiLz4KICA8dGV4dCB4PSI1NTAiIHk9IjM5MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM5MjQwMGUiIGZvbnQtc2l6ZT0iMTEiPkpTT046IHRvb2xfY2FjaGU6e2tleX08L3RleHQ+CiAgPHRleHQgeD0iNDY1IiB5PSI0MDgiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPiAgY2FjaGVkIHRvb2wgY2FsbCByZXN1bHRzLCBUVEwgMzAwczwvdGV4dD4KCiAgPCEtLSBQb3N0Z3JlU1FMIHRpZXIgLS0+CiAgPHJlY3QgeD0iNzEwIiB5PSI4MCIgd2lkdGg9IjEzNSIgaGVpZ2h0PSIyMDAiIHJ4PSI4IiBmaWxsPSIjZWZmNmZmIiBzdHJva2U9IiM2MzY2ZjEiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9Ijc3NyIgeT0iMTA4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzM3MzBhMyIgZm9udC1zaXplPSIxMiI+UG9zdGdyZVNRTDwvdGV4dD4KICA8cmVjdCB4PSI3MjIiIHk9IjExOCIgd2lkdGg9IjExMCIgaGVpZ2h0PSIzNSIgcng9IjQiIGZpbGw9IndoaXRlIiBzdHJva2U9IiM2MzY2ZjEiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9Ijc3NyIgeT0iMTQwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj5jb252ZXJzYXRpb25zPC90ZXh0PgogIDxyZWN0IHg9IjcyMiIgeT0iMTYzIiB3aWR0aD0iMTEwIiBoZWlnaHQ9IjM1IiByeD0iNCIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzYzNjZmMSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzc3IiB5PSIxODUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPm1lc3NhZ2VzPC90ZXh0PgogIDxyZWN0IHg9IjcyMiIgeT0iMjA4IiB3aWR0aD0iMTEwIiBoZWlnaHQ9IjM1IiByeD0iNCIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzYzNjZmMSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgPHRleHQgeD0iNzc3IiB5PSIyMzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPnRvb2xfY2FsbHM8L3RleHQ+CiAgPHRleHQgeD0iNzc3IiB5PSIyNjIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM2YjcyODAiIGZvbnQtc2l6ZT0iOSI+ZHVyYWJsZSwgcXVlcnlhYmxlPC90ZXh0PgogIDx0ZXh0IHg9Ijc3NyIgeT0iMjc1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNmI3MjgwIiBmb250LXNpemU9IjkiPnNvdXJjZSBvZiB0cnV0aDwvdGV4dD4KCiAgPCEtLSBBcnJvd3MgLS0+CiAgPCEtLSBDbGllbnQgLT4gQWdlbnQgLS0+CiAgPGxpbmUgeDE9IjE3MCIgeTE9Ijk1IiB4Mj0iMjE4IiB5Mj0iOTUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHBvbHlnb24gcG9pbnRzPSIyMTMsOTEgMjE4LDk1IDIxMyw5OSIgZmlsbD0iIzNiODJmNiIvPgoKICA8IS0tIEFnZW50IC0+IFJlZGlzIChkb3VibGUgYXJyb3cpIC0tPgogIDxsaW5lIHgxPSIzOTAiIHkxPSIxODAiIHgyPSI0NDgiIHkyPSIyMDAiIHN0cm9rZT0iI2Y1OWUwYiIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHBvbHlnb24gcG9pbnRzPSI0NDMsMTk3IDQ0OCwyMDAgNDQ0LDIwNSIgZmlsbD0iI2Y1OWUwYiIvPgogIDxsaW5lIHgxPSI0NDgiIHkxPSIxODAiIHgyPSIzOTAiIHkyPSIyMDAiIHN0cm9rZT0iIzEwYjk4MSIgc3Ryb2tlLXdpZHRoPSIyIi8+CiAgPHBvbHlnb24gcG9pbnRzPSIzOTMsMTc4IDM5MCwxODIgMzk1LDE4MyIgZmlsbD0iIzEwYjk4MSIvPgogIDx0ZXh0IHg9IjQyMCIgeT0iMTg1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjkiPnJlYWQ8L3RleHQ+CiAgPHRleHQgeD0iNDIwIiB5PSIyMDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iOSI+d3JpdGU8L3RleHQ+CgogIDwhLS0gUmVkaXMgLT4gUG9zdGdyZVNRTCAoYXN5bmMgd3JpdGUtdGhyb3VnaCkgLS0+CiAgPGxpbmUgeDE9IjY1MCIgeTE9IjIwMCIgeDI9IjcwOCIgeTI9IjIwMCIgc3Ryb2tlPSIjNjM2NmYxIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1kYXNoYXJyYXk9IjYsMyIvPgogIDxwb2x5Z29uIHBvaW50cz0iNzAzLDE5NiA3MDgsMjAwIDcwMywyMDQiIGZpbGw9IiM2MzY2ZjEiLz4KICA8dGV4dCB4PSI2NzkiIHk9IjE5MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzZiNzI4MCIgZm9udC1zaXplPSI5Ij5hc3luYzwvdGV4dD4KICA8dGV4dCB4PSI2NzkiIHk9IjIwNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzZiNzI4MCIgZm9udC1zaXplPSI5Ij53cml0ZTwvdGV4dD4KCiAgPCEtLSBBZ2VudCAtPiBQb3N0Z3JlU1FMIChjYWNoZSBtaXNzKSAtLT4KICA8bGluZSB4MT0iMzkwIiB5MT0iMzgwIiB4Mj0iNzIwIiB5Mj0iMjUwIiBzdHJva2U9IiNkYzI2MjYiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI0LDMiLz4KICA8cG9seWdvbiBwb2ludHM9IjcxNywyNDYgNzIwLDI1MiA3MTQsMjUyIiBmaWxsPSIjZGMyNjI2Ii8+CiAgPHRleHQgeD0iNTcwIiB5PSIzNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNkYzI2MjYiIGZvbnQtc2l6ZT0iOSI+Y2FjaGUgbWlzczogcmVhZCBmcm9tIERCPC90ZXh0PgoKICA8IS0tIFRUTCBMZWdlbmQgLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjQ0MCIgd2lkdGg9IjgyMCIgaGVpZ2h0PSI1MCIgcng9IjYiIGZpbGw9IndoaXRlIiBzdHJva2U9IiNlMmU4ZjAiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iNDU4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMSI+VFRMIFN0cmF0ZWd5PC90ZXh0PgogIDx0ZXh0IHg9IjUwIiB5PSI0NzgiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPnNlc3Npb24gSEFTSDogNGggaWRsZSBleHBpcnkgKEVYUElSRSByZXNldCBvbiBlYWNoIGFjY2Vzcyk8L3RleHQ+CiAgPHRleHQgeD0iMzEwIiB5PSI0NzgiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPm1lc3NhZ2UgTElTVDogMzBtaW4gKGFjdGl2ZSBjb252ZXJzYXRpb24gd2luZG93KTwvdGV4dD4KICA8dGV4dCB4PSI1ODAiIHk9IjQ3OCIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+dG9vbCBjYWNoZTogNW1pbiAgIGRpc3QgbG9jazogMzBzPC90ZXh0Pgo8L3N2Zz4=",
+          "alt": "Architecture diagram showing three tiers: API Client on the left, Claude Agent in the middle (with steps: load from Redis, fetch message history, call Claude API, write back to Redis, async write to PostgreSQL), Redis in the center (with HASH session data, LIST message history, STRING distributed lock, STREAM agent steps, JSON tool cache), and PostgreSQL on the right (conversations, messages, tool_calls tables). Arrows show read/write flows and TTL strategy annotations."
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The architecture shows three tiers. The agent reads session state and message history from Redis on every step. On a cache miss (new session or expired TTL), it falls back to PostgreSQL and warms the cache. On each write (new message or tool result), it writes to Redis synchronously then enqueues an async PostgreSQL write. PostgreSQL remains the durable source of truth for analytics, auditing, and cold session recovery."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use it"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Add Redis session caching when: agent response latency is dominated by database reads (profile first); the same conversation is accessed multiple times within a short window (agentic loops, streaming responses); or database connection pool exhaustion is observed during agent workload spikes. It is not needed when conversations are short (1–3 turns), when the PostgreSQL instance is co-located with the application (latency under 1ms), or when agent tasks are infrequent enough that database reads are not a bottleneck."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Install redis-py (Python) and define the key schema. Use a consistent naming convention for all Redis keys to make monitoring and eviction policies predictable:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import redis\nimport json\nimport hashlib\nfrom datetime import timedelta\n\n# Key naming conventions\ndef session_key(session_id: str) -> str:\n    return f\"session:{session_id}\"\n\ndef history_key(conversation_id: str) -> str:\n    return f\"hist:{conversation_id}\"\n\ndef lock_key(conversation_id: str) -> str:\n    return f\"lock:{conversation_id}\"\n\ndef tool_cache_key(tool_name: str, input_data: dict) -> str:\n    payload = json.dumps(input_data, sort_keys=True)\n    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]\n    return f\"tool:{tool_name}:{digest}\"\n\ndef steps_key(conversation_id: str) -> str:\n    return f\"steps:{conversation_id}\"\n\n# TTL constants\nSESSION_TTL_SECONDS   = 4 * 60 * 60   # 4 hours idle expiry\nHISTORY_TTL_SECONDS   = 30 * 60        # 30 minutes active window\nTOOL_CACHE_TTL_SECONDS = 5 * 60        # 5 minutes for tool results\nLOCK_TTL_SECONDS      = 30             # distributed lock TTL\n\nr = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Implement session state read and write methods that use the appropriate Redis commands for each data type:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def load_session(session_id: str) -> dict | None:\n    \"\"\"Load session metadata from Redis HASH. Returns None on cache miss.\"\"\"\n    data = r.hgetall(session_key(session_id))\n    if not data:\n        return None\n    # Refresh TTL on access (keep active sessions alive)\n    r.expire(session_key(session_id), SESSION_TTL_SECONDS)\n    return data\n\n\ndef save_session(session_id: str, fields: dict) -> None:\n    \"\"\"Write session metadata as a Redis HASH and set TTL.\"\"\"\n    r.hset(session_key(session_id), mapping={\n        k: json.dumps(v) if isinstance(v, (dict, list)) else str(v)\n        for k, v in fields.items()\n    })\n    r.expire(session_key(session_id), SESSION_TTL_SECONDS)\n\n\ndef get_recent_messages(conversation_id: str, count: int = 50) -> list[dict]:\n    \"\"\"Return the last `count` messages from the Redis LIST.\"\"\"\n    raw = r.lrange(history_key(conversation_id), -count, -1)\n    r.expire(history_key(conversation_id), HISTORY_TTL_SECONDS)\n    return [json.loads(m) for m in raw]\n\n\ndef append_message(conversation_id: str, message: dict) -> None:\n    \"\"\"Append a message to the Redis LIST and refresh TTL.\"\"\"\n    r.rpush(history_key(conversation_id), json.dumps(message))\n    r.expire(history_key(conversation_id), HISTORY_TTL_SECONDS)\n\n\ndef acquire_lock(conversation_id: str) -> bool:\n    \"\"\"Acquire a distributed lock. Returns True if acquired.\"\"\"\n    result = r.set(\n        lock_key(conversation_id),\n        '1',\n        nx=True,          # Only set if Not eXists\n        ex=LOCK_TTL_SECONDS\n    )\n    return result is True\n\n\ndef release_lock(conversation_id: str) -> None:\n    r.delete(lock_key(conversation_id))\n\n\ndef get_cached_tool_result(tool_name: str, input_data: dict) -> dict | None:\n    \"\"\"Return cached tool result or None.\"\"\"\n    key = tool_cache_key(tool_name, input_data)\n    raw = r.get(key)\n    return json.loads(raw) if raw else None\n\n\ndef cache_tool_result(tool_name: str, input_data: dict, result: dict) -> None:\n    \"\"\"Cache a tool result for 5 minutes.\"\"\"\n    key = tool_cache_key(tool_name, input_data)\n    r.set(key, json.dumps(result), ex=TOOL_CACHE_TTL_SECONDS)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Redis Streams for agent step logging"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import time\n\ndef log_agent_step(conversation_id: str, step: dict) -> None:\n    \"\"\"Log an agent step to a Redis Stream for observability.\"\"\"\n    r.xadd(\n        steps_key(conversation_id),\n        {\n            'tool_name':   step.get('tool_name', ''),\n            'status':      step.get('status', 'unknown'),\n            'duration_ms': str(step.get('duration_ms', 0)),\n            'ts':          str(int(time.time() * 1000)),\n        },\n        maxlen=1000,   # Keep last 1000 steps per conversation\n        approximate=True\n    )\n\n\ndef get_agent_steps(conversation_id: str, count: int = 50) -> list[dict]:\n    \"\"\"Read recent agent steps from the Stream.\"\"\"\n    entries = r.xrevrange(steps_key(conversation_id), count=count)\n    return [\n        {'id': entry_id, **{k: v for k, v in fields.items()}}\n        for entry_id, fields in entries\n    ]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Complete agentic loop with caching"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import anthropic\nimport time\n\nclient = anthropic.Anthropic()\n\ndef run_agent_step(session_id: str, conversation_id: str, user_message: str) -> str:\n    \"\"\"\n    One iteration of the agentic loop: load context, call Claude,\n    handle tool calls, append results, return final text.\n    \"\"\"\n    if not acquire_lock(conversation_id):\n        raise RuntimeError(\"Conversation locked by concurrent request\")\n\n    try:\n        # Load or warm session metadata\n        session = load_session(session_id)\n        if session is None:\n            session = warm_session_from_db(session_id)  # DB fallback\n\n        # Load recent messages (from Redis LIST)\n        messages = get_recent_messages(conversation_id, count=50)\n        messages.append({'role': 'user', 'content': user_message})\n\n        # Append user message to cache immediately\n        append_message(conversation_id, {'role': 'user', 'content': user_message})\n\n        # Call Claude\n        response = client.messages.create(\n            model=session.get('model', 'claude-opus-4-5'),\n            max_tokens=4096,\n            system=session.get('system_prompt', ''),\n            messages=messages,\n            tools=[...],  # your tool definitions\n        )\n\n        # Handle tool calls\n        while response.stop_reason == 'tool_use':\n            tool_results = []\n            for block in response.content:\n                if block.type == 'tool_use':\n                    # Check tool result cache\n                    cached = get_cached_tool_result(block.name, block.input)\n                    if cached:\n                        result = cached\n                    else:\n                        start = time.monotonic()\n                        result = execute_tool(block.name, block.input)\n                        duration_ms = int((time.monotonic() - start) * 1000)\n                        cache_tool_result(block.name, block.input, result)\n                        log_agent_step(conversation_id, {\n                            'tool_name': block.name,\n                            'status': 'success',\n                            'duration_ms': duration_ms,\n                        })\n                    tool_results.append({\n                        'type': 'tool_result',\n                        'tool_use_id': block.id,\n                        'content': json.dumps(result),\n                    })\n\n            # Append assistant turn + tool results to cache\n            assistant_content = [b.model_dump() for b in response.content]\n            append_message(conversation_id, {'role': 'assistant', 'content': assistant_content})\n            append_message(conversation_id, {'role': 'user', 'content': tool_results})\n\n            messages = get_recent_messages(conversation_id, count=50)\n            response = client.messages.create(\n                model=session.get('model', 'claude-opus-4-5'),\n                max_tokens=4096,\n                system=session.get('system_prompt', ''),\n                messages=messages,\n                tools=[...],\n            )\n\n        final_text = next(\n            (b.text for b in response.content if hasattr(b, 'text')), ''\n        )\n        append_message(conversation_id, {'role': 'assistant', 'content': final_text})\n\n        # Update session token count\n        total_tokens = int(session.get('token_count', 0)) + response.usage.input_tokens + response.usage.output_tokens\n        save_session(session_id, {'token_count': total_tokens, 'last_active_at': str(int(time.time()))})\n\n        # Enqueue async PostgreSQL write\n        enqueue_db_write(conversation_id, session_id)\n\n        return final_text\n    finally:\n        release_lock(conversation_id)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A code review agent processes 2,000 pull requests per day. Each PR triggers an agent run with 5–15 tool calls (fetch diff, read files, search codebase, post comments). Without caching, each agent run makes 5–15 PostgreSQL reads during the agentic loop, saturating the database connection pool at peak hours. After adding Redis caching: context loads drop from 8ms to 0.3ms; database connection usage drops by 80%; the entire agent loop completes 40% faster; and tool result caching eliminates redundant file reads when the same file is referenced by multiple tool calls in the same session."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The TTL strategy was tuned empirically: 30 minutes for message history (PR review sessions rarely exceed 25 minutes) and 4 hours for session metadata (the agent may be paused and resumed if CI checks take time). Tool result cache TTL of 5 minutes handles idempotent file reads without serving stale content after the PR is updated."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Storing the entire message history in a Redis STRING"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Using SET/GET on a single JSON blob for the message array requires deserializing the entire history on every read and re-serializing the entire array on every append. As conversations grow, this becomes O(N) per operation. The LIST data structure gives O(1) RPUSH and O(count) LRANGE reads — the fundamental operations of a message history."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# WRONG: serialize entire history as a string\nr.set(f\"hist:{conv_id}\", json.dumps(all_messages))  # O(N) on every write\nmessages = json.loads(r.get(f\"hist:{conv_id}\"))     # O(N) on every read\n\n# RIGHT: use LIST for O(1) append and O(count) range read\nr.rpush(f\"hist:{conv_id}\", json.dumps(new_message))  # O(1)\nrecent = r.lrange(f\"hist:{conv_id}\", -50, -1)        # O(50) regardless of history length"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Not resetting TTL on access"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you set a 30-minute TTL at write time and never reset it, an active conversation whose last write was 29 minutes ago will expire 60 seconds later, mid-session. Reset the TTL with EXPIRE on every read and write to implement a true idle-based expiry — the session expires only after 30 minutes of no activity."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Skipping the distributed lock"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When two concurrent HTTP requests (a user message and a streaming SSE reconnect) both load conversation context, call Claude, and try to append the response, they can interleave messages: user1→assistant1→user1→user2→assistant2 instead of user1→assistant1→user2→assistant2. The SET NX EX distributed lock prevents this by serializing writes to the same conversation."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a single Redis connection pool shared across the application, configured with max_connections=50 and socket_keepalive=True to prevent connection leak."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set a maxmemory limit on Redis (e.g. 4GB) and use the volatile-lru eviction policy so only keys with TTLs are evicted — session keys with TTLs will be evicted before permanent keys."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pipeline multiple Redis commands in a single round-trip where possible: PIPELINE([HGETALL session_key, LRANGE history_key, -50, -1]) reduces latency by batching the two most common reads."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor eviction_rate and keyspace_hits vs keyspace_misses in Redis metrics. A hit rate below 90% indicates TTLs are too short or memory is too constrained."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use Redis Cluster or Sentinel for production deployments to avoid single-node Redis being a single point of failure for all active sessions."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A single Redis node handles 100,000+ operations per second at sub-millisecond latency on modest hardware (4 vCPUs, 8GB RAM). At 10,000 concurrent agentic sessions with 5 operations each per agent step, the Redis load is 50,000 ops/sec — well within a single node's capacity. At 100,000 concurrent sessions, Redis Cluster with 3 shards distributes the keyspace and load proportionally."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory sizing: a typical session hash uses ~1KB; a 50-message history list uses ~20KB (400 bytes per message). At 10,000 active sessions: 10,000 × 21KB ≈ 210MB. Include overhead (Redis bookkeeping, Lua scripts, Pub/Sub buffers) and provision 2× headroom, giving a target of ~512MB for 10,000 sessions. A 4GB Redis instance comfortably supports ~80,000 concurrent sessions."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "redis-py: the official Python client. Use redis.asyncio.Redis for async frameworks (FastAPI, aiohttp). Supports connection pooling and Sentinel."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ioredis (Node.js): full-featured client with Cluster support, Lua scripting, and built-in retry logic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "RedisInsight: GUI for inspecting keys, monitoring memory, and profiling commands. Essential for debugging TTL misconfigurations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "AWS ElastiCache / GCP Memorystore: managed Redis services that handle replication, failover, and patch management. Multi-AZ mode provides automatic failover in under 60 seconds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Redis JSON module (RedisJSON): extends Redis with native JSON storage so complex session objects can be partially updated with JSONPath without full serialize/deserialize cycles."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Comparison with alternatives"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cache strategy"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Read latency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Consistency"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Operational cost"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Best for"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Redis (this doc)",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 1ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Eventual (5s lag)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium (extra service)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "High-throughput agentic loops"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "In-process dict",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 0.01ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Strong (single process)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (no extra service)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Single-process, low concurrency"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Memcached",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 1ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Eventual"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Simple key-value, no TTL reset needed"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PostgreSQL only",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "3–10ms"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Strong (ACID)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low (no extra service)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Low-concurrency, simple agents"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Authentication: always enable Redis AUTH (requirepass) and use TLS in transit (stunnel or Redis 6+ native TLS). Never expose Redis publicly — it should only be accessible from application servers on a private VPC subnet."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Persistence: for session state that must survive Redis restarts, enable AOF persistence with appendfsync=everysec. This adds ~10% write overhead but guarantees at most 1 second of data loss on crash. For purely ephemeral caches where cache misses fall back to PostgreSQL, persistence can be disabled to maximize throughput."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Data isolation: prefix keys with a tenant or environment identifier (e.g. prod:session:{id} vs staging:session:{id}) to prevent cross-environment contamination. In multi-tenant systems, consider separate Redis databases (SELECT N) or separate Redis instances per tenant tier if isolation is a hard compliance requirement."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "# Health check: verify Redis connectivity and write capability\ndef redis_health_check() -> dict:\n    try:\n        r.set('health:ping', '1', ex=10)\n        val = r.get('health:ping')\n        info = r.info('memory')\n        return {\n            'status': 'ok',\n            'ping': val == '1',\n            'used_memory_mb': info['used_memory'] // (1024 * 1024),\n            'maxmemory_mb': info.get('maxmemory', 0) // (1024 * 1024),\n            'evicted_keys': info.get('evicted_keys', 0),\n        }\n    except redis.RedisError as e:\n        return {'status': 'error', 'error': str(e)}"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use Redis LIST (RPUSH/LRANGE) for message history — O(1) append, O(count) range read — never store the full history as a serialized STRING."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use Redis HASH for session metadata (HSET/HGETALL) so individual fields can be updated atomically without touching the full session object."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reset TTL on every access (EXPIRE after each read) to implement idle-based expiry — sessions expire only after the TTL of inactivity, not from first creation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Acquire a distributed lock (SET NX EX) before writing to a conversation to prevent interleaved messages from concurrent requests."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache tool call results content-addressed by (tool_name, input hash) to avoid re-executing idempotent tools within the same session."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Write to Redis synchronously and to PostgreSQL asynchronously (write-through), keeping Redis as the hot tier and PostgreSQL as the durable source of truth."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use Redis Streams for agent step logging — XADD with MAXLEN provides a fixed-size audit trail without growing unbounded."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

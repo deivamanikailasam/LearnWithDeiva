@@ -1,1 +1,1652 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-19T06:27:01.662Z","doc":{"type":"doc","content":[]}}
+{
+  "format": "tiptap/v1",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing a vector database for a RAG system built on Claude is not primarily a benchmarking exercise — it is an architectural fit analysis. The right database depends on where your application sits on the axes of scale, operational complexity, hybrid search requirements, and existing infrastructure. This document provides a rigorous comparison of four widely-used options — pgvector, Pinecone, Weaviate, and Qdrant — with enough depth to make an informed decision for production use."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A vector database stores high-dimensional embedding vectors alongside metadata payloads and supports approximate nearest-neighbour (ANN) search: given a query vector, return the K most similar vectors from the corpus in sub-second time. In RAG systems built on Claude, the corpus is a set of document chunks, each embedded with a model like text-embedding-3-large or voyage-3, and the query is the user's question embedded with the same model."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The four databases covered here take different architectural approaches to the same core problem. pgvector is a PostgreSQL extension — it adds vector column types and ANN index operators to a relational database. Pinecone is a fully managed cloud-native service built from scratch for vector workloads. Weaviate is an open-source database with a built-in hybrid search engine combining BM25 keyword search with ANN vector search. Qdrant is a high-performance vector database written in Rust, designed for maximum throughput and rich payload filtering."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The vector database is the retrieval backbone of every RAG system — its recall accuracy, query latency, and filtering capabilities directly determine answer quality. A poor choice manifests as: irrelevant chunks retrieved because the index cannot filter by metadata (wrong tenant, stale documents); slow queries that add 500ms+ to every Claude API call; operational failures when the database cannot scale to production vector counts; or excessive infrastructure costs from an over-engineered solution for a small corpus."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each database excels in a different regime. The decision is consequential because migrating between vector databases requires re-embedding all documents, rebuilding indexes, and re-testing recall — a significant engineering investment once you are in production."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "pgvector"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "pgvector is a PostgreSQL extension (github.com/pgvector/pgvector) that adds a vector column type and two ANN index types: IVFFLAT (inverted file index, analogous to k-means clustering of the vector space) and HNSW (hierarchical navigable small world graph, higher recall but more memory). It is installed with CREATE EXTENSION vector and used as a first-class PostgreSQL data type."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- Install extension (once per database)\nCREATE EXTENSION vector;\n\n-- Create table with embedding column\nCREATE TABLE document_chunks (\n    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    document_id UUID NOT NULL,\n    tenant_id   UUID NOT NULL,\n    content     TEXT NOT NULL,\n    embedding   vector(1536),   -- dimension must match your embedding model\n    metadata    JSONB NOT NULL DEFAULT '{}',\n    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\n-- HNSW index: higher recall, more memory (~2GB per 1M 1536-d vectors)\n-- m=16 (connections per node), ef_construction=64 (build-time accuracy)\nCREATE INDEX ON document_chunks\nUSING hnsw (embedding vector_cosine_ops)\nWITH (m = 16, ef_construction = 64);\n\n-- Partial index for a specific tenant (faster filtered queries)\nCREATE INDEX ON document_chunks\nUSING hnsw (embedding vector_cosine_ops)\nWITH (m = 16, ef_construction = 64)\nWHERE tenant_id = 'acme-corp-uuid';\n\n-- Query: find 10 nearest chunks for a tenant\nSELECT id, content, 1 - (embedding <=> $query_vec::vector) AS score\nFROM document_chunks\nWHERE tenant_id = $tenant_id\nORDER BY embedding <=> $query_vec::vector\nLIMIT 10;"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "IVFFLAT divides the vector space into lists (nlist, typically sqrt(N)) and probes nprobe lists at query time. It builds faster and uses less memory than HNSW but has lower recall at the same ef_search value. HNSW is generally preferred for recall-sensitive RAG workloads. The sweet spot for pgvector is 1M–10M vectors; beyond 10M, index build time and memory become constraints."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pros and cons"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: No additional infrastructure — vectors live in the same PostgreSQL instance as your application data, enabling JOIN between embeddings and relational tables (e.g. filter by user_id from the users table in a single query)."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Full SQL expressiveness for filtering — any SQL WHERE clause works, not just the limited filter DSLs of purpose-built vector databases."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: ACID transactions — embedding upserts and metadata updates are atomic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: Index must fit in shared_buffers or be read from disk — memory-constrained instances see performance degradation at large index sizes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: No built-in hybrid BM25 search — requires a separate tsvector column and manual query blending."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: HNSW index build is CPU-intensive and can take hours for tens of millions of vectors."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pinecone"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pinecone is a fully managed, cloud-native vector database with a simple REST and SDK API. It has no open-source version — you use the managed service. It offers two deployment modes: serverless (pay-per-query, autoscaling, no dedicated infrastructure) and pod-based (dedicated pods with predictable performance and cost). Pinecone handles index building, sharding, replication, and failover automatically."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pinecone import Pinecone, ServerlessSpec\nimport anthropic\n\npc = Pinecone(api_key=\"YOUR_API_KEY\")\n\n# Create a serverless index\npc.create_index(\n    name=\"rag-index\",\n    dimension=1536,          # must match your embedding model\n    metric=\"cosine\",\n    spec=ServerlessSpec(cloud=\"aws\", region=\"us-east-1\")\n)\n\nindex = pc.Index(\"rag-index\")\n\n# Upsert vectors\nindex.upsert(\n    vectors=[\n        {\n            \"id\": \"chunk-001\",\n            \"values\": [0.1, 0.2, ...],   # 1536-d embedding\n            \"metadata\": {\n                \"tenant_id\": \"acme\",\n                \"document_id\": \"doc-42\",\n                \"content\": \"The first 200 chars of the chunk for display...\",\n                \"created_at\": \"2025-01-15T10:00:00Z\",\n            }\n        }\n    ],\n    namespace=\"acme-tenant\"   # namespace for tenant isolation\n)\n\n# Query with metadata filter\nresults = index.query(\n    vector=[0.1, 0.2, ...],\n    top_k=10,\n    namespace=\"acme-tenant\",\n    filter={\"document_id\": {\"$in\": [\"doc-42\", \"doc-43\"]}},\n    include_metadata=True\n)\n\nfor match in results.matches:\n    print(f\"score={match.score:.3f}  content={match.metadata['content'][:80]}\")"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pinecone's namespace feature provides logical tenant isolation within a single index — queries are scoped to a namespace, and different tenants cannot see each other's vectors. Metadata filtering uses a JSON filter DSL supporting $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $and, $or. Filters are applied pre-fetch (inside the ANN search), not post-fetch, so they do not degrade recall the way a post-filter would."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Zero operational overhead — no index tuning, no capacity planning, automatic scaling."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Fast time-to-production — a working RAG system can be built in hours with the Python SDK."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: Cost scales steeply with vector count and query volume. At 50M vectors, pod-based deployment can cost $4,000–$8,000/month."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: No SQL — metadata filtering is limited to the Pinecone filter DSL; complex cross-field queries may not be expressible."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: Vendor lock-in — migrating away requires re-uploading all vectors to a different service."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Weaviate"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Weaviate is an open-source vector database that uniquely integrates hybrid search (BM25 keyword search + vector ANN) as a first-class feature. It can be self-hosted (Docker, Kubernetes) or used as Weaviate Cloud (managed). Its query language is GraphQL, and it has a rich REST API and Python client. Weaviate stores objects (documents) alongside their vectors and supports automatic vectorization via module plugins."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import weaviate\nimport weaviate.classes as wvc\n\nclient = weaviate.connect_to_weaviate_cloud(\n    cluster_url=\"https://your-cluster.weaviate.network\",\n    auth_credentials=wvc.init.Auth.api_key(\"YOUR_API_KEY\"),\n)\n\n# Define collection (schema)\nclient.collections.create(\n    name=\"DocumentChunk\",\n    vectorizer_config=wvc.config.Configure.Vectorizer.none(),  # BYO vectors\n    properties=[\n        wvc.config.Property(name=\"content\",     data_type=wvc.config.DataType.TEXT),\n        wvc.config.Property(name=\"tenant_id\",   data_type=wvc.config.DataType.TEXT),\n        wvc.config.Property(name=\"document_id\", data_type=wvc.config.DataType.TEXT),\n        wvc.config.Property(name=\"created_at\",  data_type=wvc.config.DataType.DATE),\n    ],\n)\n\nchunks = client.collections.get(\"DocumentChunk\")\n\n# Insert with vector\nchunks.data.insert(\n    properties={\n        \"content\":     \"The contract clause states...\",\n        \"tenant_id\":   \"acme\",\n        \"document_id\": \"contract-42\",\n    },\n    vector=[0.1, 0.2, ...]  # 1536-d embedding\n)\n\n# Hybrid search (BM25 + vector, alpha=0 is pure BM25, alpha=1 is pure vector)\nresults = chunks.query.hybrid(\n    query=\"termination clause penalty\",\n    vector=[0.1, 0.2, ...],\n    alpha=0.7,          # 70% vector, 30% BM25\n    limit=10,\n    filters=wvc.query.Filter.by_property(\"tenant_id\").equal(\"acme\"),\n    return_properties=[\"content\", \"document_id\"],\n)\n\nfor obj in results.objects:\n    print(f\"score={obj.metadata.score:.3f}  {obj.properties['content'][:80]}\")\n\nclient.close()"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Hybrid search (BM25 + vector) is built-in and tunable with the alpha parameter — no need to run a separate Elasticsearch or BM25 service."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Multi-tenancy with data isolation via Weaviate's tenant feature — each tenant gets an isolated shard."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: GraphQL query interface has a learning curve and is more verbose than SQL or Pinecone's Python SDK."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: Memory usage is higher than Qdrant at equivalent scale due to HNSW graph overhead and BM25 inverted index."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Qdrant"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Qdrant is an open-source vector database written in Rust, designed for maximum query performance and memory efficiency. It uses HNSW for ANN search and has a sophisticated payload indexing system where metadata fields can be indexed for efficient filtering inside the ANN search (not post-filter). It is available as a self-hosted binary/Docker image or as Qdrant Cloud (managed)."
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from qdrant_client import QdrantClient\nfrom qdrant_client.models import (\n    Distance, VectorParams, PointStruct,\n    Filter, FieldCondition, MatchValue, Range\n)\n\nclient = QdrantClient(url=\"http://localhost:6333\")\n\n# Create collection\nclient.create_collection(\n    collection_name=\"document_chunks\",\n    vectors_config=VectorParams(size=1536, distance=Distance.COSINE),\n)\n\n# Create payload index for efficient filtered search\nclient.create_payload_index(\n    collection_name=\"document_chunks\",\n    field_name=\"tenant_id\",\n    field_schema=\"keyword\",\n)\nclient.create_payload_index(\n    collection_name=\"document_chunks\",\n    field_name=\"created_at\",\n    field_schema=\"datetime\",\n)\n\n# Upsert vectors\nclient.upsert(\n    collection_name=\"document_chunks\",\n    points=[\n        PointStruct(\n            id=\"550e8400-e29b-41d4-a716-446655440000\",\n            vector=[0.1, 0.2, ...],\n            payload={\n                \"tenant_id\":   \"acme\",\n                \"document_id\": \"doc-42\",\n                \"content\":     \"The contract clause states...\",\n                \"created_at\":  \"2025-01-15T10:00:00Z\",\n            }\n        )\n    ]\n)\n\n# Filtered ANN search\nresults = client.query_points(\n    collection_name=\"document_chunks\",\n    query=[0.1, 0.2, ...],\n    query_filter=Filter(\n        must=[\n            FieldCondition(key=\"tenant_id\", match=MatchValue(value=\"acme\")),\n            FieldCondition(\n                key=\"created_at\",\n                range=Range(gte=\"2025-01-01T00:00:00Z\")\n            ),\n        ]\n    ),\n    limit=10,\n    with_payload=True,\n)\n\nfor point in results.points:\n    print(f\"score={point.score:.3f}  {point.payload['content'][:80]}\")"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Payload indexing for filtering inside HNSW — filtered queries maintain high recall without scanning all vectors."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Written in Rust — lower memory usage and higher query throughput than Java/Python-based alternatives at equivalent hardware."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pro: Quantization support (scalar, product, binary) reduces memory footprint by 4–32× with controlled recall trade-offs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: No native BM25 hybrid search — requires an external BM25 index if keyword search is needed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Con: Smaller ecosystem and community than Pinecone or Weaviate."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODYwIiBoZWlnaHQ9IjU0MCIgdmlld0JveD0iMCAwIDg2MCA1NDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIj4KICA8cmVjdCB3aWR0aD0iODYwIiBoZWlnaHQ9IjU0MCIgZmlsbD0iI2Y4ZmFmYyIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iMjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiIGZvbnQtd2VpZ2h0PSJib2xkIiBmaWxsPSIjMWUyOTNiIj5WZWN0b3IgRGF0YWJhc2UgRGVjaXNpb24gRnJhbWV3b3JrIGZvciBSQUcgd2l0aCBDbGF1ZGU8L3RleHQ+CgogIDwhLS0gRGVjaXNpb24gdHJlZSAtLT4KICA8cmVjdCB4PSIzNDAiIHk9IjQ1IiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjQwIiByeD0iNiIgZmlsbD0iIzFlMjkzYiIvPgogIDx0ZXh0IHg9IjQzMCIgeT0iNzAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IndoaXRlIiBmb250LXdlaWdodD0iYm9sZCIgZm9udC1zaXplPSIxMiI+U3RhcnQ6IENob29zZSBWZWN0b3IgREI8L3RleHQ+CgogIDwhLS0gUXVlc3Rpb24gMTogYWxyZWFkeSB1c2luZyBwb3N0Z3Jlcz8gLS0+CiAgPHJlY3QgeD0iMjkwIiB5PSIxMTUiIHdpZHRoPSIyODAiIGhlaWdodD0iNDAiIHJ4PSIyMCIgZmlsbD0iI2RiZWFmZSIgc3Ryb2tlPSIjM2I4MmY2IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI0MzAiIHk9IjE0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzFlNDBhZiIgZm9udC1zaXplPSIxMSI+QWxyZWFkeSB1c2luZyBQb3N0Z3JlU1FMPzwvdGV4dD4KICA8bGluZSB4MT0iNDMwIiB5MT0iODUiIHgyPSI0MzAiIHkyPSIxMTMiIHN0cm9rZT0iIzZiNzI4MCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8cG9seWdvbiBwb2ludHM9IjQyNiwxMDkgNDMwLDExNSA0MzQsMTA5IiBmaWxsPSIjNmI3MjgwIi8+CgogIDwhLS0gWWVzIC0+IHBndmVjdG9yIC0tPgogIDx0ZXh0IHg9IjI5NSIgeT0iMTYzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMTBiOTgxIiBmb250LXNpemU9IjEwIj5ZRVM8L3RleHQ+CiAgPGxpbmUgeDE9IjMwMCIgeTE9IjE1NSIgeDI9IjE0MCIgeTI9IjE5NSIgc3Ryb2tlPSIjMTBiOTgxIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxyZWN0IHg9IjIwIiB5PSIxOTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iODAiIHJ4PSI2IiBmaWxsPSIjZDFmYWU1IiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjEzNSIgeT0iMjE1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzA2NWY0NiIgZm9udC1zaXplPSIxMiI+cGd2ZWN0b3I8L3RleHQ+CiAgPHRleHQgeD0iMTM1IiB5PSIyMzIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPlBvc3RncmVTUUwgZXh0ZW5zaW9uPC90ZXh0PgogIDx0ZXh0IHg9IjEzNSIgeT0iMjQ4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj5JVkZGTEFUIC8gSE5TVyBpbmRleGVzPC90ZXh0PgogIDx0ZXh0IHg9IjEzNSIgeT0iMjY0IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj4xTeKAkzEwTSB2ZWN0b3JzIHN3ZWV0IHNwb3Q8L3RleHQ+CgogIDwhLS0gTm8gLT4gUXVlc3Rpb24gMiAtLT4KICA8dGV4dCB4PSI1NjUiIHk9IjE2MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2RjMjYyNiIgZm9udC1zaXplPSIxMCI+Tk88L3RleHQ+CiAgPGxpbmUgeDE9IjU2NSIgeTE9IjE1NSIgeDI9IjU2NSIgeTI9IjE5NSIgc3Ryb2tlPSIjZGMyNjI2IiBzdHJva2Utd2lkdGg9IjEuNSIvPgoKICA8IS0tIFF1ZXN0aW9uIDI6IE5lZWQgemVybyBpbmZyYT8gLS0+CiAgPHJlY3QgeD0iNDIwIiB5PSIxOTUiIHdpZHRoPSIyOTAiIGhlaWdodD0iNDAiIHJ4PSIyMCIgZmlsbD0iI2ZlZjNjNyIgc3Ryb2tlPSIjZjU5ZTBiIiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI1NjUiIHk9IjIyMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzkyNDAwZSIgZm9udC1zaXplPSIxMSI+TmVlZCBmdWxseSBtYW5hZ2VkIC8gemVybyBpbmZyYT88L3RleHQ+CiAgPGxpbmUgeDE9IjU2NSIgeTE9IjE1NSIgeDI9IjU2NSIgeTI9IjE5MyIgc3Ryb2tlPSIjNmI3MjgwIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxwb2x5Z29uIHBvaW50cz0iNTYxLDE4OSA1NjUsMTk1IDU2OSwxODkiIGZpbGw9IiM2YjcyODAiLz4KCiAgPCEtLSBZZXMgLT4gUGluZWNvbmUgLS0+CiAgPHRleHQgeD0iNDMwIiB5PSIyNDMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxMGI5ODEiIGZvbnQtc2l6ZT0iMTAiPllFUzwvdGV4dD4KICA8bGluZSB4MT0iNDMwIiB5MT0iMjM1IiB4Mj0iMjcwIiB5Mj0iMzEwIiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHJlY3QgeD0iMTcwIiB5PSIzMTAiIHdpZHRoPSIyMDAiIGhlaWdodD0iODAiIHJ4PSI2IiBmaWxsPSIjZmVmM2M3IiBzdHJva2U9IiNmNTllMGIiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjI3MCIgeT0iMzMwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzkyNDAwZSIgZm9udC1zaXplPSIxMiI+UGluZWNvbmU8L3RleHQ+CiAgPHRleHQgeD0iMjcwIiB5PSIzNDciIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPk1hbmFnZWQgKyBzZXJ2ZXJsZXNzPC90ZXh0PgogIDx0ZXh0IHg9IjI3MCIgeT0iMzYzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj5GYXN0IEFOTiwgc2ltcGxlIEFQSTwvdGV4dD4KICA8dGV4dCB4PSIyNzAiIHk9IjM3OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+Q29zdCByaXNlcyBhdCBzY2FsZTwvdGV4dD4KCiAgPCEtLSBObyAtPiBRdWVzdGlvbiAzIC0tPgogIDx0ZXh0IHg9IjcwMCIgeT0iMjQzIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZGMyNjI2IiBmb250LXNpemU9IjEwIj5OTzwvdGV4dD4KICA8bGluZSB4MT0iNzAwIiB5MT0iMjM1IiB4Mj0iNzAwIiB5Mj0iMzEwIiBzdHJva2U9IiNkYzI2MjYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CgogIDwhLS0gUXVlc3Rpb24gMzogaHlicmlkIHNlYXJjaCBCTTI1PyAtLT4KICA8cmVjdCB4PSI1NzAiIHk9IjMxMCIgd2lkdGg9IjI2MCIgaGVpZ2h0PSI0MCIgcng9IjIwIiBmaWxsPSIjZWRlOWZlIiBzdHJva2U9IiM4YjVjZjYiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjcwMCIgeT0iMzI2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNWIyMWI2IiBmb250LXNpemU9IjExIj5OZWVkIGh5YnJpZCBCTTI1ICsgdmVjdG9yIHNlYXJjaDwvdGV4dD4KICA8dGV4dCB4PSI3MDAiIHk9IjM0MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzViMjFiNiIgZm9udC1zaXplPSIxMSI+YnVpbHQtaW4/PC90ZXh0PgogIDxwb2x5Z29uIHBvaW50cz0iNjk2LDMwNiA3MDAsMzEyIDcwNCwzMDYiIGZpbGw9IiM2YjcyODAiLz4KCiAgPCEtLSBZZXMgLT4gV2VhdmlhdGUgLS0+CiAgPHRleHQgeD0iNTc1IiB5PSIzNTgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMxMGI5ODEiIGZvbnQtc2l6ZT0iMTAiPllFUzwvdGV4dD4KICA8bGluZSB4MT0iNTgwIiB5MT0iMzUwIiB4Mj0iNDgwIiB5Mj0iNDE1IiBzdHJva2U9IiMxMGI5ODEiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHJlY3QgeD0iMzgwIiB5PSI0MTUiIHdpZHRoPSIyMDAiIGhlaWdodD0iODAiIHJ4PSI2IiBmaWxsPSIjZWRlOWZlIiBzdHJva2U9IiM4YjVjZjYiIHN0cm9rZS13aWR0aD0iMiIvPgogIDx0ZXh0IHg9IjQ4MCIgeT0iNDM1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iIzViMjFiNiIgZm9udC1zaXplPSIxMiI+V2VhdmlhdGU8L3RleHQ+CiAgPHRleHQgeD0iNDgwIiB5PSI0NTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPkh5YnJpZCBCTTI1ICsgdmVjdG9yPC90ZXh0PgogIDx0ZXh0IHg9IjQ4MCIgeT0iNDY4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjMzc0MTUxIiBmb250LXNpemU9IjEwIj5HcmFwaFFMIHF1ZXJ5IGludGVyZmFjZTwvdGV4dD4KICA8dGV4dCB4PSI0ODAiIHk9IjQ4NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+QXV0by1zY2hlbWEsIHJpY2ggZmlsdGVyaW5nPC90ZXh0PgoKICA8IS0tIE5vIC0+IFFkcmFudCAtLT4KICA8dGV4dCB4PSI4MjQiIHk9IjM1OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2RjMjYyNiIgZm9udC1zaXplPSIxMCI+Tk88L3RleHQ+CiAgPGxpbmUgeDE9IjgyMCIgeTE9IjM1MCIgeDI9IjcyMCIgeTI9IjQxNSIgc3Ryb2tlPSIjZGMyNjI2IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxyZWN0IHg9IjYyMCIgeT0iNDE1IiB3aWR0aD0iMjIwIiBoZWlnaHQ9IjgwIiByeD0iNiIgZmlsbD0iI2ZlZTJlMiIgc3Ryb2tlPSIjZWY0NDQ0IiBzdHJva2Utd2lkdGg9IjIiLz4KICA8dGV4dCB4PSI3MzAiIHk9IjQzNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IiM3ZjFkMWQiIGZvbnQtc2l6ZT0iMTIiPlFkcmFudDwvdGV4dD4KICA8dGV4dCB4PSI3MzAiIHk9IjQ1MiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+UnVzdCwgaGlnaCBwZXJmb3JtYW5jZTwvdGV4dD4KICA8dGV4dCB4PSI3MzAiIHk9IjQ2OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+UGF5bG9hZCBpbmRleGluZyArIGZpbHRlcmluZzwvdGV4dD4KICA8dGV4dCB4PSI3MzAiIHk9IjQ4NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzM3NDE1MSIgZm9udC1zaXplPSIxMCI+U2VsZi1ob3N0IG9yIFFkcmFudCBDbG91ZDwvdGV4dD4KCiAgPCEtLSBTY2FsZSBndWlkZSBhdCBib3R0b20gLS0+CiAgPHJlY3QgeD0iMjAiIHk9IjUxMCIgd2lkdGg9IjgyMCIgaGVpZ2h0PSIyMiIgcng9IjQiIGZpbGw9IiNmMWY1ZjkiIHN0cm9rZT0iI2UyZThmMCIvPgogIDx0ZXh0IHg9IjMwIiB5PSI1MjYiIGZpbGw9IiMzNzQxNTEiIGZvbnQtc2l6ZT0iMTAiPlNjYWxlIGd1aWRlOiBwZ3ZlY3RvciAmbHQ7MTBNICB8ICBQaW5lY29uZSAxME0rIChtYW5hZ2VkKSAgfCAgV2VhdmlhdGUgNTBNKyAoaHlicmlkKSAgfCAgUWRyYW50IDEwME0rIChzZWxmLWhvc3RlZCwgbWF4IHBlcmYpPC90ZXh0Pgo8L3N2Zz4=",
+          "alt": "Decision tree for choosing a vector database for RAG with Claude. Starting at 'Choose Vector DB', first branch: 'Already using PostgreSQL?' — Yes leads to pgvector (PostgreSQL extension, IVFFLAT/HNSW, 1M-10M sweet spot); No leads to second branch: 'Need fully managed/zero infra?' — Yes leads to Pinecone (managed, serverless, fast ANN); No leads to third branch: 'Need hybrid BM25+vector search built-in?' — Yes leads to Weaviate (hybrid BM25+vector, GraphQL); No leads to Qdrant (Rust, high performance, payload indexing). Bottom scale guide shows scale suitability for each."
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The decision tree surfaces the primary selection criteria in priority order: existing infrastructure compatibility first (pgvector if already on PostgreSQL), then operational constraints (Pinecone if zero infra is required), then retrieval feature requirements (Weaviate for hybrid BM25+vector), and finally performance requirements at scale (Qdrant for high-throughput, large-scale deployments)."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use it"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Criterion"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "pgvector"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pinecone"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Weaviate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Qdrant"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Corpus size"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 10M vectors"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Any (managed)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "< 100M vectors"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "100M+ vectors"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Operational overhead"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Minimal (Postgres already managed)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Zero (fully managed)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium (K8s or Cloud)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Medium (self-host) or low (Cloud)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hybrid search"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Manual (tsvector + vector blend)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "No native BM25"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Built-in (alpha tunable)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "External BM25 needed"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Filtering"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Full SQL"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Filter DSL (good)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Where clauses (good)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Payload indexes (excellent)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Cost at 50M vectors"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~$200/mo (RDS)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "$4,000–$8,000/mo"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~$500–$1,500/mo self-hosted"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "~$300–$800/mo self-hosted"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How to implement"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Regardless of database choice, the embedding and retrieval pipeline has the same shape. Here is a database-agnostic retriever class pattern that wraps the vendor-specific client:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from abc import ABC, abstractmethod\nimport anthropic\n\nclass VectorRetriever(ABC):\n    \"\"\"Abstract retriever — implement for each vector database.\"\"\"\n\n    @abstractmethod\n    def upsert(self, chunk_id: str, embedding: list[float], payload: dict) -> None:\n        ...\n\n    @abstractmethod\n    def search(self, query_embedding: list[float], filter: dict, top_k: int) -> list[dict]:\n        \"\"\"Return list of dicts with 'score', 'content', 'metadata' keys.\"\"\"\n        ...\n\n\nclass RAGPipeline:\n    def __init__(self, retriever: VectorRetriever, embed_model: str = \"text-embedding-3-small\"):\n        self.retriever = retriever\n        self.client = anthropic.Anthropic()\n        # In production, use a dedicated embedding provider\n        self.embed_model = embed_model\n\n    def embed(self, text: str) -> list[float]:\n        # Use your embedding provider (e.g. OpenAI, Voyage AI, Cohere)\n        raise NotImplementedError(\"plug in your embedding provider\")\n\n    def retrieve(self, question: str, tenant_id: str, top_k: int = 5) -> list[dict]:\n        q_embedding = self.embed(question)\n        return self.retriever.search(q_embedding, {\"tenant_id\": tenant_id}, top_k)\n\n    def answer(self, question: str, tenant_id: str) -> str:\n        chunks = self.retrieve(question, tenant_id)\n        context = \"\n\n\".join(c[\"content\"] for c in chunks)\n        response = self.client.messages.create(\n            model=\"claude-opus-4-5\",\n            max_tokens=2048,\n            system=(\n                \"You are a precise assistant. Answer questions using ONLY the \"\n                \"context provided. If the answer is not in the context, say so.\"\n            ),\n            messages=[{\n                \"role\": \"user\",\n                \"content\": f\"Context:\n{context}\n\nQuestion: {question}\"\n            }]\n        )\n        return response.content[0].text"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Examples"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "pgvector hybrid search (manual BM25 blend)"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "sql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "-- Hybrid search: blend vector similarity with full-text rank using RRF\nWITH vector_results AS (\n    SELECT id, content,\n           ROW_NUMBER() OVER (ORDER BY embedding <=> $query_vec::vector) AS vec_rank\n    FROM document_chunks\n    WHERE tenant_id = $tenant_id\n    ORDER BY embedding <=> $query_vec::vector\n    LIMIT 50\n),\nbm25_results AS (\n    SELECT id, content,\n           ROW_NUMBER() OVER (ORDER BY ts_rank(to_tsvector('english', content),\n                                               plainto_tsquery('english', $query_text)) DESC) AS bm25_rank\n    FROM document_chunks\n    WHERE tenant_id = $tenant_id\n      AND to_tsvector('english', content) @@ plainto_tsquery('english', $query_text)\n    LIMIT 50\n)\n-- Reciprocal Rank Fusion (RRF)\nSELECT\n    COALESCE(v.id, b.id) AS id,\n    COALESCE(v.content, b.content) AS content,\n    (COALESCE(1.0 / (60 + v.vec_rank), 0) + COALESCE(1.0 / (60 + b.bm25_rank), 0)) AS rrf_score\nFROM vector_results v\nFULL OUTER JOIN bm25_results b ON v.id = b.id\nORDER BY rrf_score DESC\nLIMIT $top_k;"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Qdrant with quantization for memory reduction"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from qdrant_client.models import ScalarQuantizationConfig, ScalarType, QuantizationSearchParams\n\n# Create collection with scalar quantization (4× memory reduction)\nclient.create_collection(\n    collection_name=\"large_corpus\",\n    vectors_config=VectorParams(size=1536, distance=Distance.COSINE),\n    quantization_config=ScalarQuantizationConfig(\n        type=ScalarType.INT8,\n        quantile=0.99,          # Clip outliers at 99th percentile\n        always_ram=True         # Keep quantized index in RAM\n    )\n)\n\n# Search with quantization: fast approximate, then re-score with full vectors\nresults = client.query_points(\n    collection_name=\"large_corpus\",\n    query=[0.1, 0.2, ...],\n    search_params=QuantizationSearchParams(\n        ignore=False,           # Use quantized index\n        rescore=True,           # Re-score top results with full vectors\n        oversampling=2.0        # Fetch 2× more candidates before re-scoring\n    ),\n    limit=10,\n)"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Real-world example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A legal document analysis platform uses Claude for contract review. The corpus is 8 million contract clauses from 200 enterprise clients, each embedded at 1536 dimensions. The platform started with pgvector on a db.r6g.2xlarge RDS instance (64GB RAM, enough to keep the HNSW index in shared_buffers). At 8M vectors × 1536 dimensions × 4 bytes = ~49GB for raw vectors, the HNSW index added ~16GB of overhead — total memory requirement ~65GB, fitting on the instance."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As the corpus grew past 12M vectors, memory pressure caused index pages to spill to disk, degrading query latency from 8ms to 80ms. The team migrated to Qdrant with scalar quantization: INT8 quantization reduced memory to ~14GB for the same 12M vectors, bringing latency back to 6ms while maintaining >95% recall@10. The migration required re-uploading all vectors (a 4-hour batch job) but no schema changes to the application layer due to the VectorRetriever abstraction."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common mistakes"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Post-filtering instead of pre-filtering"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A post-filter pattern retrieves the top-K vectors globally and then discards those that do not match the metadata filter. When a filter is highly selective (e.g. tenant_id that covers only 1% of the corpus), retrieving K=10 results often requires scanning hundreds of vectors to find 10 that pass the filter — effectively negating the ANN index. Use databases with pre-filtering support (Qdrant payload indexes, Weaviate filters inside ANN, Pinecone pre-filter) or pgvector partial indexes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing Pinecone based on speed without considering cost at scale"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pinecone's serverless tier costs approximately $0.08 per 1M query units on AWS us-east-1. At 1M queries/day with an average top-k of 10 returning 1536-d vectors, monthly cost approaches $2,400 — before storage costs. Self-hosted Qdrant or pgvector on equivalent hardware costs under $500/month. Model cost projections against your actual query volume before committing."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Not tracking embedding model dimension in the schema"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Switching from text-embedding-3-small (1536-d) to text-embedding-3-large (3072-d) or voyage-3 (1024-d) requires dropping and rebuilding the entire index and re-embedding the corpus. Store the embedding model name and dimension as metadata on the collection/index so you know which model generated stored vectors."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Always chunk documents consistently — the same chunking strategy (size, overlap, splitter) must be used for ingestion and query-time embedding to maximize semantic alignment."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Benchmark recall@K on your actual dataset before choosing an ANN algorithm — HNSW achieves >95% recall@10 on most text embeddings; IVFFLAT needs careful nprobe tuning to match it."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Store enough metadata to render results without a secondary database lookup — include at minimum: chunk content (or first 500 chars), document title, source URL, tenant identifier."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Index all metadata fields you filter on — unindexed filters require scanning every vector in the collection, eliminating the ANN index benefit."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test retrieval quality with a human-curated question-answer eval set, not just latency benchmarks — a fast database that returns low-relevance chunks degrades Claude's answer quality."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance & scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "HNSW ANN search scales as O(log N) with corpus size, but this is the search step only. The dominant latency at large scale is often network round-trip to the vector database, not search computation. Qdrant running on the same host as the application delivers sub-millisecond queries for corpora up to 10M vectors. Pinecone adds ~20ms of network latency for US-region queries; this is acceptable for most RAG applications where Claude's API call dominates the response time budget."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Memory requirements for HNSW indexes (approximate, 1536-d float32 vectors, m=16): 1M vectors ≈ 6–8GB; 10M vectors ≈ 60–80GB; 100M vectors ≈ 600–800GB. Qdrant's INT8 scalar quantization reduces these by ~4×: 100M vectors ≈ 150–200GB, fitting on a single high-memory server. Binary quantization reduces by ~32× with modest recall loss for high-dimensional embeddings."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tooling & ecosystem"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "LangChain and LlamaIndex both have native integrations for all four databases — VectorStore classes that abstract upsert, similarity_search, and max_marginal_relevance_search."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "pgvector: supabase/vecs (Python) provides a higher-level API with automatic embedding and metadata handling on top of psycopg3."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pinecone: official Python and Node SDKs; Canopy framework for production RAG with Pinecone."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Weaviate: official Python client v4 (weaviate-client>=4.0); Weaviate Verba as a reference RAG application."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Qdrant: qdrant-client Python SDK; Qdrant Hybrid Cloud for on-prem + cloud hybrid deployment."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ann-benchmarks (github.com/erikbern/ann-benchmarks): open benchmark suite comparing HNSW implementations across databases on standard datasets."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security & reliability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-tenancy isolation: all four databases support some form of tenant isolation. pgvector uses SQL row-level security or separate schemas per tenant. Pinecone uses namespaces. Weaviate has a dedicated multi-tenancy feature where each tenant gets an isolated shard. Qdrant uses separate collections or payload filters — payload filters are faster but not cryptographically isolated; separate collections provide true isolation."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Data at rest: Pinecone encrypts all data at rest automatically. For self-hosted pgvector, Weaviate, and Qdrant, encrypt the underlying disk volumes (AWS EBS encryption, GCP PD encryption) and ensure database backups are also encrypted. Do not store PII in embedding payloads unless necessary — the metadata payload is stored in plaintext and is queriable."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Backup strategy: pgvector benefits from standard PostgreSQL WAL-based continuous backup (pg_basebackup + WAL-G). Weaviate and Qdrant both support periodic snapshot backups to S3/GCS. For Pinecone, point-in-time recovery is not available on the serverless tier — treat it as reconstructible from your source document store and embedding pipeline rather than as a primary store."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "pgvector is the lowest-complexity choice for applications already on PostgreSQL with corpora under 10M vectors — it enables JOIN between vectors and relational data and supports full SQL filtering."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pinecone minimizes operational overhead but has the highest cost at scale (50M+ vectors) — use it for rapid prototyping or small-to-medium corpora with budget for managed infrastructure."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Weaviate is the right choice when hybrid BM25 + vector search is a hard requirement — its alpha parameter lets you tune the keyword/semantic blend per query without running two separate search engines."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Qdrant delivers the best performance at scale (100M+ vectors) through Rust implementation and payload-indexed filtered search inside HNSW — use it when both recall and latency at high vector counts are critical."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Pre-filtering (inside ANN) always outperforms post-filtering for selective metadata conditions — choose a database that supports pre-filtering for your dominant access patterns."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Quantization (Qdrant INT8, binary) can reduce memory by 4–32× with controlled recall trade-offs — always benchmark recall@K on your dataset before enabling quantization in production."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Abstract the retriever behind an interface so you can migrate vector databases without rewriting application code — the selection criteria change as corpus size and query patterns evolve."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
