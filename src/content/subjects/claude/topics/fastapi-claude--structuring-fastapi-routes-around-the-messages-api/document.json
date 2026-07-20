@@ -1,1 +1,2060 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T06:48:06.374Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"For FastAPI + Claude, the cleanest structure is to treat FastAPI routes as thin transport layers and put all Messages API logic into a dedicated service layer that owns request building, streaming, tool loops, usage capture, and error mapping. That gives you routes that stay small, testable, and consistent while the Claude integration evolves independently."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Route structure"}]},{"type":"paragraph","content":[{"type":"text","text":"A production FastAPI app should usually separate concerns into: request/response schemas, route handlers, Claude service functions, and optional orchestration layers for tools or persistence. In practice, that means your route should validate input, call a service like "},{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService.create_message()"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService.stream_message()"},{"type":"text","text":", and return normalized output instead of embedding Anthropic SDK calls directly in the route."}]},{"type":"paragraph","content":[{"type":"text","text":"A practical folder layout looks like this:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/main.py"},{"type":"text","text":" — FastAPI app wiring."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/routes/chat.py"},{"type":"text","text":" — synchronous and streaming endpoints."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/routes/agents.py"},{"type":"text","text":" — tool-enabled or multi-step workflows."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/schemas/messages.py"},{"type":"text","text":" — Pydantic request/response models."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/services/claude.py"},{"type":"text","text":" — Anthropic SDK wrapper using "},{"type":"text","marks":[{"type":"code"}],"text":"AsyncAnthropic"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/services/tools.py"},{"type":"text","text":" — tool registry and execution functions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/core/config.py"},{"type":"text","text":" — API key, model defaults, limits."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"app/core/errors.py"},{"type":"text","text":" — Claude-to-HTTP error translation."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because FastAPI is async-friendly, the Anthropic Python SDK’s async client is the best default for concurrent APIs and streaming endpoints."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"The most important design choice is to align your route patterns with the three main Claude interaction modes: blocking request/response, streaming, and tool-use loops. If you mix these behaviors into one generic endpoint too early, the code becomes difficult to test and reason about, especially around stop reasons and partial events."}]},{"type":"paragraph","content":[{"type":"text","text":"A good starting set of endpoints is:"}]},{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Route"}]}]},{"type":"tableHeader","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"Purpose"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages"},{"type":"text","text":" — single Claude call returning final text and usage."}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph"}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages/stream"},{"type":"text","text":" — SSE stream for token-by-token output."}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph"}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages/tools"},{"type":"text","text":" — tool-enabled loop that may call backend functions before returning a final answer."}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph"}]}]},{"type":"tableRow","content":[{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /sessions/{id}/messages"},{"type":"text","text":" — stateful app route where your backend loads/saves conversation history before calling Claude."}]}]},{"type":"tableCell","attrs":{"colspan":1,"rowspan":1,"colwidth":null,"align":null},"content":[{"type":"paragraph"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That route split mirrors the Messages API well because the Claude API itself is stateless, but your app often is not. FastAPI routes therefore become the entry points into your own conversation state and orchestration logic, not just direct pass-through proxies."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Pydantic models"}]},{"type":"paragraph","content":[{"type":"text","text":"Use Pydantic to define the message contract your frontend or other services send to FastAPI, then map it to Anthropic’s expected request shape inside the service layer. This protects your application from leaking provider-specific details across your codebase and makes vendor changes easier later."}]},{"type":"paragraph","content":[{"type":"text","text":"Example request models:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from pydantic import BaseModel, Field\nfrom typing import Literal, Any\n\nclass ContentBlock(BaseModel):\n    type: Literal[\"text\"] = \"text\"\n    text: str\n\nclass ChatMessage(BaseModel):\n    role: Literal[\"user\", \"assistant\"]\n    content: list[ContentBlock]\n\nclass CreateMessageRequest(BaseModel):\n    system: str | None = None\n    messages: list[ChatMessage]\n    model: str = \"claude-sonnet-4-6\"\n    max_tokens: int = Field(default=1024, ge=1, le=8192)\n    temperature: float | None = Field(default=None, ge=0, le=1)"}]},{"type":"paragraph","content":[{"type":"text","text":"This shape keeps your route interface explicit and close to the Messages API while still letting you add app-specific fields later, like "},{"type":"text","marks":[{"type":"code"}],"text":"session_id"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"tenant_id"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"metadata"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"code"}],"text":"tool_mode"},{"type":"text","text":"."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Claude service layer"}]},{"type":"paragraph","content":[{"type":"text","text":"Your Claude service should be the only place that imports and talks to "},{"type":"text","marks":[{"type":"code"}],"text":"AsyncAnthropic"},{"type":"text","text":", builds "},{"type":"text","marks":[{"type":"code"}],"text":"messages.create(...)"},{"type":"text","text":" calls, and interprets stop reasons or usage fields. This wrapper should normalize SDK responses into objects your routes can return directly, keeping the rest of your FastAPI code independent of low-level SDK event shapes."}]},{"type":"paragraph","content":[{"type":"text","text":"Example service skeleton:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from anthropic import AsyncAnthropic\n\nclass ClaudeService:\n    def __init__(self, api_key: str):\n        self.client = AsyncAnthropic(api_key=api_key)\n\n    async def create_message(self, req: CreateMessageRequest):\n        response = await self.client.messages.create(\n            model=req.model,\n            max_tokens=req.max_tokens,\n            system=req.system,\n            messages=[m.model_dump() for m in req.messages],\n            temperature=req.temperature,\n        )\n        return {\n            \"id\": response.id,\n            \"model\": response.model,\n            \"stop_reason\": response.stop_reason,\n            \"content\": response.content,\n            \"usage\": {\n                \"input_tokens\": response.usage.input_tokens,\n                \"output_tokens\": response.usage.output_tokens,\n            },\n        }"}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern is strong because routes stay tiny and every Claude concern is centralized: model selection, retries, logging, prompt shaping, token ceilings, and feature flags."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"FastAPI route example"}]},{"type":"paragraph","content":[{"type":"text","text":"A simple blocking route should validate input, call the service, and return a normalized response; it should not manually parse Claude content blocks in multiple places across the codebase. If your app mostly expects text, define a single helper inside the service to extract text from response content blocks, rather than scattering "},{"type":"text","marks":[{"type":"code"}],"text":".text"},{"type":"text","text":" assumptions throughout your routes."}]},{"type":"paragraph","content":[{"type":"text","text":"Example route:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from fastapi import APIRouter, Depends\nfrom app.schemas.messages import CreateMessageRequest\nfrom app.services.claude import ClaudeService\nfrom app.dependencies import get_claude_service\n\nrouter = APIRouter(prefix=\"/messages\", tags=[\"messages\"])\n\n@router.post(\"\")\nasync def create_message(\n    body: CreateMessageRequest,\n    claude: ClaudeService = Depends(get_claude_service),\n):\n    return await claude.create_message(body)"}]},{"type":"paragraph","content":[{"type":"text","text":"This structure scales nicely because adding auth, tenant resolution, rate limiting, or audit metadata becomes a route-level concern, while Claude request execution stays in the service."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Streaming route"}]},{"type":"paragraph","content":[{"type":"text","text":"For real-time UX, use a dedicated streaming route that converts Claude stream events into SSE output from FastAPI. The Anthropic SDK supports both "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.stream(...)"},{"type":"text","text":", which accumulates a final message and exposes helpers, and "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.create(..., stream=True)"},{"type":"text","text":", which yields events with lower memory usage."}]},{"type":"paragraph","content":[{"type":"text","text":"For FastAPI, a common pattern is an async generator plus "},{"type":"text","marks":[{"type":"code"}],"text":"StreamingResponse"},{"type":"text","text":" or an SSE helper response class. A simple route structure looks like this:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from fastapi.responses import StreamingResponse\n\n@router.post(\"/stream\")\nasync def stream_message(\n    body: CreateMessageRequest,\n    claude: ClaudeService = Depends(get_claude_service),\n):\n    async def event_gen():\n        async for chunk in claude.stream_message(body):\n            yield f\"data: {chunk}\\n\\n\"\n\n    return StreamingResponse(event_gen(), media_type=\"text/event-stream\")"}]},{"type":"paragraph","content":[{"type":"text","text":"And the service method:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"async def stream_message(self, req: CreateMessageRequest):\n    async with self.client.messages.stream(\n        model=req.model,\n        max_tokens=req.max_tokens,\n        system=req.system,\n        messages=[m.model_dump() for m in req.messages],\n        temperature=req.temperature,\n    ) as stream:\n        async for text in stream.text_stream:\n            yield text"}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern is the cleanest starting point because the route only knows it is forwarding text chunks, while the service owns the Anthropic event machinery. If you later need richer streaming events like "},{"type":"text","marks":[{"type":"code"}],"text":"message_start"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"content_block_delta"},{"type":"text","text":", or usage summaries, expose structured SSE event types rather than raw text only."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tool-use route"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude tool use maps naturally to a separate FastAPI route or orchestration service because it requires a loop, not a single request. The route receives a prompt, the Claude service sends tools with the request, Claude may return "},{"type":"text","marks":[{"type":"code"}],"text":"tool_use"},{"type":"text","text":" blocks, your backend executes the named tools, appends "},{"type":"text","marks":[{"type":"code"}],"text":"tool_result"},{"type":"text","text":" blocks, and calls Claude again until the response completes."}]},{"type":"paragraph","content":[{"type":"text","text":"That logic should never live inline in a normal "},{"type":"text","marks":[{"type":"code"}],"text":"/messages"},{"type":"text","text":" route because the control flow is fundamentally different. A strong design is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages/tools"},{"type":"text","text":" calls "},{"type":"text","marks":[{"type":"code"}],"text":"ClaudeAgentService.run(...)"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ClaudeAgentService"},{"type":"text","text":" uses "},{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService"},{"type":"text","text":" for raw API calls."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ToolExecutor"},{"type":"text","text":" resolves and runs allowed backend functions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Final output is normalized for the client, with intermediate tool traces optionally logged server-side."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Pseudo-code:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"async def run_with_tools(self, req):\n    messages = [m.model_dump() for m in req.messages]\n\n    while True:\n        response = await self.client.messages.create(\n            model=req.model,\n            max_tokens=req.max_tokens,\n            messages=messages,\n            tools=self.tools_schema,\n        )\n\n        messages.append({\"role\": \"assistant\", \"content\": response.content})\n\n        if response.stop_reason != \"tool_use\":\n            return response\n\n        tool_results = []\n        for block in response.content:\n            if block.type == \"tool_use\":\n                result = await self.tool_executor.execute(block.name, block.input)\n                tool_results.append({\n                    \"type\": \"tool_result\",\n                    \"tool_use_id\": block.id,\n                    \"content\": result,\n                })\n\n        messages.append({\"role\": \"user\", \"content\": tool_results})"}]},{"type":"paragraph","content":[{"type":"text","text":"This structure matches Anthropic’s tool loop model and keeps tool execution on your side, where authorization, validation, and side effects can be safely enforced."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Session-aware routes"}]},{"type":"paragraph","content":[{"type":"text","text":"Because the Messages API is stateless, a session-aware FastAPI route usually loads prior conversation turns from your database, appends the new user turn, sends the whole sequence to Claude, then stores the assistant response. This is where your backend adds memory, token-window management, and summarization policies."}]},{"type":"paragraph","content":[{"type":"text","text":"A robust route flow is:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Authenticate user."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Load session by "},{"type":"text","marks":[{"type":"code"}],"text":"session_id"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Fetch stored message history."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Append the new user message."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Truncate or summarize if token budget is too large."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Call Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Persist Claude response and usage."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Return final answer."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern is especially important for chat apps because it prevents your frontend from becoming the source of truth for conversation state."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling"}]},{"type":"paragraph","content":[{"type":"text","text":"Map Claude-specific failures into HTTP responses in a single error translation layer rather than scattering "},{"type":"text","marks":[{"type":"code"}],"text":"try/except"},{"type":"text","text":" blocks in every route. Your route should stay readable, and your error layer should handle authentication failures, bad requests, rate limits, timeouts, and upstream service issues consistently."}]},{"type":"paragraph","content":[{"type":"text","text":"A practical translation scheme is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"400 for invalid request construction or user payload issues."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"401 or 403 for your app auth failures."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"429 when rate-limited upstream or by your own quota system."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"502 or 503 for transient Claude/API failures."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"504 for upstream timeout behaviors."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Add request IDs, model name, and token usage to logs for every call so debugging and cost analysis remain straightforward."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"For a clean FastAPI + Claude architecture, these patterns work especially well:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Thin routes, fat services"},{"type":"text","text":": keep FastAPI handlers short and orchestration-rich logic in services."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Separate blocking and streaming endpoints"},{"type":"text","text":": they have different client contracts and operational behavior."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Separate tool loops from plain chat"},{"type":"text","text":": tool use is a control-flow pattern, not just a parameter."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Use "},{"type":"text","marks":[{"type":"bold"},{"type":"code"}],"text":"AsyncAnthropic"},{"type":"text","text":": better fit for FastAPI concurrency."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Normalize responses"},{"type":"text","text":": avoid leaking raw Anthropic SDK objects everywhere."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Persist session history server-side"},{"type":"text","text":": Claude itself is stateless."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Centralize model defaults"},{"type":"text","text":": model, temperature, and "},{"type":"text","marks":[{"type":"code"}],"text":"max_tokens"},{"type":"text","text":" should come from config, with safe per-route overrides."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Anti-patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"Avoid these common mistakes:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Calling Anthropic directly inside many unrelated routes, which duplicates config and parsing logic."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Using one giant "},{"type":"text","marks":[{"type":"code"}],"text":"/chat"},{"type":"text","text":" route for sync, stream, tools, and session persistence all at once, which makes behavior ambiguous and hard to test."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Trusting the frontend to maintain authoritative message history, which leads to drift, missing context, and replay issues."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Returning raw SDK event objects to clients, which tightly couples your frontend to provider internals."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Mixing tool execution and authorization logic into route handlers instead of a controlled execution layer."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Practical blueprint"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong default blueprint for your stack is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages"},{"type":"text","text":" for simple one-shot Claude responses."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages/stream"},{"type":"text","text":" for SSE streaming."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /sessions/{id}/messages"},{"type":"text","text":" for persisted conversational apps."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /messages/tools"},{"type":"text","text":" for agentic/tool-enabled workflows."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService"},{"type":"text","text":" for raw SDK calls."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ConversationService"},{"type":"text","text":" for history loading/saving."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"AgentService"},{"type":"text","text":" for tool loops."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ToolExecutor"},{"type":"text","text":" for safe backend actions."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That structure keeps each FastAPI route aligned to one Claude interaction style, which is the main idea behind structuring FastAPI around the Messages API well. If you want, I can next turn this into a full production-ready FastAPI project skeleton with complete files for "},{"type":"text","marks":[{"type":"code"}],"text":"main.py"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"schemas.py"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"claude.py"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"chat.py"},{"type":"text","text":", streaming SSE, and tool-use handling."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T06:48:06.374Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For FastAPI + Claude, the cleanest structure is to treat FastAPI routes as thin transport layers and put all Messages API logic into a dedicated service layer that owns request building, streaming, tool loops, usage capture, and error mapping. That gives you routes that stay small, testable, and consistent while the Claude integration evolves independently."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Route structure"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5TdHJ1Y3R1cmluZyBGYXN0QVBJIHJvdXRlcyBhcm91bmQgdGhlIE1lc3NhZ2VzIEFQSTwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjEwNSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjE0IgogICAgICAgIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBvcGFjaXR5PSIwLjc1Ij5DbGF1ZGUgTGVhcm5pbmcgUGF0aDwvdGV4dD4KICA8Y2lyY2xlIGN4PSI2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KICA8Y2lyY2xlIGN4PSI3NjAiIGN5PSI4MCIgcj0iMjgiIGZpbGw9IndoaXRlIiBvcGFjaXR5PSIwLjE1Ii8+Cjwvc3ZnPg==",
+          "alt": "Diagram for Structuring FastAPI routes around the Messages API",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A production FastAPI app should usually separate concerns into: request/response schemas, route handlers, Claude service functions, and optional orchestration layers for tools or persistence. In practice, that means your route should validate input, call a service like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ClaudeService.create_message()"
+          },
+          {
+            "type": "text",
+            "text": " or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ClaudeService.stream_message()"
+          },
+          {
+            "type": "text",
+            "text": ", and return normalized output instead of embedding Anthropic SDK calls directly in the route."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical folder layout looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/main.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 FastAPI app wiring."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/routes/chat.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 synchronous and streaming endpoints."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/routes/agents.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 tool-enabled or multi-step workflows."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/schemas/messages.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 Pydantic request/response models."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/services/claude.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 Anthropic SDK wrapper using "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "AsyncAnthropic"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/services/tools.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 tool registry and execution functions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/core/config.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 API key, model defaults, limits."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "app/core/errors.py"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 Claude-to-HTTP error translation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because FastAPI is async-friendly, the Anthropic Python SDK\u2019s async client is the best default for concurrent APIs and streaming endpoints."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most important design choice is to align your route patterns with the three main Claude interaction modes: blocking request/response, streaming, and tool-use loops. If you mix these behaviors into one generic endpoint too early, the code becomes difficult to test and reason about, especially around stop reasons and partial events."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A good starting set of endpoints is:"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Route"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableHeader",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Purpose"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "POST /messages"
+                      },
+                      {
+                        "type": "text",
+                        "text": " \u2014 single Claude call returning final text and usage."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "POST /messages/stream"
+                      },
+                      {
+                        "type": "text",
+                        "text": " \u2014 SSE stream for token-by-token output."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "POST /messages/tools"
+                      },
+                      {
+                        "type": "text",
+                        "text": " \u2014 tool-enabled loop that may call backend functions before returning a final answer."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ],
+                        "text": "POST /sessions/{id}/messages"
+                      },
+                      {
+                        "type": "text",
+                        "text": " \u2014 stateful app route where your backend loads/saves conversation history before calling Claude."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableCell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1,
+                  "colwidth": null,
+                  "align": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That route split mirrors the Messages API well because the Claude API itself is stateless, but your app often is not. FastAPI routes therefore become the entry points into your own conversation state and orchestration logic, not just direct pass-through proxies."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pydantic models"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use Pydantic to define the message contract your frontend or other services send to FastAPI, then map it to Anthropic\u2019s expected request shape inside the service layer. This protects your application from leaking provider-specific details across your codebase and makes vendor changes easier later."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example request models:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from pydantic import BaseModel, Field\nfrom typing import Literal, Any\n\nclass ContentBlock(BaseModel):\n    type: Literal[\"text\"] = \"text\"\n    text: str\n\nclass ChatMessage(BaseModel):\n    role: Literal[\"user\", \"assistant\"]\n    content: list[ContentBlock]\n\nclass CreateMessageRequest(BaseModel):\n    system: str | None = None\n    messages: list[ChatMessage]\n    model: str = \"claude-sonnet-4-6\"\n    max_tokens: int = Field(default=1024, ge=1, le=8192)\n    temperature: float | None = Field(default=None, ge=0, le=1)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This shape keeps your route interface explicit and close to the Messages API while still letting you add app-specific fields later, like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "session_id"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenant_id"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "metadata"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tool_mode"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude service layer"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Your Claude service should be the only place that imports and talks to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "AsyncAnthropic"
+          },
+          {
+            "type": "text",
+            "text": ", builds "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "messages.create(...)"
+          },
+          {
+            "type": "text",
+            "text": " calls, and interprets stop reasons or usage fields. This wrapper should normalize SDK responses into objects your routes can return directly, keeping the rest of your FastAPI code independent of low-level SDK event shapes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example service skeleton:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from anthropic import AsyncAnthropic\n\nclass ClaudeService:\n    def __init__(self, api_key: str):\n        self.client = AsyncAnthropic(api_key=api_key)\n\n    async def create_message(self, req: CreateMessageRequest):\n        response = await self.client.messages.create(\n            model=req.model,\n            max_tokens=req.max_tokens,\n            system=req.system,\n            messages=[m.model_dump() for m in req.messages],\n            temperature=req.temperature,\n        )\n        return {\n            \"id\": response.id,\n            \"model\": response.model,\n            \"stop_reason\": response.stop_reason,\n            \"content\": response.content,\n            \"usage\": {\n                \"input_tokens\": response.usage.input_tokens,\n                \"output_tokens\": response.usage.output_tokens,\n            },\n        }"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern is strong because routes stay tiny and every Claude concern is centralized: model selection, retries, logging, prompt shaping, token ceilings, and feature flags."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "FastAPI route example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A simple blocking route should validate input, call the service, and return a normalized response; it should not manually parse Claude content blocks in multiple places across the codebase. If your app mostly expects text, define a single helper inside the service to extract text from response content blocks, rather than scattering "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": ".text"
+          },
+          {
+            "type": "text",
+            "text": " assumptions throughout your routes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example route:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from fastapi import APIRouter, Depends\nfrom app.schemas.messages import CreateMessageRequest\nfrom app.services.claude import ClaudeService\nfrom app.dependencies import get_claude_service\n\nrouter = APIRouter(prefix=\"/messages\", tags=[\"messages\"])\n\n@router.post(\"\")\nasync def create_message(\n    body: CreateMessageRequest,\n    claude: ClaudeService = Depends(get_claude_service),\n):\n    return await claude.create_message(body)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This structure scales nicely because adding auth, tenant resolution, rate limiting, or audit metadata becomes a route-level concern, while Claude request execution stays in the service."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming route"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For real-time UX, use a dedicated streaming route that converts Claude stream events into SSE output from FastAPI. The Anthropic SDK supports both "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.stream(...)"
+          },
+          {
+            "type": "text",
+            "text": ", which accumulates a final message and exposes helpers, and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "client.messages.create(..., stream=True)"
+          },
+          {
+            "type": "text",
+            "text": ", which yields events with lower memory usage."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For FastAPI, a common pattern is an async generator plus "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "StreamingResponse"
+          },
+          {
+            "type": "text",
+            "text": " or an SSE helper response class. A simple route structure looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from fastapi.responses import StreamingResponse\n\n@router.post(\"/stream\")\nasync def stream_message(\n    body: CreateMessageRequest,\n    claude: ClaudeService = Depends(get_claude_service),\n):\n    async def event_gen():\n        async for chunk in claude.stream_message(body):\n            yield f\"data: {chunk}\\n\\n\"\n\n    return StreamingResponse(event_gen(), media_type=\"text/event-stream\")"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "And the service method:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def stream_message(self, req: CreateMessageRequest):\n    async with self.client.messages.stream(\n        model=req.model,\n        max_tokens=req.max_tokens,\n        system=req.system,\n        messages=[m.model_dump() for m in req.messages],\n        temperature=req.temperature,\n    ) as stream:\n        async for text in stream.text_stream:\n            yield text"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern is the cleanest starting point because the route only knows it is forwarding text chunks, while the service owns the Anthropic event machinery. If you later need richer streaming events like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "message_start"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "content_block_delta"
+          },
+          {
+            "type": "text",
+            "text": ", or usage summaries, expose structured SSE event types rather than raw text only."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool-use route"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude tool use maps naturally to a separate FastAPI route or orchestration service because it requires a loop, not a single request. The route receives a prompt, the Claude service sends tools with the request, Claude may return "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tool_use"
+          },
+          {
+            "type": "text",
+            "text": " blocks, your backend executes the named tools, appends "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tool_result"
+          },
+          {
+            "type": "text",
+            "text": " blocks, and calls Claude again until the response completes."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That logic should never live inline in a normal "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/messages"
+          },
+          {
+            "type": "text",
+            "text": " route because the control flow is fundamentally different. A strong design is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /messages/tools"
+                  },
+                  {
+                    "type": "text",
+                    "text": " calls "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeAgentService.run(...)"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeAgentService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " uses "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for raw API calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ToolExecutor"
+                  },
+                  {
+                    "type": "text",
+                    "text": " resolves and runs allowed backend functions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Final output is normalized for the client, with intermediate tool traces optionally logged server-side."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pseudo-code:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "async def run_with_tools(self, req):\n    messages = [m.model_dump() for m in req.messages]\n\n    while True:\n        response = await self.client.messages.create(\n            model=req.model,\n            max_tokens=req.max_tokens,\n            messages=messages,\n            tools=self.tools_schema,\n        )\n\n        messages.append({\"role\": \"assistant\", \"content\": response.content})\n\n        if response.stop_reason != \"tool_use\":\n            return response\n\n        tool_results = []\n        for block in response.content:\n            if block.type == \"tool_use\":\n                result = await self.tool_executor.execute(block.name, block.input)\n                tool_results.append({\n                    \"type\": \"tool_result\",\n                    \"tool_use_id\": block.id,\n                    \"content\": result,\n                })\n\n        messages.append({\"role\": \"user\", \"content\": tool_results})"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This structure matches Anthropic\u2019s tool loop model and keeps tool execution on your side, where authorization, validation, and side effects can be safely enforced."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Session-aware routes"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because the Messages API is stateless, a session-aware FastAPI route usually loads prior conversation turns from your database, appends the new user turn, sends the whole sequence to Claude, then stores the assistant response. This is where your backend adds memory, token-window management, and summarization policies."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A robust route flow is:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Authenticate user."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Load session by "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "session_id"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fetch stored message history."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Append the new user message."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Truncate or summarize if token budget is too large."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Call Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Persist Claude response and usage."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return final answer."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern is especially important for chat apps because it prevents your frontend from becoming the source of truth for conversation state."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Map Claude-specific failures into HTTP responses in a single error translation layer rather than scattering "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "try/except"
+          },
+          {
+            "type": "text",
+            "text": " blocks in every route. Your route should stay readable, and your error layer should handle authentication failures, bad requests, rate limits, timeouts, and upstream service issues consistently."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical translation scheme is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "400 for invalid request construction or user payload issues."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "401 or 403 for your app auth failures."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "429 when rate-limited upstream or by your own quota system."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "502 or 503 for transient Claude/API failures."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "504 for upstream timeout behaviors."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Add request IDs, model name, and token usage to logs for every call so debugging and cost analysis remain straightforward."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a clean FastAPI + Claude architecture, these patterns work especially well:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Thin routes, fat services"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": keep FastAPI handlers short and orchestration-rich logic in services."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Separate blocking and streaming endpoints"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": they have different client contracts and operational behavior."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Separate tool loops from plain chat"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": tool use is a control-flow pattern, not just a parameter."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      },
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "AsyncAnthropic"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": better fit for FastAPI concurrency."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Normalize responses"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": avoid leaking raw Anthropic SDK objects everywhere."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Persist session history server-side"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Claude itself is stateless."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Centralize model defaults"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": model, temperature, and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "max_tokens"
+                  },
+                  {
+                    "type": "text",
+                    "text": " should come from config, with safe per-route overrides."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Anti-patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Avoid these common mistakes:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Calling Anthropic directly inside many unrelated routes, which duplicates config and parsing logic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Using one giant "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "/chat"
+                  },
+                  {
+                    "type": "text",
+                    "text": " route for sync, stream, tools, and session persistence all at once, which makes behavior ambiguous and hard to test."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trusting the frontend to maintain authoritative message history, which leads to drift, missing context, and replay issues."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Returning raw SDK event objects to clients, which tightly couples your frontend to provider internals."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Mixing tool execution and authorization logic into route handlers instead of a controlled execution layer."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Practical blueprint"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong default blueprint for your stack is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /messages"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for simple one-shot Claude responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /messages/stream"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for SSE streaming."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /sessions/{id}/messages"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for persisted conversational apps."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /messages/tools"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for agentic/tool-enabled workflows."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for raw SDK calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ConversationService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for history loading/saving."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "AgentService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for tool loops."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ToolExecutor"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for safe backend actions."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That structure keeps each FastAPI route aligned to one Claude interaction style, which is the main idea behind structuring FastAPI around the Messages API well. If you want, I can next turn this into a full production-ready FastAPI project skeleton with complete files for "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "main.py"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "schemas.py"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "claude.py"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "chat.py"
+          },
+          {
+            "type": "text",
+            "text": ", streaming SSE, and tool-use handling."
+          }
+        ]
+      }
+    ]
+  }
+}

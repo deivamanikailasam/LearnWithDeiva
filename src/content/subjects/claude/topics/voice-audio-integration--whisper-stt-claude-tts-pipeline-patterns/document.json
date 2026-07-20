@@ -1,1 +1,3410 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T07:38:51.930Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"A Whisper → Claude → TTS voice pipeline is the classic"},{"type":"text","marks":[{"type":"bold"}],"text":"cascaded speech architecture"},{"type":"text","text":": speech-to-text converts audio to text, Claude handles reasoning and dialogue, and text-to-speech turns the reply back into audio. This is still the most practical backend pattern for production because each stage can be tuned, scaled, and replaced independently, even though end-to-end speech-to-speech systems are emerging.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core architecture"}]},{"type":"paragraph","content":[{"type":"text","text":"In a production backend, the voice stack is usually split into five layers:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Audio ingress"},{"type":"text","text":": microphone stream or uploaded audio."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"STT layer"},{"type":"text","text":": Whisper or another recognizer produces transcript text."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Dialogue layer"},{"type":"text","text":": Claude generates the response from transcript + conversation state."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"TTS layer"},{"type":"text","text":": a neural synthesizer turns response text into playable audio."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Session/orchestration layer"},{"type":"text","text":": coordinates timing, interruption, state, metrics, and failures.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This works because the pipeline is sequential in meaning but often partially overlapped in execution: transcript segments can start flowing before the user fully stops, Claude can stream text before the full answer completes, and TTS can begin speaking partial output before the full response is generated.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Canonical pipeline"}]},{"type":"paragraph","content":[{"type":"text","text":"The standard backend flow is:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Capture audio frames from client or telephony edge."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Run STT with Whisper or a lower-latency alternative."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Normalize transcript and apply turn detection."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Send the utterance plus prior conversation state to Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Stream Claude’s output."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Chunk output into TTS-friendly segments."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Synthesize speech and stream audio back to client.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That is the core"},{"type":"text","marks":[{"type":"bold"}],"text":"STT → LLM → TTS"},{"type":"text","text":" cascade described in voice-agent architecture guides. It remains the best default for Claude backends when you want explicit control over ASR, prompt logic, tool use, and output voice choice.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"When to use Whisper"}]},{"type":"paragraph","content":[{"type":"text","text":"Whisper is mainly chosen when you want strong transcription quality, deployment flexibility, and the option to self-host or run offline. It is especially attractive for:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"privacy-sensitive workloads,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"multilingual input,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"asynchronous or near-real-time rather than ultra-low-latency streaming,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"infrastructure where you want to own the STT layer rather than depend entirely on a single speech vendor.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The tradeoff is latency: production notes repeatedly contrast Whisper’s quality and offline control against streaming-first engines like Deepgram or other low-latency providers. So if your main goal is sub-second turn-taking, Whisper often needs careful optimization or replacement for live conversational UX.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Pipeline patterns"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"1. Batch-turn pipeline"}]},{"type":"paragraph","content":[{"type":"text","text":"This is the simplest and safest pattern:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"User speaks."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Audio is recorded until silence/end-of-turn."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Whisper transcribes the whole utterance."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude responds."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"TTS speaks the full answer."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Use this when:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"latency can be a bit higher,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"you want simple orchestration,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"accuracy matters more than natural interruption handling.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is the best starting point for most internal tools and prototypes."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"2. Streaming-turn pipeline"}]},{"type":"paragraph","content":[{"type":"text","text":"This is the production conversational pattern:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Audio is chunked continuously."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"STT emits partial/interim transcripts."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Turn detection decides when enough speech is complete to query Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude streams text back."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"TTS begins speaking before Claude finishes the entire answer.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern lowers perceived latency dramatically, but it requires careful state management and interruption control."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"3. Async microservice pipeline"}]},{"type":"paragraph","content":[{"type":"text","text":"This splits STT, Claude, and TTS into separate services connected by queues or event streams:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"audio-in"},{"type":"text","text":" service"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"stt-service"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"dialog-service"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"tts-service"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"session coordinator / orchestrator"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Production notes on Whisper-based voice stacks emphasize this replaceable microservice design because each component has different compute profiles and scaling needs.[]"}]},{"type":"paragraph","content":[{"type":"text","text":"Use this when:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"you expect scale,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"you need independent deployment and autoscaling,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"different teams own speech, orchestration, and AI layers."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Orchestration patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"A production voice backend needs an orchestrator that manages:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"session state,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"turn boundaries,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"conversation history,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"provider retries,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"interruption,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"partial output streaming,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"latency budgets.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"A common orchestration model is:"}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Audio In → Transcriber → Agent → Synthesizer → Audio Out"},{"type":"text","text":".[]"}]},{"type":"paragraph","content":[{"type":"text","text":"The orchestrator should not be “just glue code.” It is the part that decides:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"when a user has finished speaking,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"what transcript version is final enough,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"when to call Claude,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"how much prior context to include,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"when to start TTS,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"what to do if the user interrupts mid-sentence."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That is why voice systems often feel harder than plain text chat even though the logical flow is simple."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Claude integration patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude sits in the middle as the reasoning layer. The clean backend pattern is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"keep STT and TTS provider-specific details out of the Claude service,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"send Claude normalized text, not raw audio frames,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"structure prompts for spoken dialogue rather than written essay output,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"stream Claude output whenever possible for lower voice latency.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Voice-oriented prompt design should instruct Claude to:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"answer briefly,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"use short sentences,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"avoid tables, markdown, and dense formatting,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"avoid symbols/abbreviations TTS mispronounces,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"speak naturally and conversationally.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"A good system prompt for voice might say:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"“Answer in spoken English.”"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"“Use short sentences.”"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"“Prefer direct answers under 20 seconds unless asked for detail.”"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"“Avoid bullet points unless the user explicitly asks.”"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This dramatically improves downstream TTS quality."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"TTS output patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"TTS can be handled in two main ways:"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Full-response synthesis"}]},{"type":"paragraph","content":[{"type":"text","text":"Wait for the full Claude answer, then send it to TTS."}]},{"type":"paragraph","content":[{"type":"text","text":"Pros:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"simplest,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"easier prosody control,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"fewer cutoffs or awkward boundary issues."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Cons:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"higher end-to-end latency."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Incremental synthesis"}]},{"type":"paragraph","content":[{"type":"text","text":"Chunk Claude’s streamed text and send segments to TTS as they become complete enough, often at sentence boundaries or punctuation boundaries.[]"}]},{"type":"paragraph","content":[{"type":"text","text":"Pros:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"much lower perceived latency,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"more natural “assistant starts speaking quickly” experience."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Cons:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"requires buffering strategy,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"risk of speaking text that later context would have refined,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"harder interruption handling."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Several recent low-latency patterns explicitly recommend sentence-boundary chunking and immediate dispatch to TTS for live assistants.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Chunking strategy"}]},{"type":"paragraph","content":[{"type":"text","text":"A very common and effective production pattern is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"buffer Claude text deltas,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"detect punctuation like"},{"type":"text","marks":[{"type":"code"}],"text":"."},{"type":"text","text":","},{"type":"text","marks":[{"type":"code"}],"text":"!"},{"type":"text","text":","},{"type":"text","marks":[{"type":"code"}],"text":"?"},{"type":"text","text":","}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"emit complete sentence chunks to TTS immediately.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is often the sweet spot because:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"chunks are coherent enough for natural speech,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"latency stays low,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"you avoid tiny fragment synthesis."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"More advanced systems also cap chunk length, for example:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"emit when punctuation appears,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"or when chunk exceeds N characters,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"or when a pause threshold is reached."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Session management"}]},{"type":"paragraph","content":[{"type":"text","text":"A voice assistant is not just one transcript at a time; it is a sessioned dialogue system. Production guides emphasize:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"session persistence,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"user context,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"dialog state,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"slot-filling / clarification patterns,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"continuous conversation windows.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Your backend should track:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"session_id"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"recent transcript turns"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"current topic/intent"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"active tool state"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"whether the assistant is currently speaking"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"whether the user interrupted"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"In multi-turn voice systems, turn state matters more than in text because users often speak elliptically: “yes,” “that one,” “repeat that,” “a bit slower.”"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Interruption handling"}]},{"type":"paragraph","content":[{"type":"text","text":"Interruption, or"},{"type":"text","marks":[{"type":"bold"}],"text":"barge-in"},{"type":"text","text":", is one of the defining production-grade voice patterns. A good system should:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"stop TTS playback immediately when user speech is detected,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"cancel or pause current TTS job,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"optionally cancel in-flight Claude generation,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"preserve enough context to resume or reinterpret the interruption."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Without barge-in, voice assistants feel clumsy because the user has to wait for the bot to stop talking."}]},{"type":"paragraph","content":[{"type":"text","text":"A practical pattern is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"playback controller owns a cancellable audio stream,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"VAD detects new speech,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"orchestrator marks current assistant utterance as interrupted,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"new STT pipeline starts immediately."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Latency budgeting"}]},{"type":"paragraph","content":[{"type":"text","text":"Voice UX is brutally sensitive to latency. Good pipelines budget latency per stage:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"capture + VAD"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"STT"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude first token"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"chunking"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"TTS first audio byte"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"network playback start.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The most effective latency optimizations mentioned across recent implementations are:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"eager-load Whisper models to avoid cold start,[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"offload blocking Whisper inference from async event loops,[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"stream Claude output rather than waiting for full completion,[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"synthesize TTS incrementally rather than after the full answer,[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"cache static phrases or earcons where possible.[]"}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Deployment patterns"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Monolith"}]},{"type":"paragraph","content":[{"type":"text","text":"Single backend handles upload, transcription, Claude call, and TTS."}]},{"type":"paragraph","content":[{"type":"text","text":"Good for:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"prototypes,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"small internal tools,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"low operational overhead."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Split services"}]},{"type":"paragraph","content":[{"type":"text","text":"Independent STT, dialogue, and TTS services with shared session state.[]"}]},{"type":"paragraph","content":[{"type":"text","text":"Good for:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"higher scale,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"specialized autoscaling,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"vendor swap flexibility."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Edge + core"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Edge worker handles audio ingress/WebSocket."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Core services handle Whisper, Claude, TTS."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Useful when you want low-latency ingress near users but central GPU or speech infrastructure.[]"}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"A production voice pipeline should distinguish:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"no speech detected,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"poor transcription confidence,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude timeout,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"TTS synthesis failure,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"audio playback failure,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"user interruption.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Good recovery patterns:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"ask a clarifying reprompt when transcript quality is low,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"fall back to text response if TTS fails,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"retry TTS on a secondary provider for premium paths,[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"use short apology prompts for service failure,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"log stage-specific failure metrics."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"A voice app should not just say “error.” It should recover conversationally."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Security and privacy"}]},{"type":"paragraph","content":[{"type":"text","text":"Voice pipelines introduce additional privacy concerns because raw audio is more sensitive than text. Production analyses note that some voice systems route audio through relays or provider-controlled infrastructure before reaching transcription vendors, partly for policy and privacy control.[]"}]},{"type":"paragraph","content":[{"type":"text","text":"Important backend practices:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"minimize raw audio retention,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"separate audio retention from transcript retention,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"encrypt uploads and transient buffers,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"redact sensitive transcript content before long-term logging where required,"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"document whether Whisper is self-hosted or vendor-hosted."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"If privacy is a requirement, self-hosted Whisper or on-device speech components are often a major reason to choose this architecture.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended production pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"For most teams building with Claude today, the best default pattern is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Ingress"},{"type":"text","text":": WebSocket audio upload with VAD/turn detection."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"STT"},{"type":"text","text":": Whisper or faster-whisper for batch or semi-streaming transcription, preloaded at startup.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Dialogue"},{"type":"text","text":": Claude Messages API with streaming enabled.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Chunker"},{"type":"text","text":": sentence-boundary buffer over Claude deltas.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"TTS"},{"type":"text","text":": streaming-capable neural TTS with provider failover.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"State"},{"type":"text","text":": session store for history, speaking state, interruption flags.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Metrics"},{"type":"text","text":": stage latency, transcript quality, token usage, TTS first-byte latency, interruption rate.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That gives you a practical, replaceable, production-grade speech stack."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Layman’s explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of the system as a relay race:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Whisper is the listener."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude is the thinker."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"TTS is the speaker."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"A good backend makes the baton handoff fast and clean. A great backend starts the next runner before the previous one is fully done, so the whole conversation feels natural instead of slow and robotic."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Study questions with answers"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why is Whisper → Claude → TTS called a cascaded architecture?"},{"type":"hardBreak"},{"type":"text","text":"Because three specialized models run in sequence: STT, LLM, then TTS.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why is this still common even with end-to-end speech models emerging?"},{"type":"hardBreak"},{"type":"text","text":"Because it gives you better component-level control, easier swapping, and clearer operational boundaries.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"What is the key latency optimization?"},{"type":"hardBreak"},{"type":"text","text":"Stream Claude output and start TTS on sentence chunks before the full answer is complete.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why is Whisper attractive?"},{"type":"hardBreak"},{"type":"text","text":"Because of transcription quality, multilingual support, and self-host/offline flexibility, especially for privacy-sensitive systems.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"What makes a voice backend production-grade?"},{"type":"hardBreak"},{"type":"text","text":"Session orchestration, interruption handling, latency budgeting, failure recovery, and clean separation of STT, Claude, and TTS services.[]"}]}]}]},{"type":"paragraph"}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T07:38:51.930Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A Whisper \u2192 Claude \u2192 TTS voice pipeline is the classic"
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "cascaded speech architecture"
+          },
+          {
+            "type": "text",
+            "text": ": speech-to-text converts audio to text, Claude handles reasoning and dialogue, and text-to-speech turns the reply back into audio. This is still the most practical backend pattern for production because each stage can be tuned, scaled, and replaced independently, even though end-to-end speech-to-speech systems are emerging.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core architecture"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5XaGlzcGVyIChTVFQpIOKGkiBDbGF1ZGUg4oaSIFRUUyBwaXBlbGluZSBwYXR0ZXJuczwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjEwNSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjE0IgogICAgICAgIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBvcGFjaXR5PSIwLjc1Ij5DbGF1ZGUgTGVhcm5pbmcgUGF0aDwvdGV4dD4KICA8Y2lyY2xlIGN4PSI2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KICA8Y2lyY2xlIGN4PSI3NjAiIGN5PSI4MCIgcj0iMjgiIGZpbGw9IndoaXRlIiBvcGFjaXR5PSIwLjE1Ii8+Cjwvc3ZnPg==",
+          "alt": "Diagram for Whisper (STT) \u2192 Claude \u2192 TTS pipeline patterns",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In a production backend, the voice stack is usually split into five layers:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Audio ingress"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": microphone stream or uploaded audio."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "STT layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Whisper or another recognizer produces transcript text."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Dialogue layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Claude generates the response from transcript + conversation state."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "TTS layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": a neural synthesizer turns response text into playable audio."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Session/orchestration layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": coordinates timing, interruption, state, metrics, and failures.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This works because the pipeline is sequential in meaning but often partially overlapped in execution: transcript segments can start flowing before the user fully stops, Claude can stream text before the full answer completes, and TTS can begin speaking partial output before the full response is generated.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Canonical pipeline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The standard backend flow is:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Capture audio frames from client or telephony edge."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run STT with Whisper or a lower-latency alternative."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Normalize transcript and apply turn detection."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Send the utterance plus prior conversation state to Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stream Claude\u2019s output."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Chunk output into TTS-friendly segments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Synthesize speech and stream audio back to client.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That is the core"
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "STT \u2192 LLM \u2192 TTS"
+          },
+          {
+            "type": "text",
+            "text": " cascade described in voice-agent architecture guides. It remains the best default for Claude backends when you want explicit control over ASR, prompt logic, tool use, and output voice choice.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When to use Whisper"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Whisper is mainly chosen when you want strong transcription quality, deployment flexibility, and the option to self-host or run offline. It is especially attractive for:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "privacy-sensitive workloads,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "multilingual input,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "asynchronous or near-real-time rather than ultra-low-latency streaming,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "infrastructure where you want to own the STT layer rather than depend entirely on a single speech vendor.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The tradeoff is latency: production notes repeatedly contrast Whisper\u2019s quality and offline control against streaming-first engines like Deepgram or other low-latency providers. So if your main goal is sub-second turn-taking, Whisper often needs careful optimization or replacement for live conversational UX.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pipeline patterns"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "1. Batch-turn pipeline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the simplest and safest pattern:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "User speaks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Audio is recorded until silence/end-of-turn."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Whisper transcribes the whole utterance."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude responds."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "TTS speaks the full answer."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use this when:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "latency can be a bit higher,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "you want simple orchestration,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "accuracy matters more than natural interruption handling.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the best starting point for most internal tools and prototypes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "2. Streaming-turn pipeline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the production conversational pattern:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Audio is chunked continuously."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "STT emits partial/interim transcripts."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Turn detection decides when enough speech is complete to query Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude streams text back."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "TTS begins speaking before Claude finishes the entire answer.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern lowers perceived latency dramatically, but it requires careful state management and interruption control."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "3. Async microservice pipeline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This splits STT, Claude, and TTS into separate services connected by queues or event streams:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "audio-in"
+                  },
+                  {
+                    "type": "text",
+                    "text": " service"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "stt-service"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "dialog-service"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "tts-service"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "session coordinator / orchestrator"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production notes on Whisper-based voice stacks emphasize this replaceable microservice design because each component has different compute profiles and scaling needs.[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Use this when:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "you expect scale,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "you need independent deployment and autoscaling,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "different teams own speech, orchestration, and AI layers."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Orchestration patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A production voice backend needs an orchestrator that manages:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "session state,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "turn boundaries,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "conversation history,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "provider retries,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "interruption,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "partial output streaming,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "latency budgets.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A common orchestration model is:"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Audio In \u2192 Transcriber \u2192 Agent \u2192 Synthesizer \u2192 Audio Out"
+          },
+          {
+            "type": "text",
+            "text": ".[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The orchestrator should not be \u201cjust glue code.\u201d It is the part that decides:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "when a user has finished speaking,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "what transcript version is final enough,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "when to call Claude,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "how much prior context to include,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "when to start TTS,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "what to do if the user interrupts mid-sentence."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That is why voice systems often feel harder than plain text chat even though the logical flow is simple."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude integration patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude sits in the middle as the reasoning layer. The clean backend pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "keep STT and TTS provider-specific details out of the Claude service,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "send Claude normalized text, not raw audio frames,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "structure prompts for spoken dialogue rather than written essay output,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stream Claude output whenever possible for lower voice latency.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Voice-oriented prompt design should instruct Claude to:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "answer briefly,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "use short sentences,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "avoid tables, markdown, and dense formatting,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "avoid symbols/abbreviations TTS mispronounces,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "speak naturally and conversationally.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A good system prompt for voice might say:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "\u201cAnswer in spoken English.\u201d"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "\u201cUse short sentences.\u201d"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "\u201cPrefer direct answers under 20 seconds unless asked for detail.\u201d"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "\u201cAvoid bullet points unless the user explicitly asks.\u201d"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This dramatically improves downstream TTS quality."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "TTS output patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "TTS can be handled in two main ways:"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Full-response synthesis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Wait for the full Claude answer, then send it to TTS."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pros:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "simplest,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "easier prosody control,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "fewer cutoffs or awkward boundary issues."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cons:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "higher end-to-end latency."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Incremental synthesis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Chunk Claude\u2019s streamed text and send segments to TTS as they become complete enough, often at sentence boundaries or punctuation boundaries.[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pros:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "much lower perceived latency,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "more natural \u201cassistant starts speaking quickly\u201d experience."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cons:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "requires buffering strategy,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "risk of speaking text that later context would have refined,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "harder interruption handling."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Several recent low-latency patterns explicitly recommend sentence-boundary chunking and immediate dispatch to TTS for live assistants.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Chunking strategy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A very common and effective production pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "buffer Claude text deltas,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "detect punctuation like"
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "."
+                  },
+                  {
+                    "type": "text",
+                    "text": ","
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "!"
+                  },
+                  {
+                    "type": "text",
+                    "text": ","
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "?"
+                  },
+                  {
+                    "type": "text",
+                    "text": ","
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "emit complete sentence chunks to TTS immediately.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is often the sweet spot because:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "chunks are coherent enough for natural speech,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "latency stays low,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "you avoid tiny fragment synthesis."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "More advanced systems also cap chunk length, for example:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "emit when punctuation appears,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "or when chunk exceeds N characters,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "or when a pause threshold is reached."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Session management"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A voice assistant is not just one transcript at a time; it is a sessioned dialogue system. Production guides emphasize:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "session persistence,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "user context,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "dialog state,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "slot-filling / clarification patterns,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "continuous conversation windows.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Your backend should track:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "session_id"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "recent transcript turns"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "current topic/intent"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "active tool state"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "whether the assistant is currently speaking"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "whether the user interrupted"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In multi-turn voice systems, turn state matters more than in text because users often speak elliptically: \u201cyes,\u201d \u201cthat one,\u201d \u201crepeat that,\u201d \u201ca bit slower.\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Interruption handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Interruption, or"
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "barge-in"
+          },
+          {
+            "type": "text",
+            "text": ", is one of the defining production-grade voice patterns. A good system should:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stop TTS playback immediately when user speech is detected,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "cancel or pause current TTS job,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "optionally cancel in-flight Claude generation,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "preserve enough context to resume or reinterpret the interruption."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without barge-in, voice assistants feel clumsy because the user has to wait for the bot to stop talking."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "playback controller owns a cancellable audio stream,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "VAD detects new speech,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "orchestrator marks current assistant utterance as interrupted,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "new STT pipeline starts immediately."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Latency budgeting"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Voice UX is brutally sensitive to latency. Good pipelines budget latency per stage:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "capture + VAD"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "STT"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude first token"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "chunking"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "TTS first audio byte"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "network playback start.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most effective latency optimizations mentioned across recent implementations are:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "eager-load Whisper models to avoid cold start,[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "offload blocking Whisper inference from async event loops,[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stream Claude output rather than waiting for full completion,[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "synthesize TTS incrementally rather than after the full answer,[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "cache static phrases or earcons where possible.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Deployment patterns"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Monolith"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Single backend handles upload, transcription, Claude call, and TTS."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Good for:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "prototypes,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "small internal tools,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "low operational overhead."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Split services"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Independent STT, dialogue, and TTS services with shared session state.[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Good for:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "higher scale,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "specialized autoscaling,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "vendor swap flexibility."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Edge + core"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Edge worker handles audio ingress/WebSocket."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Core services handle Whisper, Claude, TTS."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Useful when you want low-latency ingress near users but central GPU or speech infrastructure.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A production voice pipeline should distinguish:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "no speech detected,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "poor transcription confidence,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude timeout,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "TTS synthesis failure,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "audio playback failure,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "user interruption.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Good recovery patterns:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ask a clarifying reprompt when transcript quality is low,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "fall back to text response if TTS fails,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "retry TTS on a secondary provider for premium paths,[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "use short apology prompts for service failure,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "log stage-specific failure metrics."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A voice app should not just say \u201cerror.\u201d It should recover conversationally."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security and privacy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Voice pipelines introduce additional privacy concerns because raw audio is more sensitive than text. Production analyses note that some voice systems route audio through relays or provider-controlled infrastructure before reaching transcription vendors, partly for policy and privacy control.[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Important backend practices:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "minimize raw audio retention,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "separate audio retention from transcript retention,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "encrypt uploads and transient buffers,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "redact sensitive transcript content before long-term logging where required,"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "document whether Whisper is self-hosted or vendor-hosted."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If privacy is a requirement, self-hosted Whisper or on-device speech components are often a major reason to choose this architecture.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended production pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For most teams building with Claude today, the best default pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Ingress"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": WebSocket audio upload with VAD/turn detection."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "STT"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Whisper or faster-whisper for batch or semi-streaming transcription, preloaded at startup.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Dialogue"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Claude Messages API with streaming enabled.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Chunker"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": sentence-boundary buffer over Claude deltas.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "TTS"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": streaming-capable neural TTS with provider failover.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "State"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": session store for history, speaking state, interruption flags.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Metrics"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": stage latency, transcript quality, token usage, TTS first-byte latency, interruption rate.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That gives you a practical, replaceable, production-grade speech stack."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layman\u2019s explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of the system as a relay race:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Whisper is the listener."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude is the thinker."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "TTS is the speaker."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A good backend makes the baton handoff fast and clean. A great backend starts the next runner before the previous one is fully done, so the whole conversation feels natural instead of slow and robotic."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Study questions with answers"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why is Whisper \u2192 Claude \u2192 TTS called a cascaded architecture?"
+                  },
+                  {
+                    "type": "hardBreak"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Because three specialized models run in sequence: STT, LLM, then TTS.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why is this still common even with end-to-end speech models emerging?"
+                  },
+                  {
+                    "type": "hardBreak"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Because it gives you better component-level control, easier swapping, and clearer operational boundaries.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "What is the key latency optimization?"
+                  },
+                  {
+                    "type": "hardBreak"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Stream Claude output and start TTS on sentence chunks before the full answer is complete.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why is Whisper attractive?"
+                  },
+                  {
+                    "type": "hardBreak"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Because of transcription quality, multilingual support, and self-host/offline flexibility, especially for privacy-sensitive systems.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "What makes a voice backend production-grade?"
+                  },
+                  {
+                    "type": "hardBreak"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Session orchestration, interruption handling, latency budgeting, failure recovery, and clean separation of STT, Claude, and TTS services.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph"
+      }
+    ]
+  }
+}

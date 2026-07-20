@@ -1,1 +1,1882 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T06:57:07.728Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"A REST API wrapper around Claude in Node.js / Express should act as a "},{"type":"text","marks":[{"type":"bold"}],"text":"backend facade"},{"type":"text","text":": it validates client input, calls the Anthropic SDK, normalizes the Claude response, and exposes stable endpoints like "},{"type":"text","marks":[{"type":"code"}],"text":"/messages"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"/chat"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"code"}],"text":"/classify"},{"type":"text","text":" that fit your product rather than mirroring the raw API 1:1. The best wrappers are thin at the HTTP layer but opinionated in validation, error handling, usage logging, and response shaping."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What a REST wrapper does"}]},{"type":"paragraph","content":[{"type":"text","text":"A Claude REST wrapper is not just “Express forwarding JSON to Anthropic.” It usually adds:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Input validation before requests reach Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"API-key isolation, since the browser should never call Claude directly."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Request normalization, such as converting a simple "},{"type":"text","marks":[{"type":"code"}],"text":"message"},{"type":"text","text":" string into a Claude "},{"type":"text","marks":[{"type":"code"}],"text":"messages"},{"type":"text","text":" array."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Response normalization, such as flattening Claude content blocks into a single "},{"type":"text","marks":[{"type":"code"}],"text":"text"},{"type":"text","text":" field."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Logging, usage tracking, retries, and rate limiting for production workloads."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"So the wrapper’s main value is not only convenience but also "},{"type":"text","marks":[{"type":"bold"}],"text":"control"},{"type":"text","text":" over reliability, security, and product behavior."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Good endpoint design"}]},{"type":"paragraph","content":[{"type":"text","text":"Most teams should avoid exposing the raw Messages API as their public contract unless they are intentionally building a gateway product. Instead, define endpoints around app use cases:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /chat"},{"type":"text","text":" — one-shot conversational reply."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /chat/stream"},{"type":"text","text":" — streaming reply."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /summarize"},{"type":"text","text":" — summarization feature."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /classify"},{"type":"text","text":" — structured classification output."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /sessions/:id/messages"},{"type":"text","text":" — stateful chat route backed by your own persistence."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is usually better than a generic "},{"type":"text","marks":[{"type":"code"}],"text":"POST /claude"},{"type":"text","text":" because it lets each endpoint enforce the right schema, token limits, and output format for its use case."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Basic wrapper architecture"}]},{"type":"paragraph","content":[{"type":"text","text":"A maintainable Express wrapper usually has these layers:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Route layer"},{"type":"text","text":": Express handlers for HTTP input/output."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Validation layer"},{"type":"text","text":": "},{"type":"text","marks":[{"type":"code"}],"text":"zod"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"ajv"},{"type":"text","text":", or equivalent schema validation."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Claude service layer"},{"type":"text","text":": the only place that calls "},{"type":"text","marks":[{"type":"code"}],"text":"client.messages.create(...)"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Error mapping layer"},{"type":"text","text":": converts SDK/provider errors into HTTP responses."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Optional persistence layer"},{"type":"text","text":": stores sessions, histories, and analytics."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That structure is better than calling Claude directly in a large route because it keeps provider-specific logic isolated and easy to test."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Minimal REST wrapper example"}]},{"type":"paragraph","content":[{"type":"text","text":"Here is a clean TypeScript/Express wrapper for a simple "},{"type":"text","marks":[{"type":"code"}],"text":"/chat"},{"type":"text","text":" endpoint:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"import \"dotenv/config\";\nimport express from \"express\";\nimport Anthropic from \"@anthropic-ai/sdk\";\n\nconst app = express();\napp.use(express.json());\n\nconst client = new Anthropic({\n  apiKey: process.env[\"ANTHROPIC_API_KEY\"],\n});\n\napp.post(\"/chat\", async (req, res) => {\n  try {\n    const message = String(req.body?.message ?? \"\").trim();\n\n    if (!message) {\n      return res.status(400).json({ error: \"message is required\" });\n    }\n\n    const response = await client.messages.create({\n      model: process.env.CLAUDE_MODEL ?? \"claude-sonnet-4-6\",\n      max_tokens: 1024,\n      messages: [{ role: \"user\", content: message }],\n    });\n\n    const text = response.content\n      .filter((block) => block.type === \"text\")\n      .map((block) => block.text)\n      .join(\"\");\n\n    res.json({\n      id: response.id,\n      model: response.model,\n      text,\n      stop_reason: response.stop_reason,\n      usage: response.usage,\n    });\n  } catch (err) {\n    console.error(err);\n    res.status(500).json({ error: \"Claude request failed\" });\n  }\n});\n\napp.listen(3000, () => {\n  console.log(\"Server running on :3000\");\n});"}]},{"type":"paragraph","content":[{"type":"text","text":"This follows the official SDK usage pattern in Node.js guides, while adding the first essential wrapper responsibilities: request validation, response flattening, and consistent JSON output."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Better wrapper: service layer"}]},{"type":"paragraph","content":[{"type":"text","text":"As soon as you have more than one endpoint, move Claude calls into a service class or module. That keeps your wrappers reusable and stops route files from turning into transport-plus-business-logic hybrids."}]},{"type":"paragraph","content":[{"type":"text","text":"Example:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"// services/claude-service.ts\nimport Anthropic from \"@anthropic-ai/sdk\";\n\nexport class ClaudeService {\n  constructor(private client: Anthropic, private model: string) {}\n\n  async chat(message: string) {\n    const response = await this.client.messages.create({\n      model: this.model,\n      max_tokens: 1024,\n      messages: [{ role: \"user\", content: message }],\n    });\n\n    const text = response.content\n      .filter((block) => block.type === \"text\")\n      .map((block) => block.text)\n      .join(\"\");\n\n    return {\n      id: response.id,\n      model: response.model,\n      text,\n      stop_reason: response.stop_reason,\n      usage: response.usage,\n    };\n  }\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"Then the route becomes:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"app.post(\"/chat\", async (req, res) => {\n  try {\n    const message = String(req.body?.message ?? \"\").trim();\n    if (!message) return res.status(400).json({ error: \"message is required\" });\n\n    const result = await claudeService.chat(message);\n    res.json(result);\n  } catch (err) {\n    next(err);\n  }\n});"}]},{"type":"paragraph","content":[{"type":"text","text":"This is the right direction for production wrappers because the Express route now only handles HTTP concerns."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Input validation patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"Wrapper APIs should reject bad payloads before they consume Claude tokens. Current Node backend guides specifically recommend schema validation libraries such as Zod or Ajv to validate incoming requests and tool schemas."}]},{"type":"paragraph","content":[{"type":"text","text":"Example with Zod:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"import { z } from \"zod\";\n\nexport const chatSchema = z.object({\n  message: z.string().min(1).max(20_000),\n  system: z.string().max(10_000).optional(),\n  max_tokens: z.number().int().min(1).max(4096).optional(),\n});"}]},{"type":"paragraph","content":[{"type":"text","text":"Route usage:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"app.post(\"/chat\", async (req, res, next) => {\n  try {\n    const body = chatSchema.parse(req.body);\n\n    const response = await client.messages.create({\n      model: process.env.CLAUDE_MODEL ?? \"claude-sonnet-4-6\",\n      max_tokens: body.max_tokens ?? 1024,\n      system: body.system,\n      messages: [{ role: \"user\", content: body.message }],\n    });\n\n    // normalize result...\n  } catch (err) {\n    next(err);\n  }\n});"}]},{"type":"paragraph","content":[{"type":"text","text":"This is an important wrapper pattern because it stops your public REST contract from becoming “anything goes.”"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Response normalization patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude returns structured content blocks, not just a single reply string. A REST wrapper should typically normalize this into a simpler contract for consumers, unless the consumer explicitly wants raw provider structure."}]},{"type":"paragraph","content":[{"type":"text","text":"Common response strategies:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Simple text API"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Return: ``"},{"type":"text","marks":[{"type":"code"}],"text":"json { \"text\": \"...\" } "},{"type":"text","text":"`` Best for frontend chat widgets."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Typed app response"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Return: ``"},{"type":"text","marks":[{"type":"code"}],"text":"json { \"id\": \"...\", \"text\": \"...\", \"model\": \"...\", \"stop_reason\": \"...\", \"usage\": {... } } "},{"type":"text","text":"`` Better for production observability and debugging."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Raw proxy mode"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Return most of Claude’s raw response. Useful for internal gateways, but less stable for product-facing APIs."}]},{"type":"paragraph","content":[{"type":"text","text":"In general, stable product wrappers should prefer normalized responses over raw pass-through objects."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling and HTTP mapping"}]},{"type":"paragraph","content":[{"type":"text","text":"A proper REST wrapper must convert Claude/SDK failures into meaningful HTTP responses instead of always returning "},{"type":"text","marks":[{"type":"code"}],"text":"500"},{"type":"text","text":". Production Node guides for Claude emphasize retry logic, modest timeouts, and structured handling of provider failures, especially rate limits and malformed requests."}]},{"type":"paragraph","content":[{"type":"text","text":"A practical mapping is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"400"},{"type":"text","text":" — invalid client payload, missing message, unsupported options."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"401/403"},{"type":"text","text":" — your own app auth failure."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"429"},{"type":"text","text":" — upstream or local rate limit exceeded."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"502/503"},{"type":"text","text":" — Claude/API temporary failure."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"504"},{"type":"text","text":" — upstream timeout."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That mapping makes your wrapper act like a real backend dependency instead of a toy demo."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Streaming wrappers"}]},{"type":"paragraph","content":[{"type":"text","text":"For chat UX, the wrapper often adds "},{"type":"text","marks":[{"type":"code"}],"text":"POST /chat/stream"},{"type":"text","text":" that relays Claude’s streamed output progressively to the client rather than waiting for the full message. In Express, this is typically implemented with streaming HTTP responses or SSE, depending on the frontend contract you want."}]},{"type":"paragraph","content":[{"type":"text","text":"The design principle is the same:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Validate request."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Start Claude stream."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Forward chunks."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Handle disconnects."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"End with a completion marker."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is usually the next wrapper pattern to implement after a blocking "},{"type":"text","marks":[{"type":"code"}],"text":"/chat"},{"type":"text","text":" endpoint because many guides note that lack of streaming hurts latency perception in production apps."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Stateful wrappers"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude’s Messages API is stateless, so if you want your REST wrapper to support real conversations, your backend must persist message history and resend it each turn. That leads to routes like:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /sessions"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /sessions/:id/messages"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"GET /sessions/:id/messages"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Your wrapper then becomes responsible for loading prior turns, appending the new user message, calling Claude with the full history, and saving the assistant response."}]},{"type":"paragraph","content":[{"type":"text","text":"This is a key distinction: a wrapper can be either:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"A "},{"type":"text","marks":[{"type":"bold"}],"text":"thin Claude facade"},{"type":"text","text":" for one-shot calls."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"A "},{"type":"text","marks":[{"type":"bold"}],"text":"stateful conversation API"},{"type":"text","text":" backed by your own storage."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tool-use wrappers"}]},{"type":"paragraph","content":[{"type":"text","text":"When Claude uses tools, a generic wrapper often needs a more specialized orchestration endpoint because tool use is not a single request/response interaction. The wrapper flow becomes:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Receive request."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Call Claude with tool schemas."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"If Claude requests a tool, execute backend logic."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Send tool result back to Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Repeat until final text is produced."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That orchestration should live in a service layer, not in a large Express route function, because it introduces looping, validation, and permission checks."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Production additions"}]},{"type":"paragraph","content":[{"type":"text","text":"Current Node.js Claude integration guides repeatedly recommend these production additions for wrappers:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Timeouts on Claude client requests."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Rate limiting and exponential backoff on transient failures."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Input validation before prompt construction."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Output validation for structured JSON responses."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Usage logging to track token cost."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Caching repeated requests where appropriate."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"These are what turn an Express wrapper from “just an SDK call” into a backend integration pattern."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended wrapper blueprint"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong Node.js / Express REST wrapper around Claude usually looks like this:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /chat"},{"type":"text","text":" — normalized one-shot response."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /chat/stream"},{"type":"text","text":" — streaming response."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /classify"},{"type":"text","text":" — structured output route validated against a schema."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"POST /sessions/:id/messages"},{"type":"text","text":" — persisted chat route."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Shared "},{"type":"text","marks":[{"type":"code"}],"text":"Anthropic"},{"type":"text","text":" client module."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"code"}],"text":"ClaudeService"},{"type":"text","text":" for SDK interactions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Validation middleware with Zod/Ajv."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Central error middleware."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Logging of "},{"type":"text","marks":[{"type":"code"}],"text":"usage"},{"type":"text","text":", model, latency, and request IDs."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"That is the core pattern: Express provides the public REST contract, your wrapper adds validation and policy, and Claude stays behind a typed service boundary instead of leaking directly into every route."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T06:57:07.728Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A REST API wrapper around Claude in Node.js / Express should act as a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "backend facade"
+          },
+          {
+            "type": "text",
+            "text": ": it validates client input, calls the Anthropic SDK, normalizes the Claude response, and exposes stable endpoints like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/messages"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/chat"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/classify"
+          },
+          {
+            "type": "text",
+            "text": " that fit your product rather than mirroring the raw API 1:1. The best wrappers are thin at the HTTP layer but opinionated in validation, error handling, usage logging, and response shaping."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What a REST wrapper does"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5SRVNUIEFQSSB3cmFwcGVycyBhcm91bmQgQ2xhdWRlPC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iMTA1IiBmb250LWZhbWlseT0ic3lzdGVtLXVpLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiCiAgICAgICAgZmlsbD0id2hpdGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIG9wYWNpdHk9IjAuNzUiPkNsYXVkZSBMZWFybmluZyBQYXRoPC90ZXh0PgogIDxjaXJjbGUgY3g9IjYwIiBjeT0iODAiIHI9IjI4IiBmaWxsPSJ3aGl0ZSIgb3BhY2l0eT0iMC4xNSIvPgogIDxjaXJjbGUgY3g9Ijc2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KPC9zdmc+",
+          "alt": "Diagram for REST API wrappers around Claude",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A Claude REST wrapper is not just \u201cExpress forwarding JSON to Anthropic.\u201d It usually adds:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Input validation before requests reach Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "API-key isolation, since the browser should never call Claude directly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Request normalization, such as converting a simple "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "message"
+                  },
+                  {
+                    "type": "text",
+                    "text": " string into a Claude "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "messages"
+                  },
+                  {
+                    "type": "text",
+                    "text": " array."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Response normalization, such as flattening Claude content blocks into a single "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "text"
+                  },
+                  {
+                    "type": "text",
+                    "text": " field."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Logging, usage tracking, retries, and rate limiting for production workloads."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "So the wrapper\u2019s main value is not only convenience but also "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "control"
+          },
+          {
+            "type": "text",
+            "text": " over reliability, security, and product behavior."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Good endpoint design"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Most teams should avoid exposing the raw Messages API as their public contract unless they are intentionally building a gateway product. Instead, define endpoints around app use cases:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /chat"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 one-shot conversational reply."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /chat/stream"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 streaming reply."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /summarize"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 summarization feature."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /classify"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 structured classification output."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /sessions/:id/messages"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 stateful chat route backed by your own persistence."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is usually better than a generic "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "POST /claude"
+          },
+          {
+            "type": "text",
+            "text": " because it lets each endpoint enforce the right schema, token limits, and output format for its use case."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Basic wrapper architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A maintainable Express wrapper usually has these layers:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Route layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Express handlers for HTTP input/output."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Validation layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "zod"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ajv"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", or equivalent schema validation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Claude service layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": the only place that calls "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "client.messages.create(...)"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Error mapping layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": converts SDK/provider errors into HTTP responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Optional persistence layer"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": stores sessions, histories, and analytics."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That structure is better than calling Claude directly in a large route because it keeps provider-specific logic isolated and easy to test."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Minimal REST wrapper example"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Here is a clean TypeScript/Express wrapper for a simple "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/chat"
+          },
+          {
+            "type": "text",
+            "text": " endpoint:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import \"dotenv/config\";\nimport express from \"express\";\nimport Anthropic from \"@anthropic-ai/sdk\";\n\nconst app = express();\napp.use(express.json());\n\nconst client = new Anthropic({\n  apiKey: process.env[\"ANTHROPIC_API_KEY\"],\n});\n\napp.post(\"/chat\", async (req, res) => {\n  try {\n    const message = String(req.body?.message ?? \"\").trim();\n\n    if (!message) {\n      return res.status(400).json({ error: \"message is required\" });\n    }\n\n    const response = await client.messages.create({\n      model: process.env.CLAUDE_MODEL ?? \"claude-sonnet-4-6\",\n      max_tokens: 1024,\n      messages: [{ role: \"user\", content: message }],\n    });\n\n    const text = response.content\n      .filter((block) => block.type === \"text\")\n      .map((block) => block.text)\n      .join(\"\");\n\n    res.json({\n      id: response.id,\n      model: response.model,\n      text,\n      stop_reason: response.stop_reason,\n      usage: response.usage,\n    });\n  } catch (err) {\n    console.error(err);\n    res.status(500).json({ error: \"Claude request failed\" });\n  }\n});\n\napp.listen(3000, () => {\n  console.log(\"Server running on :3000\");\n});"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This follows the official SDK usage pattern in Node.js guides, while adding the first essential wrapper responsibilities: request validation, response flattening, and consistent JSON output."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Better wrapper: service layer"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As soon as you have more than one endpoint, move Claude calls into a service class or module. That keeps your wrappers reusable and stops route files from turning into transport-plus-business-logic hybrids."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "// services/claude-service.ts\nimport Anthropic from \"@anthropic-ai/sdk\";\n\nexport class ClaudeService {\n  constructor(private client: Anthropic, private model: string) {}\n\n  async chat(message: string) {\n    const response = await this.client.messages.create({\n      model: this.model,\n      max_tokens: 1024,\n      messages: [{ role: \"user\", content: message }],\n    });\n\n    const text = response.content\n      .filter((block) => block.type === \"text\")\n      .map((block) => block.text)\n      .join(\"\");\n\n    return {\n      id: response.id,\n      model: response.model,\n      text,\n      stop_reason: response.stop_reason,\n      usage: response.usage,\n    };\n  }\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Then the route becomes:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "app.post(\"/chat\", async (req, res) => {\n  try {\n    const message = String(req.body?.message ?? \"\").trim();\n    if (!message) return res.status(400).json({ error: \"message is required\" });\n\n    const result = await claudeService.chat(message);\n    res.json(result);\n  } catch (err) {\n    next(err);\n  }\n});"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the right direction for production wrappers because the Express route now only handles HTTP concerns."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Input validation patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Wrapper APIs should reject bad payloads before they consume Claude tokens. Current Node backend guides specifically recommend schema validation libraries such as Zod or Ajv to validate incoming requests and tool schemas."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example with Zod:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "import { z } from \"zod\";\n\nexport const chatSchema = z.object({\n  message: z.string().min(1).max(20_000),\n  system: z.string().max(10_000).optional(),\n  max_tokens: z.number().int().min(1).max(4096).optional(),\n});"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Route usage:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "app.post(\"/chat\", async (req, res, next) => {\n  try {\n    const body = chatSchema.parse(req.body);\n\n    const response = await client.messages.create({\n      model: process.env.CLAUDE_MODEL ?? \"claude-sonnet-4-6\",\n      max_tokens: body.max_tokens ?? 1024,\n      system: body.system,\n      messages: [{ role: \"user\", content: body.message }],\n    });\n\n    // normalize result...\n  } catch (err) {\n    next(err);\n  }\n});"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is an important wrapper pattern because it stops your public REST contract from becoming \u201canything goes.\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Response normalization patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude returns structured content blocks, not just a single reply string. A REST wrapper should typically normalize this into a simpler contract for consumers, unless the consumer explicitly wants raw provider structure."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Common response strategies:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Simple text API"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Return: ``"
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "json { \"text\": \"...\" } "
+          },
+          {
+            "type": "text",
+            "text": "`` Best for frontend chat widgets."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Typed app response"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Return: ``"
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "json { \"id\": \"...\", \"text\": \"...\", \"model\": \"...\", \"stop_reason\": \"...\", \"usage\": {... } } "
+          },
+          {
+            "type": "text",
+            "text": "`` Better for production observability and debugging."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Raw proxy mode"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Return most of Claude\u2019s raw response. Useful for internal gateways, but less stable for product-facing APIs."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In general, stable product wrappers should prefer normalized responses over raw pass-through objects."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling and HTTP mapping"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A proper REST wrapper must convert Claude/SDK failures into meaningful HTTP responses instead of always returning "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "500"
+          },
+          {
+            "type": "text",
+            "text": ". Production Node guides for Claude emphasize retry logic, modest timeouts, and structured handling of provider failures, especially rate limits and malformed requests."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical mapping is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "400"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 invalid client payload, missing message, unsupported options."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "401/403"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 your own app auth failure."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "429"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 upstream or local rate limit exceeded."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "502/503"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 Claude/API temporary failure."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "504"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 upstream timeout."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That mapping makes your wrapper act like a real backend dependency instead of a toy demo."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming wrappers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For chat UX, the wrapper often adds "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "POST /chat/stream"
+          },
+          {
+            "type": "text",
+            "text": " that relays Claude\u2019s streamed output progressively to the client rather than waiting for the full message. In Express, this is typically implemented with streaming HTTP responses or SSE, depending on the frontend contract you want."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The design principle is the same:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validate request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start Claude stream."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Forward chunks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Handle disconnects."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "End with a completion marker."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is usually the next wrapper pattern to implement after a blocking "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "/chat"
+          },
+          {
+            "type": "text",
+            "text": " endpoint because many guides note that lack of streaming hurts latency perception in production apps."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Stateful wrappers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s Messages API is stateless, so if you want your REST wrapper to support real conversations, your backend must persist message history and resend it each turn. That leads to routes like:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /sessions"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /sessions/:id/messages"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "GET /sessions/:id/messages"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Your wrapper then becomes responsible for loading prior turns, appending the new user message, calling Claude with the full history, and saving the assistant response."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is a key distinction: a wrapper can be either:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "thin Claude facade"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for one-shot calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "stateful conversation API"
+                  },
+                  {
+                    "type": "text",
+                    "text": " backed by your own storage."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool-use wrappers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When Claude uses tools, a generic wrapper often needs a more specialized orchestration endpoint because tool use is not a single request/response interaction. The wrapper flow becomes:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Receive request."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Call Claude with tool schemas."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "If Claude requests a tool, execute backend logic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Send tool result back to Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Repeat until final text is produced."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That orchestration should live in a service layer, not in a large Express route function, because it introduces looping, validation, and permission checks."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Production additions"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Current Node.js Claude integration guides repeatedly recommend these production additions for wrappers:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Timeouts on Claude client requests."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limiting and exponential backoff on transient failures."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Input validation before prompt construction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output validation for structured JSON responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Usage logging to track token cost."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Caching repeated requests where appropriate."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These are what turn an Express wrapper from \u201cjust an SDK call\u201d into a backend integration pattern."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended wrapper blueprint"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong Node.js / Express REST wrapper around Claude usually looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /chat"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 normalized one-shot response."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /chat/stream"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 streaming response."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /classify"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 structured output route validated against a schema."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "POST /sessions/:id/messages"
+                  },
+                  {
+                    "type": "text",
+                    "text": " \u2014 persisted chat route."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Shared "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "Anthropic"
+                  },
+                  {
+                    "type": "text",
+                    "text": " client module."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ClaudeService"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for SDK interactions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Validation middleware with Zod/Ajv."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Central error middleware."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Logging of "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "usage"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", model, latency, and request IDs."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "That is the core pattern: Express provides the public REST contract, your wrapper adds validation and policy, and Claude stays behind a typed service boundary instead of leaking directly into every route."
+          }
+        ]
+      }
+    ]
+  }
+}

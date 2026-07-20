@@ -1,1 +1,1890 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T09:47:15.123Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"For a "},{"type":"text","marks":[{"type":"bold"}],"text":"9,700-page Claude-assisted static site"},{"type":"text","text":", incremental regeneration and caching should be treated as "},{"type":"text","marks":[{"type":"bold"}],"text":"two separate but coordinated layers"},{"type":"text","text":": page-level regeneration in the web framework, and prompt/data caching in the Claude pipeline. The winning architecture is to regenerate only the pages whose source records changed, while also caching stable Claude prompt prefixes and reusing normalized content artifacts so you do not repeatedly pay to recompute the same AI context or rebuild the whole site."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Two cache layers"}]},{"type":"paragraph","content":[{"type":"text","text":"There are really "},{"type":"text","marks":[{"type":"bold"}],"text":"two different caching problems"},{"type":"text","text":" here."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Site/page caching"},{"type":"text","text":": how HTML pages are served and revalidated."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Claude/pipeline caching"},{"type":"text","text":": how repeated LLM inputs avoid unnecessary reprocessing."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Next.js ISR handles the first problem by serving cached static pages and regenerating them in the background when stale or on demand. Anthropic prompt caching handles the second by reusing identical prompt prefixes across requests, reducing latency and cost for repetitive workloads."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Incremental regeneration concept"}]},{"type":"paragraph","content":[{"type":"text","text":"On the site side, the core idea is simple: do "},{"type":"text","marks":[{"type":"bold"}],"text":"not"},{"type":"text","text":" rebuild all 9,700 pages when only 42 records changed. Next.js ISR is explicitly designed to update static content without rebuilding the entire site, handle large amounts of content without long build times, and serve stale content first while regenerating a new version in the background. That makes ISR a natural fit for large content estates with localized changes."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"How ISR behaves"}]},{"type":"paragraph","content":[{"type":"text","text":"The Next.js docs describe ISR as a stale-while-revalidate model: pages are generated at build time or on first request, cached, then re-generated in the background after the revalidation window passes. If regeneration succeeds, the next user gets the updated page; if regeneration fails, Next.js continues serving the last successful page and retries later. That failure behavior is especially valuable for a large AI-assisted content system because temporary data or model errors do not have to take live pages offline."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best regeneration strategy"}]},{"type":"paragraph","content":[{"type":"text","text":"For a 9,700-page site, the best default is "},{"type":"text","marks":[{"type":"bold"}],"text":"targeted on-demand revalidation"},{"type":"text","text":", not purely time-based global revalidation. The Next.js docs note that "},{"type":"text","marks":[{"type":"code"}],"text":"res.revalidate()"},{"type":"text","text":" lets you regenerate a precise path on demand, and when you use on-demand revalidation you do not need to rely on scheduled "},{"type":"text","marks":[{"type":"code"}],"text":"revalidate"},{"type":"text","text":" windows for everything. That aligns well with Claude pipelines because page changes are usually triggered by updated source records or repaired AI outputs, not by a fixed timer."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Change-driven workflow"}]},{"type":"paragraph","content":[{"type":"text","text":"A robust flow looks like this:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"A source record changes, or an AI-enriched record is repaired."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The normalized content store marks the affected page IDs as dirty."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Only those pages are revalidated or rebuilt."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Cached HTML remains live until the new version succeeds."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This avoids both full rebuild cost and unnecessary Claude calls."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Dirty-page tracking"}]},{"type":"paragraph","content":[{"type":"text","text":"The most important internal mechanism is a "},{"type":"text","marks":[{"type":"bold"}],"text":"dirty-page index"},{"type":"text","text":". Each source record, enrichment task, taxonomy item, or shared template dependency should map to the page paths it affects, so the system can revalidate only those routes after a successful content update. Without this dependency map, teams often fall back to blunt full-site rebuilds."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Content dependency graph"}]},{"type":"paragraph","content":[{"type":"text","text":"At this scale, one content change can affect more than one page. A neighborhood summary may affect a town page, several block pages, search indexes, related-links widgets, and sitemap fragments, so incremental regeneration works best when you maintain a dependency graph from content entities to rendered artifacts. This is how you keep “incremental” from accidentally becoming inconsistent."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Claude’s role in incremental regeneration"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude should usually sit "},{"type":"text","marks":[{"type":"bold"}],"text":"before"},{"type":"text","text":" the ISR layer, not inside live page rendering. That means you run Claude to extract, summarize, classify, or normalize content into canonical data, then ISR regenerates the page from that saved content rather than calling Claude during user requests. This separation protects latency, cost, and reliability."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why not live Claude on page request"}]},{"type":"paragraph","content":[{"type":"text","text":"Calling Claude during on-demand page generation sounds flexible, but it creates avoidable risk. ISR works best when the regeneration step reads stable data quickly; if every page regeneration depends on an external model call, you increase latency, raise failure rates, and entangle content freshness with model availability. For large sites, Claude should usually produce cached structured content offline, then the framework revalidates from that stored result."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Prompt caching value"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s prompt caching is very relevant when your extraction or enrichment pipeline repeatedly sends the same long system prompt, tool definitions, schema instructions, or reference context. The docs say prompt caching can reduce processing time and cost for repetitive tasks, supports both automatic and explicit caching, and by default keeps cached prefixes alive for 5 minutes, with a 1-hour option available at additional cost. For a 9,700-page batch or patch run, that can materially reduce LLM spend."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What to cache in Claude requests"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s docs recommend placing stable content first and setting "},{"type":"text","marks":[{"type":"code"}],"text":"cache_control"},{"type":"text","text":" on the last reusable block in the shared prefix. In a static-site extraction pipeline, the cacheable prefix is usually:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"System instructions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Output schema instructions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Tool definitions."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Shared examples."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Fixed reference taxonomy or editorial rules."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The per-record source text, timestamps, IDs, and page-specific input should come "},{"type":"text","marks":[{"type":"bold"}],"text":"after"},{"type":"text","text":" that stable prefix so they do not invalidate the reusable cache."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Avoid a common cache mistake"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic explicitly warns against putting the cache breakpoint on content that changes every request, such as timestamps or per-request user input. If you do that, the cache misses because the prefix hash changes every time. For batch enrichment of 9,700 records, the correct pattern is to cache the common extraction instructions and schema, then append each record’s specific content after the breakpoint."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Batch plus caching together"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s docs also state that prompt-caching multipliers stack with the Batch API discount. That is important because for large offline regeneration passes, you can get both the batch-processing economics and the reuse benefit of cached shared prefixes when requests are structured properly. In other words, the ideal architecture is not “batch or cache”; it is often "},{"type":"text","marks":[{"type":"bold"}],"text":"batch and cache"},{"type":"text","text":"."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"TTL choice"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic offers a default 5-minute cache TTL and a 1-hour TTL option. For tightly packed batch submissions or rapid patch runs, 5 minutes may be enough if requests are sent in a steady stream; for staggered jobs, larger corpora, or multi-stage enrichment that stretches over longer periods, the 1-hour TTL is often safer. The right choice depends on how quickly subsequent similar requests arrive."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Cache pre-warming"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic documents a pre-warming technique using "},{"type":"text","marks":[{"type":"code"}],"text":"max_tokens: 0"},{"type":"text","text":" so you can load a shared prefix into cache before real requests arrive. This is useful for synchronous applications, but Anthropic also states that "},{"type":"text","marks":[{"type":"code"}],"text":"max_tokens: 0"},{"type":"text","text":" is rejected inside Message Batches requests and that pre-warming is mainly about time-to-first-token, which does not apply the same way to batch processing. So for a static-site pipeline, pre-warming is more relevant for interactive patch tools than for the batch job itself."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Artifact caching beyond prompts"}]},{"type":"paragraph","content":[{"type":"text","text":"Prompt caching is only one part of the Claude-side optimization story. You should also cache the "},{"type":"text","marks":[{"type":"bold"}],"text":"outputs"},{"type":"text","text":" of completed extraction or enrichment stages in your own storage, keyed by source content hash, prompt version, schema version, and model version, so unchanged records never get sent back to Claude unnecessarily. This is usually the biggest savings lever in mature pipelines because it prevents needless recomputation entirely."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Content-hash strategy"}]},{"type":"paragraph","content":[{"type":"text","text":"A good incremental architecture fingerprints each page’s input bundle. That fingerprint often includes the raw source content hash, transformation version, prompt version, schema version, and shared taxonomy version; if the fingerprint has not changed, you can skip Claude and skip regeneration. If only the template changed, you can skip Claude but still re-render the page."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Three-level invalidation model"}]},{"type":"paragraph","content":[{"type":"text","text":"A clean mental model is to have "},{"type":"text","marks":[{"type":"bold"}],"text":"three invalidation layers"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Data invalidation"},{"type":"text","text":": source record changed."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"AI invalidation"},{"type":"text","text":": prompt/schema/model version changed."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Render invalidation"},{"type":"text","text":": page template or layout changed."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Each layer should trigger only the minimum necessary work. This prevents the expensive mistake of treating every update as a full extraction plus full rebuild event."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Use stale-on-error behavior"}]},{"type":"paragraph","content":[{"type":"text","text":"The Next.js docs state that if regeneration throws during background refresh, the last successful page continues to be served, and Next.js retries on a later request. For Claude-assisted sites, this is powerful because an upstream enrichment error does not have to poison the published page immediately. You can keep the previous stable content live until the repaired record is ready."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"On-demand over periodic for sparse updates"}]},{"type":"paragraph","content":[{"type":"text","text":"If page changes are irregular, on-demand invalidation is generally better than a short universal "},{"type":"text","marks":[{"type":"code"}],"text":"revalidate"},{"type":"text","text":" interval. Time-based ISR can work for content that predictably changes every hour or day, but large long-tail page sets usually benefit more from event-driven regeneration when a specific record changes. That keeps regeneration proportional to actual content churn."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"When time-based revalidation still helps"}]},{"type":"paragraph","content":[{"type":"text","text":"Time-based ISR is still useful for aggregate or derived pages whose upstream dependencies are broad and difficult to track precisely. For example, directory indexes, popularity rankings, or composite landing pages may be easier to refresh every few hours while detail pages use precise on-demand revalidation. In practice, many large sites use a hybrid approach."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Cache observability"}]},{"type":"paragraph","content":[{"type":"text","text":"Both Next.js and Anthropic expose useful signals you should monitor. Next.js documents "},{"type":"text","marks":[{"type":"code"}],"text":"NEXT_PRIVATE_DEBUG_CACHE=1"},{"type":"text","text":" and fetch logging to inspect cache behavior locally, while Anthropic exposes "},{"type":"text","marks":[{"type":"code"}],"text":"cache_creation_input_tokens"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"cache_read_input_tokens"},{"type":"text","text":", and "},{"type":"text","marks":[{"type":"code"}],"text":"input_tokens"},{"type":"text","text":" so you can see whether prompt caching is actually working. Without these metrics, teams often assume caching is effective when it is not."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Exact-match discipline"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic emphasizes that cache hits require 100 percent identical prompt segments up to the cache breakpoint. Small changes such as random IDs, reordered tool definitions, toggled settings, timestamps, or image differences can invalidate the cache. For large static pipelines, this means prompt assembly must be disciplined and deterministic rather than casually string-concatenated."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Platform caveat"}]},{"type":"paragraph","content":[{"type":"text","text":"If you are using Next.js ISR, the docs note that ISR is supported on the Node.js runtime and not when creating a static export. That matters because some large-site teams assume “static site” automatically means export-only hosting, but ISR needs a compatible runtime or hosting setup to perform background regeneration and on-demand revalidation. If your deployment target cannot support ISR, you need a different incremental publish strategy."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best architecture pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"For a Claude-assisted 9,700-page site, the strongest combined pattern is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Offline Claude extraction/enrichment into canonical storage."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Output caching keyed by content hash and prompt/schema version."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Prompt caching for repeated long Claude prefixes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Dirty-page tracking from content entities to routes."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"On-demand page revalidation for changed paths."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Time-based ISR only for broad aggregate pages."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Stale-page fallback on regeneration failures."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This setup minimizes rebuild cost, Claude cost, and operational fragility at the same time."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Interview-ready explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong answer is: “For a 9,700-page Claude-assisted site, I separate incremental regeneration into two layers. On the site side, I use ISR or an equivalent revalidation mechanism so only changed routes regenerate, ideally via on-demand invalidation keyed from a dirty-page dependency graph. On the Claude side, I cache stable prompt prefixes like system instructions, schemas, and tool definitions using Anthropic prompt caching, and I also persist completed extraction outputs keyed by content hash and prompt version. That way unchanged records skip Claude entirely, changed records only re-run the minimum pipeline, and published pages keep serving the last successful static version if regeneration fails.”"}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T09:47:15.123Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "9,700-page Claude-assisted static site"
+          },
+          {
+            "type": "text",
+            "text": ", incremental regeneration and caching should be treated as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "two separate but coordinated layers"
+          },
+          {
+            "type": "text",
+            "text": ": page-level regeneration in the web framework, and prompt/data caching in the Claude pipeline. The winning architecture is to regenerate only the pages whose source records changed, while also caching stable Claude prompt prefixes and reusing normalized content artifacts so you do not repeatedly pay to recompute the same AI context or rebuild the whole site."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzUiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5JbmNyZW1lbnRhbCByZWdlbmVyYXRpb24gYW5kIGNhY2hpbmcg4oCUIEtleSBDb25jZXB0czwvdGV4dD4KPHJlY3QgeD0iMzAiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjMWU0MGFmIiByeD0iOCIvPgo8dGV4dCB4PSIxNDUiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Q29yZSBDb25jZXB0PC90ZXh0Pgo8cmVjdCB4PSIyOTUiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjMDY1ZjQ2IiByeD0iOCIvPgo8dGV4dCB4PSI0MTAiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+SG93IEl0IFdvcmtzPC90ZXh0Pgo8cmVjdCB4PSI1NjAiIHk9IjU1IiB3aWR0aD0iMjMwIiBoZWlnaHQ9Ijg1IiBmaWxsPSIjN2MyZDEyIiByeD0iOCIvPgo8dGV4dCB4PSI2NzUiIHk9IjEwMCIgZmlsbD0iI2ZmZiIgZm9udC1zaXplPSIxMSIgdGV4dC1hbmNob3I9Im1pZGRsZSI+QmVzdCBQcmFjdGljZXM8L3RleHQ+CjxsaW5lIHgxPSIyNjAiIHkxPSI5NyIgeDI9IjI5MyIgeTI9Ijk3IiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8bGluZSB4MT0iNTI1IiB5MT0iOTciIHgyPSI1NTgiIHkyPSI5NyIgc3Ryb2tlPSIjNDc1NTY5IiBzdHJva2Utd2lkdGg9IjIiIG1hcmtlci1lbmQ9InVybCgjYSkiLz4KPGRlZnM+PG1hcmtlciBpZD0iYSIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNyIgcmVmWT0iNCIgb3JpZW50PSJhdXRvIj48cGF0aCBkPSJNMCwwIEw4LDQgTDAsOCBaIiBmaWxsPSIjNDc1NTY5Ii8+PC9tYXJrZXI+PC9kZWZzPgo8L3N2Zz4=",
+          "alt": "Incremental regeneration and caching concept diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Two cache layers"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "There are really "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "two different caching problems"
+          },
+          {
+            "type": "text",
+            "text": " here."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Site/page caching"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": how HTML pages are served and revalidated."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Claude/pipeline caching"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": how repeated LLM inputs avoid unnecessary reprocessing."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Next.js ISR handles the first problem by serving cached static pages and regenerating them in the background when stale or on demand. Anthropic prompt caching handles the second by reusing identical prompt prefixes across requests, reducing latency and cost for repetitive workloads."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Incremental regeneration concept"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "On the site side, the core idea is simple: do "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "not"
+          },
+          {
+            "type": "text",
+            "text": " rebuild all 9,700 pages when only 42 records changed. Next.js ISR is explicitly designed to update static content without rebuilding the entire site, handle large amounts of content without long build times, and serve stale content first while regenerating a new version in the background. That makes ISR a natural fit for large content estates with localized changes."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How ISR behaves"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Next.js docs describe ISR as a stale-while-revalidate model: pages are generated at build time or on first request, cached, then re-generated in the background after the revalidation window passes. If regeneration succeeds, the next user gets the updated page; if regeneration fails, Next.js continues serving the last successful page and retries later. That failure behavior is especially valuable for a large AI-assisted content system because temporary data or model errors do not have to take live pages offline."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best regeneration strategy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a 9,700-page site, the best default is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "targeted on-demand revalidation"
+          },
+          {
+            "type": "text",
+            "text": ", not purely time-based global revalidation. The Next.js docs note that "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "res.revalidate()"
+          },
+          {
+            "type": "text",
+            "text": " lets you regenerate a precise path on demand, and when you use on-demand revalidation you do not need to rely on scheduled "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "revalidate"
+          },
+          {
+            "type": "text",
+            "text": " windows for everything. That aligns well with Claude pipelines because page changes are usually triggered by updated source records or repaired AI outputs, not by a fixed timer."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Change-driven workflow"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A robust flow looks like this:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A source record changes, or an AI-enriched record is repaired."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The normalized content store marks the affected page IDs as dirty."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Only those pages are revalidated or rebuilt."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cached HTML remains live until the new version succeeds."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This avoids both full rebuild cost and unnecessary Claude calls."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Dirty-page tracking"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most important internal mechanism is a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "dirty-page index"
+          },
+          {
+            "type": "text",
+            "text": ". Each source record, enrichment task, taxonomy item, or shared template dependency should map to the page paths it affects, so the system can revalidate only those routes after a successful content update. Without this dependency map, teams often fall back to blunt full-site rebuilds."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Content dependency graph"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "At this scale, one content change can affect more than one page. A neighborhood summary may affect a town page, several block pages, search indexes, related-links widgets, and sitemap fragments, so incremental regeneration works best when you maintain a dependency graph from content entities to rendered artifacts. This is how you keep \u201cincremental\u201d from accidentally becoming inconsistent."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s role in incremental regeneration"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude should usually sit "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "before"
+          },
+          {
+            "type": "text",
+            "text": " the ISR layer, not inside live page rendering. That means you run Claude to extract, summarize, classify, or normalize content into canonical data, then ISR regenerates the page from that saved content rather than calling Claude during user requests. This separation protects latency, cost, and reliability."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why not live Claude on page request"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Calling Claude during on-demand page generation sounds flexible, but it creates avoidable risk. ISR works best when the regeneration step reads stable data quickly; if every page regeneration depends on an external model call, you increase latency, raise failure rates, and entangle content freshness with model availability. For large sites, Claude should usually produce cached structured content offline, then the framework revalidates from that stored result."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt caching value"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic\u2019s prompt caching is very relevant when your extraction or enrichment pipeline repeatedly sends the same long system prompt, tool definitions, schema instructions, or reference context. The docs say prompt caching can reduce processing time and cost for repetitive tasks, supports both automatic and explicit caching, and by default keeps cached prefixes alive for 5 minutes, with a 1-hour option available at additional cost. For a 9,700-page batch or patch run, that can materially reduce LLM spend."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What to cache in Claude requests"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic\u2019s docs recommend placing stable content first and setting "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "cache_control"
+          },
+          {
+            "type": "text",
+            "text": " on the last reusable block in the shared prefix. In a static-site extraction pipeline, the cacheable prefix is usually:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "System instructions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output schema instructions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tool definitions."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Shared examples."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fixed reference taxonomy or editorial rules."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The per-record source text, timestamps, IDs, and page-specific input should come "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "after"
+          },
+          {
+            "type": "text",
+            "text": " that stable prefix so they do not invalidate the reusable cache."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Avoid a common cache mistake"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic explicitly warns against putting the cache breakpoint on content that changes every request, such as timestamps or per-request user input. If you do that, the cache misses because the prefix hash changes every time. For batch enrichment of 9,700 records, the correct pattern is to cache the common extraction instructions and schema, then append each record\u2019s specific content after the breakpoint."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Batch plus caching together"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic\u2019s docs also state that prompt-caching multipliers stack with the Batch API discount. That is important because for large offline regeneration passes, you can get both the batch-processing economics and the reuse benefit of cached shared prefixes when requests are structured properly. In other words, the ideal architecture is not \u201cbatch or cache\u201d; it is often "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "batch and cache"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "TTL choice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic offers a default 5-minute cache TTL and a 1-hour TTL option. For tightly packed batch submissions or rapid patch runs, 5 minutes may be enough if requests are sent in a steady stream; for staggered jobs, larger corpora, or multi-stage enrichment that stretches over longer periods, the 1-hour TTL is often safer. The right choice depends on how quickly subsequent similar requests arrive."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cache pre-warming"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic documents a pre-warming technique using "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_tokens: 0"
+          },
+          {
+            "type": "text",
+            "text": " so you can load a shared prefix into cache before real requests arrive. This is useful for synchronous applications, but Anthropic also states that "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "max_tokens: 0"
+          },
+          {
+            "type": "text",
+            "text": " is rejected inside Message Batches requests and that pre-warming is mainly about time-to-first-token, which does not apply the same way to batch processing. So for a static-site pipeline, pre-warming is more relevant for interactive patch tools than for the batch job itself."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Artifact caching beyond prompts"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Prompt caching is only one part of the Claude-side optimization story. You should also cache the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "outputs"
+          },
+          {
+            "type": "text",
+            "text": " of completed extraction or enrichment stages in your own storage, keyed by source content hash, prompt version, schema version, and model version, so unchanged records never get sent back to Claude unnecessarily. This is usually the biggest savings lever in mature pipelines because it prevents needless recomputation entirely."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Content-hash strategy"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A good incremental architecture fingerprints each page\u2019s input bundle. That fingerprint often includes the raw source content hash, transformation version, prompt version, schema version, and shared taxonomy version; if the fingerprint has not changed, you can skip Claude and skip regeneration. If only the template changed, you can skip Claude but still re-render the page."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Three-level invalidation model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A clean mental model is to have "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "three invalidation layers"
+          },
+          {
+            "type": "text",
+            "text": ":"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Data invalidation"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": source record changed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "AI invalidation"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": prompt/schema/model version changed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Render invalidation"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": page template or layout changed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each layer should trigger only the minimum necessary work. This prevents the expensive mistake of treating every update as a full extraction plus full rebuild event."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Use stale-on-error behavior"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Next.js docs state that if regeneration throws during background refresh, the last successful page continues to be served, and Next.js retries on a later request. For Claude-assisted sites, this is powerful because an upstream enrichment error does not have to poison the published page immediately. You can keep the previous stable content live until the repaired record is ready."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "On-demand over periodic for sparse updates"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If page changes are irregular, on-demand invalidation is generally better than a short universal "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "revalidate"
+          },
+          {
+            "type": "text",
+            "text": " interval. Time-based ISR can work for content that predictably changes every hour or day, but large long-tail page sets usually benefit more from event-driven regeneration when a specific record changes. That keeps regeneration proportional to actual content churn."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "When time-based revalidation still helps"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Time-based ISR is still useful for aggregate or derived pages whose upstream dependencies are broad and difficult to track precisely. For example, directory indexes, popularity rankings, or composite landing pages may be easier to refresh every few hours while detail pages use precise on-demand revalidation. In practice, many large sites use a hybrid approach."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Cache observability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Both Next.js and Anthropic expose useful signals you should monitor. Next.js documents "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "NEXT_PRIVATE_DEBUG_CACHE=1"
+          },
+          {
+            "type": "text",
+            "text": " and fetch logging to inspect cache behavior locally, while Anthropic exposes "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "cache_creation_input_tokens"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "cache_read_input_tokens"
+          },
+          {
+            "type": "text",
+            "text": ", and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "input_tokens"
+          },
+          {
+            "type": "text",
+            "text": " so you can see whether prompt caching is actually working. Without these metrics, teams often assume caching is effective when it is not."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Exact-match discipline"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic emphasizes that cache hits require 100 percent identical prompt segments up to the cache breakpoint. Small changes such as random IDs, reordered tool definitions, toggled settings, timestamps, or image differences can invalidate the cache. For large static pipelines, this means prompt assembly must be disciplined and deterministic rather than casually string-concatenated."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Platform caveat"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If you are using Next.js ISR, the docs note that ISR is supported on the Node.js runtime and not when creating a static export. That matters because some large-site teams assume \u201cstatic site\u201d automatically means export-only hosting, but ISR needs a compatible runtime or hosting setup to perform background regeneration and on-demand revalidation. If your deployment target cannot support ISR, you need a different incremental publish strategy."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best architecture pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For a Claude-assisted 9,700-page site, the strongest combined pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Offline Claude extraction/enrichment into canonical storage."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output caching keyed by content hash and prompt/schema version."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching for repeated long Claude prefixes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Dirty-page tracking from content entities to routes."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "On-demand page revalidation for changed paths."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Time-based ISR only for broad aggregate pages."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stale-page fallback on regeneration failures."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This setup minimizes rebuild cost, Claude cost, and operational fragility at the same time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Interview-ready explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong answer is: \u201cFor a 9,700-page Claude-assisted site, I separate incremental regeneration into two layers. On the site side, I use ISR or an equivalent revalidation mechanism so only changed routes regenerate, ideally via on-demand invalidation keyed from a dirty-page dependency graph. On the Claude side, I cache stable prompt prefixes like system instructions, schemas, and tool definitions using Anthropic prompt caching, and I also persist completed extraction outputs keyed by content hash and prompt version. That way unchanged records skip Claude entirely, changed records only re-run the minimum pipeline, and published pages keep serving the last successful static version if regeneration fails.\u201d"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with incremental regeneration and caching, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with incremental regeneration and caching. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of incremental regeneration and caching scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When working with incremental regeneration and caching, following established best practices ensures reliability, maintainability, and optimal performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start simple and iterate \u2014 begin with the minimum viable implementation before adding complexity."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Test with representative inputs \u2014 ensure your test cases cover edge cases, not just the happy path."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Monitor performance \u2014 track latency, token usage, and error rates in production environments."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Version your prompts and configurations \u2014 treat prompt text like source code with proper version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Document your design decisions \u2014 record why you chose specific approaches for future maintainers."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan for failure \u2014 implement graceful degradation when the AI component is unavailable or returns unexpected results."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Review outputs regularly \u2014 periodically audit what the system produces to catch quality drift over time."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Mistakes to Avoid"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "These pitfalls frequently trip up developers working with incremental regeneration and caching. Knowing them in advance saves significant debugging time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Assuming deterministic output \u2014 language models are probabilistic; the same input can produce different outputs across calls. Always validate the structure of responses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring token limits \u2014 exceeding context window limits causes truncation or errors. Track token counts, especially in multi-turn conversations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Over-engineering early \u2014 building complex infrastructure before validating basic functionality wastes effort. Get a working prototype first."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hardcoding prompts in code \u2014 embed prompts in configuration files or databases so non-developers can iterate on them."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Skipping error handling \u2014 API calls fail due to rate limits, timeouts, or content policy violations. Always wrap calls in try/catch with appropriate retry logic."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance and Scalability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "As your usage of incremental regeneration and caching scales, these performance factors become increasingly important."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Latency budget \u2014 typical API latency ranges from 1-30 seconds depending on model size and output length. Design your UX around streaming to provide early feedback."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Concurrency limits \u2014 each API tier has request-per-minute (RPM) and token-per-minute (TPM) limits. Implement request queuing for burst traffic."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt caching \u2014 use the cache_control breakpoint on stable, repeated prompt prefixes to reduce costs by up to 90% and latency by 85%."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Batching \u2014 for non-interactive workloads, the Message Batches API processes up to 10,000 requests asynchronously at 50% cost reduction."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model selection \u2014 use Claude Haiku for high-volume, low-complexity tasks and Claude Sonnet or Opus for complex reasoning where quality matters more than speed."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,1 +1,2518 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-22T06:55:46.084Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Cost in screenshot-heavy computer use workflows is dominated by image tokens and repeated tool calls, so production systems need explicit budgeting, sampling loop guards, and screenshot minimization strategies baked into the agent design.[]"}]},{"type":"paragraph","content":[{"type":"text","text":"Below is a deep-dive guide framed as a section you could drop into “Claude Computer Use in Depth”."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What this section covers"}]},{"type":"paragraph","content":[{"type":"text","text":"This section focuses on managing and optimizing cost for workflows where Claude uses the computer use tool and takes many screenshots while operating a desktop or browser in production environments. It assumes a long-running agentic loop that repeatedly calls "},{"type":"text","marks":[{"type":"code"}],"text":"computer_20xxxxx"},{"type":"text","text":" and sends screenshots back to Claude.[]"}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why screenshot-heavy workflows are expensive"}]},{"type":"paragraph","content":[{"type":"text","text":"Screenshot-heavy workflows add several cost components on top of normal text-only usage:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Computer use adds a dedicated tool definition and a special system prompt, which contribute non-trivial token overhead each time you call the model.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Each screenshot is billed under vision/image pricing, and these images are often large and frequent, especially for high-resolution or multi-monitor setups.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Tool results (including text logs of actions, OCR-like descriptions, and status messages) are sent back into the context, growing the conversation and increasing token usage per step.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"In long agent loops, costs scale with both the number of iterations and per-iteration payload size, so inefficient loops or chatty logging can multiply total spend quickly. This is why production systems must treat screenshot cost as a first-class concern rather than an implementation detail.[]"}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Mental model: “Per step cost × steps”"}]},{"type":"paragraph","content":[{"type":"text","text":"A simple way to think about cost here is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Each loop iteration has a fixed overhead from:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Computer use system prompt (~hundreds of tokens) and tool definitions (~735 input tokens per computer use tool definition for 4.x models).[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Response tokens used by Claude to propose actions and reasoning.[]"}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Variable per-iteration cost comes from:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Number and size of screenshots (vision pricing).[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Size of tool results you stream back (e.g., logs, command outputs).[]"}]}]}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Total cost ≈ (cost per iteration) × (iterations per task) × (tasks per time unit)."},{"type":"hardBreak"},{"type":"text","text":"Cost management is therefore mainly about reducing:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"How many iterations are needed to complete a task."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"How much data (especially images) is processed per iteration."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"How often you repeat heavy overhead (e.g., re-sending large tool definitions unnecessarily)."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"How computer use pricing works"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude’s computer use follows the standard tool-use pricing model plus vision pricing for screenshots.[]"}]},{"type":"paragraph","content":[{"type":"text","text":"Key components:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"System prompt overhead"},{"type":"text","text":": Using computer use adds roughly 466–499 tokens to the system prompt each time you invoke the model.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Tool definition cost"},{"type":"text","text":": For 4.x models, the computer use tool definition itself consumes about 735 input tokens per tool definition.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Vision cost for screenshots"},{"type":"text","text":": Each screenshot is billed per image/vision pricing, based on resolution and pixel count.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Tool result tokens"},{"type":"text","text":": Any data you return to Claude as "},{"type":"text","marks":[{"type":"code"}],"text":"tool_result"},{"type":"text","text":" (e.g., “clicked at (x, y)”, “typed: foo”, or OCR summaries) counts as input tokens in subsequent calls.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Running bash or text-editor tools alongside computer use adds their own tool-use token costs, so multi-tool agents should amortize this across more work per call when possible.[]"}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core cost levers in production patterns"}]},{"type":"paragraph","content":[{"type":"text","text":"For production “computer use” agents, most cost control falls into a few levers:"}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Loop control and iteration limits"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The reference implementation uses an explicit "},{"type":"text","marks":[{"type":"code"}],"text":"max_iterations"},{"type":"text","text":" parameter in the sampling loop to prevent unbounded tool calls and runaway spend.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Each iteration involves a "},{"type":"text","marks":[{"type":"code"}],"text":"messages.create"},{"type":"text","text":" call with tools, so bounding the loop caps worst-case cost per task.[]"}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Screenshot frequency and size"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude can request "},{"type":"text","marks":[{"type":"code"}],"text":"screenshot"},{"type":"text","text":" actions; each one is an image you send back and pay vision rates for.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Resizing and downscaling screenshots to the minimum resolution that preserves needed detail reduces pixels and therefore image cost.[]"}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Context and logging discipline"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"The more verbose your tool results and logs, the more tokens accumulate in the conversation history.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Compact, structured tool results significantly reduce token bloat over multi-step tasks.[]"}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Model and effort settings"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude Opus and Sonnet variants differ in click precision, resolution limits, and “effort” modes, which affect both success rate and token usage.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"On Sonnet 4.6/Opus 4.6, the docs recommend "},{"type":"text","marks":[{"type":"code"}],"text":"medium"},{"type":"text","text":" as default and avoiding "},{"type":"text","marks":[{"type":"code"}],"text":"max"},{"type":"text","text":", which adds thinking tokens without improving UI accuracy.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Using "},{"type":"text","marks":[{"type":"code"}],"text":"low"},{"type":"text","text":" effort sometimes decreases total tokens because the model makes fewer mistakes and retries.[]"}]}]}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Designing cost-aware screenshot workflows"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"1. Control screenshot resolution"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude enforces image limits; exceeding them yields a 400 validation error, so you often need to downscale high-resolution displays.[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Older models accept ~1568 pixels on the long edge and about 1.15 megapixels total.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Newer models like Claude Opus 4.8/4.7 accept up to 2576 pixels on the long edge, allowing moderately higher resolutions.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The docs provide a utility function to compute a scale factor so screenshots stay within limits given screen width and height. A typical production pattern is:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Capture the full screen at native resolution."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Compute a scaling factor to respect model limits."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Resize the image before sending it to Claude."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Scale coordinates returned by Claude back to real screen coordinates when clicking.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This reduces both rejections and image size, directly saving cost on vision tokens.[]"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"2. Tune screenshot cadence"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude’s recommendations include prompting it to take a screenshot after each step when strict verification is needed. That is useful for correctness but expensive. In production, common patterns are:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Phase-based screenshots"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Dense screenshots during navigation or fragile steps (e.g., authentication flows, dynamic forms)."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Sparse screenshots when the agent is in a stable context (e.g., reading a static table)."}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"On-demand zoom"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Enable "},{"type":"text","marks":[{"type":"code"}],"text":"zoom"},{"type":"text","text":" with "},{"type":"text","marks":[{"type":"code"}],"text":"enable_zoom: true"},{"type":"text","text":" in "},{"type":"text","marks":[{"type":"code"}],"text":"computer_20251124"},{"type":"text","text":" to zoom into small regions instead of increasing overall resolution.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"This can reduce the need to send ultra-high-resolution full-screen captures just to read small text."}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Error-triggered screenshots"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Take extra screenshots only when the agent detects an inconsistency (e.g., click didn’t change the UI) or misalignment between expectations and observed state."}]}]}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"3. Compress tool results and logs"}]},{"type":"paragraph","content":[{"type":"text","text":"The reference implementation uses simple string returns like"},{"type":"text","marks":[{"type":"code"}],"text":"\"clicked at (x, y)\""},{"type":"text","text":","},{"type":"text","marks":[{"type":"code"}],"text":"\"typed: {text}\""},{"type":"text","text":", etc. For large-scale workflows:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Return minimal, structured tokens such as short enums or integers that Claude can interpret (e.g.,"},{"type":"text","marks":[{"type":"code"}],"text":"{\"status\": \"ok\"}"},{"type":"text","text":" or"},{"type":"text","marks":[{"type":"code"}],"text":"{\"status\": \"error\", \"code\": \"no_window\"}"},{"type":"text","text":")."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Avoid echoing entire screen descriptions or redundant logs into the context unless strictly required for reasoning or audit trail."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use external logging for observability and only feed back to Claude what it actually needs to continue planning."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This keeps conversation context smaller and improves both cost and latency."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Production patterns for loop and budget control"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Agent loop safeguards"}]},{"type":"paragraph","content":[{"type":"text","text":"The documentation’s sampling loop stops when Claude no longer requests tools or when a maximum iteration count is reached. Production systems typically extend this with:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Hard budget caps per task"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Track approximate cost per iteration using known pricing and stop early if a per-task budget is exceeded."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Optionally hand off to a cheaper fallback (e.g., a text-only or tool-light path) when nearing budget."}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Timeout-based guards"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Abort tasks that exceed a time budget to prevent cost from accumulating due to slow external apps or network issues."}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Stateful “done” detection"},{"type":"text","text":":"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Implement high-level criteria for task completion, not just “Claude stopped calling tools,” to avoid unnecessary extra steps."}]}]}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Task design to reduce iterations"}]},{"type":"paragraph","content":[{"type":"text","text":"Task shaping has a large effect on iteration counts:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use precise, step-wise instructions, as Claude performs better with simple, well-defined steps.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Provide explicit hints about hard UI elements (scrollbars, dropdowns, etc.) and prefer keyboard shortcuts where possible.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Reuse known paths: for repeated workflows, give Claude screenshots and example action sequences so it converges faster and with fewer corrective attempts.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Fewer retries and less wandering on the UI often matter more for cost than small token-level savings."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Model and configuration choices for cost"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Choosing models for computer use"}]},{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s docs highlight model-specific trade-offs:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude Sonnet 4.6 is more mechanically precise at clicking than Opus 4.6 and handles heavy downscaling better.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude Opus 4.7 improves click precision and supports higher image resolution limits, reducing the need for aggressive downscaling.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"In cost terms:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"For workflows where misclicks cause retries or whole-sequence restarts, higher-precision models can be cheaper overall despite higher per-token prices, because they reduce iterations."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"For “quick and dirty” tasks where mistakes are cheap, a cheaper model (or lower effort setting) is usually more cost-effective."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Effort settings"}]},{"type":"paragraph","content":[{"type":"text","text":"The docs give empirically grounded advice:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"For Opus 4.7, use "},{"type":"text","marks":[{"type":"code"}],"text":"high"},{"type":"text","text":" as default; for high-throughput or cost-sensitive workloads, use "},{"type":"text","marks":[{"type":"code"}],"text":"low"},{"type":"text","text":".[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"For Sonnet 4.6 and Opus 4.6, use "},{"type":"text","marks":[{"type":"code"}],"text":"medium"},{"type":"text","text":" as the default, avoid "},{"type":"text","marks":[{"type":"code"}],"text":"max"},{"type":"text","text":", and consider "},{"type":"text","marks":[{"type":"code"}],"text":"low"},{"type":"text","text":" for cost-sensitive loops because it can reduce total output tokens and error-based retries.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"In practice:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Start with the recommended effort for your chosen model."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Measure tokens and success rates on representative tasks."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Adjust effort per task type: e.g.,"},{"type":"text","marks":[{"type":"code"}],"text":"medium"},{"type":"text","text":" for complex data entry,"},{"type":"text","marks":[{"type":"code"}],"text":"low"},{"type":"text","text":" for simple navigation."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Reducing image cost with better screen management"}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Resolution and aspect ratio"}]},{"type":"paragraph","content":[{"type":"text","text":"The docs recommend using a baseline resolution such as 1280×720 when possible to balance readability and click accuracy. In production:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Run agents in fixed-resolution virtual displays rather than whatever resolution a random host uses."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Avoid aspect ratio distortions when resizing; mismatched "},{"type":"text","marks":[{"type":"code"}],"text":"display_width_px"},{"type":"text","text":"/"},{"type":"text","marks":[{"type":"code"}],"text":"display_height_px"},{"type":"text","text":" versus actual image dimensions cause systematic click offsets and more misclick retries.[]"}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Targeted views and cropping"}]},{"type":"paragraph","content":[{"type":"text","text":"To avoid sending full-screen images when only a small region is relevant:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Crop to the browser window or main app surface if the outer desktop carries no useful information."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use zoom actions or multi-stage navigation: first navigate roughly using a full-screen capture, then zoom into the target region for precise actions.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This approach reduces pixels per screenshot and improves readability for small UI elements without exceeding model limits."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Handling click and UI issues without burning budget"}]},{"type":"paragraph","content":[{"type":"text","text":"When clicks miss targets, the docs list typical root causes and mitigations. Cost-aware patterns include:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Fix coordinate mismatches by ensuring "},{"type":"text","marks":[{"type":"code"}],"text":"display_width_px"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"display_height_px"},{"type":"text","text":" match the actual screenshot dimensions.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Improve prompt specificity (“click the blue Submit button in the bottom right”) to reduce mis-clicks.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use zoom and adequate resolution so that small targets remain legible without extreme full-screen dimensions.[]"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Each misclick often leads to extra screenshots and extra tool actions; engineering time spent improving click reliability tends to pay for itself in reduced iteration counts."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Integrating cost management with observability"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude’s docs encourage logging actions for debugging and verifying long-running agents. In a production environment:[]"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Maintain structured logs outside the Claude context (e.g., in an observability stack) with:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Per-task token usage, tool calls, screenshot counts, and errors."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Step-wise event traces (clicks, keys, screenshots taken)."}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use this telemetry to:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Identify tasks with unusually high iteration counts."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Find brittle UI flows that cause repeated retries."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Tune display resolution, effort, and prompting for expensive workflows."}]}]}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This allows data-driven cost optimization instead of guesswork."}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best practices checklist"}]},{"type":"paragraph","content":[{"type":"text","text":"Cost-aware guidance distilled for screenshot-heavy workflows:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use a fixed, moderate virtual display resolution (e.g., 1280×720 or similar) within model limits to balance readability and cost.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Implement systematic screenshot scaling and coordinate mapping so captured images stay under image-size limits, avoiding wasted calls and oversized images.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Limit screenshot frequency with phase-based, error-based, or zoom-based strategies instead of “screenshot after every tiny action” everywhere.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Keep tool results compact and structured; log richly outside the Claude context instead of inside the message history.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Enforce "},{"type":"text","marks":[{"type":"code"}],"text":"max_iterations"},{"type":"text","text":", per-task budget caps, and timeouts in the agent loop to prevent runaway costs.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Choose effort and models based on empirical success-versus-cost curves for your specific UI, starting from Anthropic’s recommended defaults.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Continuously monitor token and vision usage per workflow, and use this data to iteratively refine prompts, display configuration, and UI paths."}]}]}]},{"type":"horizontalRule"},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Key takeaways"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Screenshot-heavy computer use workflows can be significantly more expensive than structured API-driven tools, because they add image processing and repeated tool-use overhead.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Cost is primarily a function of iterations, screenshot size/frequency, and context verbosity, so cost management is mainly about reducing those three dimensions.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Anthropic’s computer use docs provide concrete parameters (image limits, system prompt overhead, tool definition token counts, effort recommendations) that can be treated as tuning knobs in production systems.[]"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Effective cost management blends agent-loop controls, vision and display engineering, and disciplined context/logging strategy."}]}]}]},{"type":"paragraph"}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-22T06:55:46.084Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost in screenshot-heavy computer use workflows is dominated by image tokens and repeated tool calls, so production systems need explicit budgeting, sampling loop guards, and screenshot minimization strategies baked into the agent design.[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Below is a deep-dive guide framed as a section you could drop into \u201cClaude Computer Use in Depth\u201d."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What this section covers"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5Db3N0IG1hbmFnZW1lbnQgZm9yIHNjcmVlbnNob3QtaGVhdnkgd29ya2Zsb3dzPC90ZXh0PgogIDx0ZXh0IHg9IjQxMCIgeT0iMTA1IiBmb250LWZhbWlseT0ic3lzdGVtLXVpLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTQiCiAgICAgICAgZmlsbD0id2hpdGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIG9wYWNpdHk9IjAuNzUiPkNsYXVkZSBMZWFybmluZyBQYXRoPC90ZXh0PgogIDxjaXJjbGUgY3g9IjYwIiBjeT0iODAiIHI9IjI4IiBmaWxsPSJ3aGl0ZSIgb3BhY2l0eT0iMC4xNSIvPgogIDxjaXJjbGUgY3g9Ijc2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KPC9zdmc+",
+          "alt": "Diagram for Cost management for screenshot-heavy workflows",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This section focuses on managing and optimizing cost for workflows where Claude uses the computer use tool and takes many screenshots while operating a desktop or browser in production environments. It assumes a long-running agentic loop that repeatedly calls "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "computer_20xxxxx"
+          },
+          {
+            "type": "text",
+            "text": " and sends screenshots back to Claude.[]"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why screenshot-heavy workflows are expensive"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Screenshot-heavy workflows add several cost components on top of normal text-only usage:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Computer use adds a dedicated tool definition and a special system prompt, which contribute non-trivial token overhead each time you call the model.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Each screenshot is billed under vision/image pricing, and these images are often large and frequent, especially for high-resolution or multi-monitor setups.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Tool results (including text logs of actions, OCR-like descriptions, and status messages) are sent back into the context, growing the conversation and increasing token usage per step.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In long agent loops, costs scale with both the number of iterations and per-iteration payload size, so inefficient loops or chatty logging can multiply total spend quickly. This is why production systems must treat screenshot cost as a first-class concern rather than an implementation detail.[]"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental model: \u201cPer step cost \u00d7 steps\u201d"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A simple way to think about cost here is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Each loop iteration has a fixed overhead from:"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Computer use system prompt (~hundreds of tokens) and tool definitions (~735 input tokens per computer use tool definition for 4.x models).[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Response tokens used by Claude to propose actions and reasoning.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Variable per-iteration cost comes from:"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Number and size of screenshots (vision pricing).[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Size of tool results you stream back (e.g., logs, command outputs).[]"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Total cost \u2248 (cost per iteration) \u00d7 (iterations per task) \u00d7 (tasks per time unit)."
+          },
+          {
+            "type": "hardBreak"
+          },
+          {
+            "type": "text",
+            "text": "Cost management is therefore mainly about reducing:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "How many iterations are needed to complete a task."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "How much data (especially images) is processed per iteration."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "How often you repeat heavy overhead (e.g., re-sending large tool definitions unnecessarily)."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How computer use pricing works"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s computer use follows the standard tool-use pricing model plus vision pricing for screenshots.[]"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key components:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "System prompt overhead"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Using computer use adds roughly 466\u2013499 tokens to the system prompt each time you invoke the model.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Tool definition cost"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": For 4.x models, the computer use tool definition itself consumes about 735 input tokens per tool definition.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Vision cost for screenshots"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Each screenshot is billed per image/vision pricing, based on resolution and pixel count.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Tool result tokens"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Any data you return to Claude as "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "tool_result"
+                  },
+                  {
+                    "type": "text",
+                    "text": " (e.g., \u201cclicked at (x, y)\u201d, \u201ctyped: foo\u201d, or OCR summaries) counts as input tokens in subsequent calls.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running bash or text-editor tools alongside computer use adds their own tool-use token costs, so multi-tool agents should amortize this across more work per call when possible.[]"
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core cost levers in production patterns"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For production \u201ccomputer use\u201d agents, most cost control falls into a few levers:"
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Loop control and iteration limits"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "The reference implementation uses an explicit "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "max_iterations"
+                          },
+                          {
+                            "type": "text",
+                            "text": " parameter in the sampling loop to prevent unbounded tool calls and runaway spend.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Each iteration involves a "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "messages.create"
+                          },
+                          {
+                            "type": "text",
+                            "text": " call with tools, so bounding the loop caps worst-case cost per task.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Screenshot frequency and size"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Claude can request "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "screenshot"
+                          },
+                          {
+                            "type": "text",
+                            "text": " actions; each one is an image you send back and pay vision rates for.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Resizing and downscaling screenshots to the minimum resolution that preserves needed detail reduces pixels and therefore image cost.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Context and logging discipline"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "The more verbose your tool results and logs, the more tokens accumulate in the conversation history.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Compact, structured tool results significantly reduce token bloat over multi-step tasks.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Model and effort settings"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Claude Opus and Sonnet variants differ in click precision, resolution limits, and \u201ceffort\u201d modes, which affect both success rate and token usage.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "On Sonnet 4.6/Opus 4.6, the docs recommend "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "medium"
+                          },
+                          {
+                            "type": "text",
+                            "text": " as default and avoiding "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "max"
+                          },
+                          {
+                            "type": "text",
+                            "text": ", which adds thinking tokens without improving UI accuracy.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Using "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "low"
+                          },
+                          {
+                            "type": "text",
+                            "text": " effort sometimes decreases total tokens because the model makes fewer mistakes and retries.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Designing cost-aware screenshot workflows"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "1. Control screenshot resolution"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude enforces image limits; exceeding them yields a 400 validation error, so you often need to downscale high-resolution displays.[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Older models accept ~1568 pixels on the long edge and about 1.15 megapixels total.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Newer models like Claude Opus 4.8/4.7 accept up to 2576 pixels on the long edge, allowing moderately higher resolutions.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The docs provide a utility function to compute a scale factor so screenshots stay within limits given screen width and height. A typical production pattern is:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Capture the full screen at native resolution."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Compute a scaling factor to respect model limits."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Resize the image before sending it to Claude."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Scale coordinates returned by Claude back to real screen coordinates when clicking.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This reduces both rejections and image size, directly saving cost on vision tokens.[]"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "2. Tune screenshot cadence"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s recommendations include prompting it to take a screenshot after each step when strict verification is needed. That is useful for correctness but expensive. In production, common patterns are:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Phase-based screenshots"
+                  },
+                  {
+                    "type": "text",
+                    "text": ":"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Dense screenshots during navigation or fragile steps (e.g., authentication flows, dynamic forms)."
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Sparse screenshots when the agent is in a stable context (e.g., reading a static table)."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "On-demand zoom"
+                  },
+                  {
+                    "type": "text",
+                    "text": ":"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Enable "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "zoom"
+                          },
+                          {
+                            "type": "text",
+                            "text": " with "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "enable_zoom: true"
+                          },
+                          {
+                            "type": "text",
+                            "text": " in "
+                          },
+                          {
+                            "type": "text",
+                            "marks": [
+                              {
+                                "type": "code"
+                              }
+                            ],
+                            "text": "computer_20251124"
+                          },
+                          {
+                            "type": "text",
+                            "text": " to zoom into small regions instead of increasing overall resolution.[]"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "This can reduce the need to send ultra-high-resolution full-screen captures just to read small text."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Error-triggered screenshots"
+                  },
+                  {
+                    "type": "text",
+                    "text": ":"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Take extra screenshots only when the agent detects an inconsistency (e.g., click didn\u2019t change the UI) or misalignment between expectations and observed state."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "3. Compress tool results and logs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reference implementation uses simple string returns like"
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "\"clicked at (x, y)\""
+          },
+          {
+            "type": "text",
+            "text": ","
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "\"typed: {text}\""
+          },
+          {
+            "type": "text",
+            "text": ", etc. For large-scale workflows:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return minimal, structured tokens such as short enums or integers that Claude can interpret (e.g.,"
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "{\"status\": \"ok\"}"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or"
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "{\"status\": \"error\", \"code\": \"no_window\"}"
+                  },
+                  {
+                    "type": "text",
+                    "text": ")."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Avoid echoing entire screen descriptions or redundant logs into the context unless strictly required for reasoning or audit trail."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use external logging for observability and only feed back to Claude what it actually needs to continue planning."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This keeps conversation context smaller and improves both cost and latency."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Production patterns for loop and budget control"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Agent loop safeguards"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The documentation\u2019s sampling loop stops when Claude no longer requests tools or when a maximum iteration count is reached. Production systems typically extend this with:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Hard budget caps per task"
+                  },
+                  {
+                    "type": "text",
+                    "text": ":"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Track approximate cost per iteration using known pricing and stop early if a per-task budget is exceeded."
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Optionally hand off to a cheaper fallback (e.g., a text-only or tool-light path) when nearing budget."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Timeout-based guards"
+                  },
+                  {
+                    "type": "text",
+                    "text": ":"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Abort tasks that exceed a time budget to prevent cost from accumulating due to slow external apps or network issues."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Stateful \u201cdone\u201d detection"
+                  },
+                  {
+                    "type": "text",
+                    "text": ":"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Implement high-level criteria for task completion, not just \u201cClaude stopped calling tools,\u201d to avoid unnecessary extra steps."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Task design to reduce iterations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Task shaping has a large effect on iteration counts:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use precise, step-wise instructions, as Claude performs better with simple, well-defined steps.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Provide explicit hints about hard UI elements (scrollbars, dropdowns, etc.) and prefer keyboard shortcuts where possible.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Reuse known paths: for repeated workflows, give Claude screenshots and example action sequences so it converges faster and with fewer corrective attempts.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Fewer retries and less wandering on the UI often matter more for cost than small token-level savings."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Model and configuration choices for cost"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Choosing models for computer use"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Anthropic\u2019s docs highlight model-specific trade-offs:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Sonnet 4.6 is more mechanically precise at clicking than Opus 4.6 and handles heavy downscaling better.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Opus 4.7 improves click precision and supports higher image resolution limits, reducing the need for aggressive downscaling.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In cost terms:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For workflows where misclicks cause retries or whole-sequence restarts, higher-precision models can be cheaper overall despite higher per-token prices, because they reduce iterations."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For \u201cquick and dirty\u201d tasks where mistakes are cheap, a cheaper model (or lower effort setting) is usually more cost-effective."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Effort settings"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The docs give empirically grounded advice:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For Opus 4.7, use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "high"
+                  },
+                  {
+                    "type": "text",
+                    "text": " as default; for high-throughput or cost-sensitive workloads, use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "low"
+                  },
+                  {
+                    "type": "text",
+                    "text": ".[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "For Sonnet 4.6 and Opus 4.6, use "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "medium"
+                  },
+                  {
+                    "type": "text",
+                    "text": " as the default, avoid "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "max"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", and consider "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "low"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for cost-sensitive loops because it can reduce total output tokens and error-based retries.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In practice:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start with the recommended effort for your chosen model."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Measure tokens and success rates on representative tasks."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Adjust effort per task type: e.g.,"
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "medium"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for complex data entry,"
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "low"
+                  },
+                  {
+                    "type": "text",
+                    "text": " for simple navigation."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Reducing image cost with better screen management"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Resolution and aspect ratio"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The docs recommend using a baseline resolution such as 1280\u00d7720 when possible to balance readability and click accuracy. In production:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Run agents in fixed-resolution virtual displays rather than whatever resolution a random host uses."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Avoid aspect ratio distortions when resizing; mismatched "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "display_width_px"
+                  },
+                  {
+                    "type": "text",
+                    "text": "/"
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "display_height_px"
+                  },
+                  {
+                    "type": "text",
+                    "text": " versus actual image dimensions cause systematic click offsets and more misclick retries.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Targeted views and cropping"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "To avoid sending full-screen images when only a small region is relevant:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Crop to the browser window or main app surface if the outer desktop carries no useful information."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use zoom actions or multi-stage navigation: first navigate roughly using a full-screen capture, then zoom into the target region for precise actions.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This approach reduces pixels per screenshot and improves readability for small UI elements without exceeding model limits."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Handling click and UI issues without burning budget"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When clicks miss targets, the docs list typical root causes and mitigations. Cost-aware patterns include:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Fix coordinate mismatches by ensuring "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "display_width_px"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "display_height_px"
+                  },
+                  {
+                    "type": "text",
+                    "text": " match the actual screenshot dimensions.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Improve prompt specificity (\u201cclick the blue Submit button in the bottom right\u201d) to reduce mis-clicks.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use zoom and adequate resolution so that small targets remain legible without extreme full-screen dimensions.[]"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Each misclick often leads to extra screenshots and extra tool actions; engineering time spent improving click reliability tends to pay for itself in reduced iteration counts."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Integrating cost management with observability"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude\u2019s docs encourage logging actions for debugging and verifying long-running agents. In a production environment:[]"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Maintain structured logs outside the Claude context (e.g., in an observability stack) with:"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Per-task token usage, tool calls, screenshot counts, and errors."
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Step-wise event traces (clicks, keys, screenshots taken)."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use this telemetry to:"
+                  }
+                ]
+              },
+              {
+                "type": "bulletList",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Identify tasks with unusually high iteration counts."
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Find brittle UI flows that cause repeated retries."
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Tune display resolution, effort, and prompting for expensive workflows."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This allows data-driven cost optimization instead of guesswork."
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices checklist"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cost-aware guidance distilled for screenshot-heavy workflows:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a fixed, moderate virtual display resolution (e.g., 1280\u00d7720 or similar) within model limits to balance readability and cost.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement systematic screenshot scaling and coordinate mapping so captured images stay under image-size limits, avoiding wasted calls and oversized images.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Limit screenshot frequency with phase-based, error-based, or zoom-based strategies instead of \u201cscreenshot after every tiny action\u201d everywhere.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Keep tool results compact and structured; log richly outside the Claude context instead of inside the message history.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Enforce "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "max_iterations"
+                  },
+                  {
+                    "type": "text",
+                    "text": ", per-task budget caps, and timeouts in the agent loop to prevent runaway costs.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Choose effort and models based on empirical success-versus-cost curves for your specific UI, starting from Anthropic\u2019s recommended defaults.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Continuously monitor token and vision usage per workflow, and use this data to iteratively refine prompts, display configuration, and UI paths."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "horizontalRule"
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Screenshot-heavy computer use workflows can be significantly more expensive than structured API-driven tools, because they add image processing and repeated tool-use overhead.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cost is primarily a function of iterations, screenshot size/frequency, and context verbosity, so cost management is mainly about reducing those three dimensions.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Anthropic\u2019s computer use docs provide concrete parameters (image limits, system prompt overhead, tool definition token counts, effort recommendations) that can be treated as tuning knobs in production systems.[]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Effective cost management blends agent-loop controls, vision and display engineering, and disciplined context/logging strategy."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph"
+      }
+    ]
+  }
+}

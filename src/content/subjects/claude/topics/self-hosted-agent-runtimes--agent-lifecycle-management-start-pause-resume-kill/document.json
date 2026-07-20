@@ -1,1 +1,2311 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-22T08:59:14.673Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Agent lifecycle management in self-hosted agent runtimes defines the "},{"type":"text","marks":[{"type":"bold"}],"text":"control surface"},{"type":"text","text":" for running long-lived Claude-powered agents: how to "},{"type":"text","marks":[{"type":"bold"}],"text":"start"},{"type":"text","text":" a session with a defined goal, "},{"type":"text","marks":[{"type":"bold"}],"text":"pause"},{"type":"text","text":" it without losing state, "},{"type":"text","marks":[{"type":"bold"}],"text":"resume"},{"type":"text","text":" it later from the same point, and "},{"type":"text","marks":[{"type":"bold"}],"text":"kill"},{"type":"text","text":" it when work is done or unsafe to continue. These operations are exposed through "},{"type":"text","marks":[{"type":"bold"}],"text":"clean APIs"},{"type":"text","text":" and backed by checkpointing, durable state stores, and guards against duplicate execution or unsafe recovery."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"What it is"}]},{"type":"paragraph","content":[{"type":"text","text":"Lifecycle management gives you four core capabilities:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Launch/Start"},{"type":"text","text":": Create a new agent session with a goal, context, and initial state.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Pause"},{"type":"text","text":": Temporarily halt execution while keeping memory, pending work, and tool history intact.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Resume"},{"type":"text","text":": Continue from the exact paused state, restoring context without losing progress.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Stop/Kill"},{"type":"text","text":": Gracefully end the session, clean up resources, and optionally checkpoint final state."}]},{"type":"paragraph","content":[{"type":"text","text":"This is the foundation for making agents "},{"type":"text","marks":[{"type":"bold"}],"text":"trustworthy, governable, and production-ready"},{"type":"text","text":". Without it, you cannot guarantee that an agent can be safely interrupted, resumed later, or killed mid-task without corrupting work or re-running actions."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why it matters"}]},{"type":"paragraph","content":[{"type":"text","text":"In an unpredictable world, agents must be able to "},{"type":"text","marks":[{"type":"bold"}],"text":"pause and resume"},{"type":"text","text":" without losing context. This is critical for:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Human-in-the-loop workflows"},{"type":"text","text":": Pause when waiting for approval, resume when approved.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Long-running tasks"},{"type":"text","text":": Tasks that span hours or days need to survive interruptions (worker crashes, network issues).\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Safety and control"},{"type":"text","text":": Kill an agent if it starts behaving dangerously or hitting rate limits.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Debugging and maintenance"},{"type":"text","text":": Pause an agent to inspect its environment without jobs being dispatched."}]},{"type":"paragraph","content":[{"type":"text","text":"Life-cycle management is one of the four operational domains for enterprise agent ops: runtime lifecycle, observability, safety controls, and change management."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Mental model"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of agent lifecycle as a "},{"type":"text","marks":[{"type":"bold"}],"text":"state machine"},{"type":"text","text":" with checkpoints:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Active"},{"type":"text","text":": Agent is running, executing steps.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Paused"},{"type":"text","text":": Agent is halted, state is preserved in memory or durable storage.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Stopped"},{"type":"text","text":": Agent is ended, final state is checkpointed and cleaned up.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Failed/Killed"},{"type":"text","text":": Agent is terminated due to error or manual kill."}]},{"type":"paragraph","content":[{"type":"text","text":"The key is that "},{"type":"text","marks":[{"type":"bold"}],"text":"state is preserved across pauses and resumes"},{"type":"text","text":" via checkpoints. When you resume, the system loads the last checkpoint and restarts the agent from that point, ensuring all notifications and the execution queue remain intact."}]},{"type":"paragraph","content":[{"type":"text","text":"A practical API model exposes these as simple endpoints:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"POST /runs"},{"type":"text","text":" → launch a new session.\n- "},{"type":"text","marks":[{"type":"code"}],"text":"POST /runs/{id}/pause"},{"type":"text","text":" → pause execution.\n- "},{"type":"text","marks":[{"type":"code"}],"text":"POST /runs/{id}/resume"},{"type":"text","text":" → resume from checkpoint.\n- "},{"type":"text","marks":[{"type":"code"}],"text":"DELETE /runs/{id}"},{"type":"text","text":" → kill/stop the session."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"How it works"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Start/Launch"}]},{"type":"paragraph","content":[{"type":"text","text":"Launching creates a new agent session with:\n- A defined goal or prompt.\n- Initial context (e.g., files, documents, conversation history).\n- State snapshot (optional, for reproducibility)."}]},{"type":"paragraph","content":[{"type":"text","text":"Under the hood:\n- The orchestrator creates a run record in the database.\n- A worker process is spawned or a task is queued.\n- The agent begins executing its workflow graph (e.g., LangGraph, custom agent loop)."}]},{"type":"paragraph","content":[{"type":"text","text":"Example:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"def launch(goal: str, context: dict):\n    run_id = create_run_record(goal, context)\n    agent.invoke({\"goal\": goal, \"context\": context, \"run_id\": run_id})\n    return run_id"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Pause"}]},{"type":"paragraph","content":[{"type":"text","text":"Pausing halts execution while keeping state intact. The agent does not stop processing immediately; instead:\n- It sets a flag to stop accepting new tasks.\n- It saves the current state to a checkpoint (memory, Redis, or database).\n- It returns control to the orchestrator."}]},{"type":"paragraph","content":[{"type":"text","text":"Key details:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Pause does not terminate the process"},{"type":"text","text":". The agent continues to consume resources but is idle.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Jobs already started continue to run"},{"type":"text","text":"; only new jobs are withheld.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Transparent to the outside world"},{"type":"text","text":": The API is stateless, but the agent is stateful internally."}]},{"type":"paragraph","content":[{"type":"text","text":"In LangGraph-style agents, pausing is implemented by saving the checkpoint to a memory saver:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"def pause(session_id: str):\n    memory.pause(session_id)"}]},{"type":"paragraph","content":[{"type":"text","text":"This halts the workflow graph and persists the state."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Resume"}]},{"type":"paragraph","content":[{"type":"text","text":"Resuming loads the checkpoint and continues from the exact paused state. The system:\n- Loads the last checkpoint from storage.\n- Restores the agent's memory, pending tasks, and tool history.\n- Continues executing the workflow graph from where it paused."}]},{"type":"paragraph","content":[{"type":"text","text":"Example:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"def resume(session_id: str):\n    return agent.resume(session_id)"}]},{"type":"paragraph","content":[{"type":"text","text":"This restores the agent's state and continues execution without losing context."}]},{"type":"paragraph","content":[{"type":"text","text":"Key property: "},{"type":"text","marks":[{"type":"bold"}],"text":"Resuming is equivalent to restarting from the last checkpoint"},{"type":"text","text":", not from scratch. This ensures all state changes, notifications, and the execution queue are preserved."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Kill/Stop"}]},{"type":"paragraph","content":[{"type":"text","text":"Killing ends the session and cleans up resources. The agent:\n- Stops executing the workflow graph.\n- Checkpoints final state (optional, for audit).\n- Releases worker processes, locks, and network connections."}]},{"type":"paragraph","content":[{"type":"text","text":"Example:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"def stop(session_id: str):\n    memory.clear(session_id)"}]},{"type":"paragraph","content":[{"type":"text","text":"This clears the session state and frees resources."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Checkpointing and state preservation"}]},{"type":"paragraph","content":[{"type":"text","text":"Pause/resume relies on "},{"type":"text","marks":[{"type":"bold"}],"text":"checkpointing"},{"type":"text","text":". The agent must periodically save its state to durable storage. Key design decisions:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Checkpoint frequency"},{"type":"text","text":": Save at task completion OR at regular intervals (e.g., 2 hours).\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Storage layer"},{"type":"text","text":": Memory, Redis, or database.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"State slice"},{"type":"text","text":": Global, application, agent-specific state."}]},{"type":"paragraph","content":[{"type":"text","text":"A three-tiered state store (global, application, agent) enables every integration, service, and plugin to register a type-safe and serializable state slice."}]},{"type":"paragraph","content":[{"type":"text","text":"When pausing, the agent saves its state to the checkpoint. When resuming, the system loads the checkpoint and restarts the agent from there. If the process is terminated, it picks up from the most recent checkpoint created during the last state update."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Implementation patterns"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"LangGraph-style agents"}]},{"type":"paragraph","content":[{"type":"text","text":"For LangGraph agents, the lifecycle pattern is:"}]},{"type":"codeBlock","attrs":{"language":"python"},"content":[{"type":"text","text":"from langgraph.graph import StateGraph\nfrom langgraph.checkpoint.memory import MemorySaver\n\nbuilder = StateGraph()\nmemory = MemorySaver()\n\n# Add nodes and edges\n# ...\n\nagent = builder.compile(checkpointer=memory)\n\n# Lifecycle APIs\ndef launch(goal):\n    return agent.invoke({\"goal\": goal})\n\ndef pause(session_id):\n    memory.pause(session_id)\n\ndef resume(session_id):\n    return agent.resume(session_id)\n\ndef stop(session_id):\n    memory.clear(session_id)"}]},{"type":"paragraph","content":[{"type":"text","text":"This exposes clean APIs for launch, pause, resume, and stop, with internal state preservation via checkpoints."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Self-hosted orchestrators"}]},{"type":"paragraph","content":[{"type":"text","text":"For self-hosted runtimes, the pattern is:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"API layer"},{"type":"text","text":" (FastAPI, LangServe) exposes endpoints for start/pause/resume/kill.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Worker layer"},{"type":"text","text":" (Celery, Kubernetes pods) executes the agent.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"State store"},{"type":"text","text":" (Redis, Postgres) persists checkpoints.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Orchestrator"},{"type":"text","text":" (LangGraph, custom scheduler) manages the workflow graph."}]},{"type":"paragraph","content":[{"type":"text","text":"The orchestrator tracks state and handles pause/resume via checkpointing."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Enterprise Agent Ops"}]},{"type":"paragraph","content":[{"type":"text","text":"For enterprise workloads, baseline controls include:\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Immutable deployment artifacts"},{"type":"text","text":".\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Least-privilege credentials"},{"type":"text","text":".\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Hard timeouts and retry budgets"},{"type":"text","text":".\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Audit logs for high-risk actions"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","text":"Lifecycle management is one of the four operational domains: runtime lifecycle, observability, safety controls, and change management."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Trade-offs"}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Benefits:"},{"type":"text","text":"\n- Agents can be safely interrupted and resumed without losing context.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Human-in-the-loop"},{"type":"text","text":" workflows are supported.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Safety and control"},{"type":"text","text":" via kill switches.\n- "},{"type":"text","marks":[{"type":"bold"}],"text":"Debugging and maintenance"},{"type":"text","text":" via pause-resume."}]},{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Trade-offs:"},{"type":"text","text":"\n- You must implement checkpointing, state preservation, and safe recovery.\n- Paused agents consume resources while idle.\n- Resume loading checkpoints adds latency.\n- Complex state stores are needed for multi-tier state."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Best practices"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Expose clean APIs"},{"type":"text","text":": Start/pause/resume/stop as simple endpoints."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Checkpoint frequently"},{"type":"text","text":": Save state at task completion or regular intervals."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Make lifecycle transparent to the outside world"},{"type":"text","text":": The API is stateless, but the agent is stateful internally."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Use durable storage"},{"type":"text","text":": Redis or database for checkpoints, not just memory."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Log all lifecycle actions"},{"type":"text","text":": Audit logs for resume, pause, kill events."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Handle termination gracefully"},{"type":"text","text":": If the process is killed, resume from the last checkpoint."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Key takeaways"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Lifecycle management is a "},{"type":"text","marks":[{"type":"bold"}],"text":"state machine"},{"type":"text","text":" with "},{"type":"text","marks":[{"type":"bold"}],"text":"checkpointing"},{"type":"text","text":": start → pause → resume → kill."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Pause"},{"type":"text","text":" keeps state intact in memory or durable storage without terminating the process."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Resume"},{"type":"text","text":" loads the checkpoint and continues from the exact paused state."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Kill"},{"type":"text","text":" ends the session and cleans up resources, optionally checkpointing final state."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"This is the foundation for making agents "},{"type":"text","marks":[{"type":"bold"}],"text":"trustworthy, governable, and production-ready"},{"type":"text","text":"."}]}]}]},{"type":"paragraph"}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-22T08:59:14.673Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Agent lifecycle management in self-hosted agent runtimes defines the "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "control surface"
+          },
+          {
+            "type": "text",
+            "text": " for running long-lived Claude-powered agents: how to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "start"
+          },
+          {
+            "type": "text",
+            "text": " a session with a defined goal, "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "pause"
+          },
+          {
+            "type": "text",
+            "text": " it without losing state, "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "resume"
+          },
+          {
+            "type": "text",
+            "text": " it later from the same point, and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "kill"
+          },
+          {
+            "type": "text",
+            "text": " it when work is done or unsafe to continue. These operations are exposed through "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "clean APIs"
+          },
+          {
+            "type": "text",
+            "text": " and backed by checkpointing, durable state stores, and guards against duplicate execution or unsafe recovery."
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgODIwIDE4MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiPgo8cmVjdCB3aWR0aD0iODIwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBmMTcyYSIgcng9IjEyIi8+Cjx0ZXh0IHg9IjQxMCIgeT0iMzgiIGZpbGw9IiNlMmU4ZjAiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSJib2xkIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5BZ2VudCBsaWZlY3ljbGUgbWFuYWdlbWVudCAoc3RhcnQsIHBhdXNlLCByZXN1bWUsIGtpbGwpPC90ZXh0Pgo8cmVjdCB4PSIzMCIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iOTAiIGZpbGw9IiMxZTQwYWYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjE0NSIgeT0iMTA1IiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Db3JlIENvbmNlcHQ8L3RleHQ+CjxyZWN0IHg9IjI5NSIgeT0iNTUiIHdpZHRoPSIyMzAiIGhlaWdodD0iOTAiIGZpbGw9IiMwNjVmNDYiIHJ4PSI4Ii8+Cjx0ZXh0IHg9IjQxMCIgeT0iMTA1IiBmaWxsPSIjZmZmIiBmb250LXNpemU9IjExIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5JbXBsZW1lbnRhdGlvbjwvdGV4dD4KPHJlY3QgeD0iNTYwIiB5PSI1NSIgd2lkdGg9IjIzMCIgaGVpZ2h0PSI5MCIgZmlsbD0iIzdjMmQxMiIgcng9IjgiLz4KPHRleHQgeD0iNjc1IiB5PSIxMDUiIGZpbGw9IiNmZmYiIGZvbnQtc2l6ZT0iMTEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkJlc3QgUHJhY3RpY2VzPC90ZXh0Pgo8bGluZSB4MT0iMjYwIiB5MT0iMTAwIiB4Mj0iMjkzIiB5Mj0iMTAwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8bGluZSB4MT0iNTI1IiB5MT0iMTAwIiB4Mj0iNTU4IiB5Mj0iMTAwIiBzdHJva2U9IiM0NzU1NjkiIHN0cm9rZS13aWR0aD0iMiIgbWFya2VyLWVuZD0idXJsKCNhKSIvPgo8ZGVmcz48bWFya2VyIGlkPSJhIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI3IiByZWZZPSI0IiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDgsNCBMMCw4IFoiIGZpbGw9IiM0NzU1NjkiLz48L21hcmtlcj48L2RlZnM+Cjwvc3ZnPg==",
+          "alt": "Agent lifecycle management (start, pause, resume, kill) diagram",
+          "title": null
+        }
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "What it is"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lifecycle management gives you four core capabilities:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Launch/Start"
+          },
+          {
+            "type": "text",
+            "text": ": Create a new agent session with a goal, context, and initial state.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Pause"
+          },
+          {
+            "type": "text",
+            "text": ": Temporarily halt execution while keeping memory, pending work, and tool history intact.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Resume"
+          },
+          {
+            "type": "text",
+            "text": ": Continue from the exact paused state, restoring context without losing progress.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Stop/Kill"
+          },
+          {
+            "type": "text",
+            "text": ": Gracefully end the session, clean up resources, and optionally checkpoint final state."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is the foundation for making agents "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "trustworthy, governable, and production-ready"
+          },
+          {
+            "type": "text",
+            "text": ". Without it, you cannot guarantee that an agent can be safely interrupted, resumed later, or killed mid-task without corrupting work or re-running actions."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why it matters"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In an unpredictable world, agents must be able to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "pause and resume"
+          },
+          {
+            "type": "text",
+            "text": " without losing context. This is critical for:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Human-in-the-loop workflows"
+          },
+          {
+            "type": "text",
+            "text": ": Pause when waiting for approval, resume when approved.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Long-running tasks"
+          },
+          {
+            "type": "text",
+            "text": ": Tasks that span hours or days need to survive interruptions (worker crashes, network issues).\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Safety and control"
+          },
+          {
+            "type": "text",
+            "text": ": Kill an agent if it starts behaving dangerously or hitting rate limits.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Debugging and maintenance"
+          },
+          {
+            "type": "text",
+            "text": ": Pause an agent to inspect its environment without jobs being dispatched."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Life-cycle management is one of the four operational domains for enterprise agent ops: runtime lifecycle, observability, safety controls, and change management."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mental model"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of agent lifecycle as a "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "state machine"
+          },
+          {
+            "type": "text",
+            "text": " with checkpoints:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Active"
+          },
+          {
+            "type": "text",
+            "text": ": Agent is running, executing steps.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Paused"
+          },
+          {
+            "type": "text",
+            "text": ": Agent is halted, state is preserved in memory or durable storage.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Stopped"
+          },
+          {
+            "type": "text",
+            "text": ": Agent is ended, final state is checkpointed and cleaned up.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Failed/Killed"
+          },
+          {
+            "type": "text",
+            "text": ": Agent is terminated due to error or manual kill."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The key is that "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "state is preserved across pauses and resumes"
+          },
+          {
+            "type": "text",
+            "text": " via checkpoints. When you resume, the system loads the last checkpoint and restarts the agent from that point, ensuring all notifications and the execution queue remain intact."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical API model exposes these as simple endpoints:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "POST /runs"
+          },
+          {
+            "type": "text",
+            "text": " \u2192 launch a new session.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "POST /runs/{id}/pause"
+          },
+          {
+            "type": "text",
+            "text": " \u2192 pause execution.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "POST /runs/{id}/resume"
+          },
+          {
+            "type": "text",
+            "text": " \u2192 resume from checkpoint.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "DELETE /runs/{id}"
+          },
+          {
+            "type": "text",
+            "text": " \u2192 kill/stop the session."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How it works"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Start/Launch"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Launching creates a new agent session with:\n- A defined goal or prompt.\n- Initial context (e.g., files, documents, conversation history).\n- State snapshot (optional, for reproducibility)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Under the hood:\n- The orchestrator creates a run record in the database.\n- A worker process is spawned or a task is queued.\n- The agent begins executing its workflow graph (e.g., LangGraph, custom agent loop)."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def launch(goal: str, context: dict):\n    run_id = create_run_record(goal, context)\n    agent.invoke({\"goal\": goal, \"context\": context, \"run_id\": run_id})\n    return run_id"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Pause"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pausing halts execution while keeping state intact. The agent does not stop processing immediately; instead:\n- It sets a flag to stop accepting new tasks.\n- It saves the current state to a checkpoint (memory, Redis, or database).\n- It returns control to the orchestrator."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key details:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Pause does not terminate the process"
+          },
+          {
+            "type": "text",
+            "text": ". The agent continues to consume resources but is idle.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Jobs already started continue to run"
+          },
+          {
+            "type": "text",
+            "text": "; only new jobs are withheld.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Transparent to the outside world"
+          },
+          {
+            "type": "text",
+            "text": ": The API is stateless, but the agent is stateful internally."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In LangGraph-style agents, pausing is implemented by saving the checkpoint to a memory saver:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def pause(session_id: str):\n    memory.pause(session_id)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This halts the workflow graph and persists the state."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Resume"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Resuming loads the checkpoint and continues from the exact paused state. The system:\n- Loads the last checkpoint from storage.\n- Restores the agent's memory, pending tasks, and tool history.\n- Continues executing the workflow graph from where it paused."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def resume(session_id: str):\n    return agent.resume(session_id)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This restores the agent's state and continues execution without losing context."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Key property: "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Resuming is equivalent to restarting from the last checkpoint"
+          },
+          {
+            "type": "text",
+            "text": ", not from scratch. This ensures all state changes, notifications, and the execution queue are preserved."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Kill/Stop"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Killing ends the session and cleans up resources. The agent:\n- Stops executing the workflow graph.\n- Checkpoints final state (optional, for audit).\n- Releases worker processes, locks, and network connections."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Example:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "def stop(session_id: str):\n    memory.clear(session_id)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This clears the session state and frees resources."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Checkpointing and state preservation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pause/resume relies on "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "checkpointing"
+          },
+          {
+            "type": "text",
+            "text": ". The agent must periodically save its state to durable storage. Key design decisions:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Checkpoint frequency"
+          },
+          {
+            "type": "text",
+            "text": ": Save at task completion OR at regular intervals (e.g., 2 hours).\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Storage layer"
+          },
+          {
+            "type": "text",
+            "text": ": Memory, Redis, or database.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "State slice"
+          },
+          {
+            "type": "text",
+            "text": ": Global, application, agent-specific state."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A three-tiered state store (global, application, agent) enables every integration, service, and plugin to register a type-safe and serializable state slice."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When pausing, the agent saves its state to the checkpoint. When resuming, the system loads the checkpoint and restarts the agent from there. If the process is terminated, it picks up from the most recent checkpoint created during the last state update."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Implementation patterns"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "LangGraph-style agents"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For LangGraph agents, the lifecycle pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "python"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "from langgraph.graph import StateGraph\nfrom langgraph.checkpoint.memory import MemorySaver\n\nbuilder = StateGraph()\nmemory = MemorySaver()\n\n# Add nodes and edges\n# ...\n\nagent = builder.compile(checkpointer=memory)\n\n# Lifecycle APIs\ndef launch(goal):\n    return agent.invoke({\"goal\": goal})\n\ndef pause(session_id):\n    memory.pause(session_id)\n\ndef resume(session_id):\n    return agent.resume(session_id)\n\ndef stop(session_id):\n    memory.clear(session_id)"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This exposes clean APIs for launch, pause, resume, and stop, with internal state preservation via checkpoints."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Self-hosted orchestrators"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For self-hosted runtimes, the pattern is:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "API layer"
+          },
+          {
+            "type": "text",
+            "text": " (FastAPI, LangServe) exposes endpoints for start/pause/resume/kill.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Worker layer"
+          },
+          {
+            "type": "text",
+            "text": " (Celery, Kubernetes pods) executes the agent.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "State store"
+          },
+          {
+            "type": "text",
+            "text": " (Redis, Postgres) persists checkpoints.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Orchestrator"
+          },
+          {
+            "type": "text",
+            "text": " (LangGraph, custom scheduler) manages the workflow graph."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The orchestrator tracks state and handles pause/resume via checkpointing."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enterprise Agent Ops"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For enterprise workloads, baseline controls include:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Immutable deployment artifacts"
+          },
+          {
+            "type": "text",
+            "text": ".\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Least-privilege credentials"
+          },
+          {
+            "type": "text",
+            "text": ".\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Hard timeouts and retry budgets"
+          },
+          {
+            "type": "text",
+            "text": ".\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Audit logs for high-risk actions"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lifecycle management is one of the four operational domains: runtime lifecycle, observability, safety controls, and change management."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Trade-offs"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Benefits:"
+          },
+          {
+            "type": "text",
+            "text": "\n- Agents can be safely interrupted and resumed without losing context.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Human-in-the-loop"
+          },
+          {
+            "type": "text",
+            "text": " workflows are supported.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Safety and control"
+          },
+          {
+            "type": "text",
+            "text": " via kill switches.\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Debugging and maintenance"
+          },
+          {
+            "type": "text",
+            "text": " via pause-resume."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "Trade-offs:"
+          },
+          {
+            "type": "text",
+            "text": "\n- You must implement checkpointing, state preservation, and safe recovery.\n- Paused agents consume resources while idle.\n- Resume loading checkpoints adds latency.\n- Complex state stores are needed for multi-tier state."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best practices"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Expose clean APIs"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Start/pause/resume/stop as simple endpoints."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Checkpoint frequently"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Save state at task completion or regular intervals."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Make lifecycle transparent to the outside world"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": The API is stateless, but the agent is stateful internally."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Use durable storage"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Redis or database for checkpoints, not just memory."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Log all lifecycle actions"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": Audit logs for resume, pause, kill events."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Handle termination gracefully"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": If the process is killed, resume from the last checkpoint."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key takeaways"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Lifecycle management is a "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "state machine"
+                  },
+                  {
+                    "type": "text",
+                    "text": " with "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "checkpointing"
+                  },
+                  {
+                    "type": "text",
+                    "text": ": start \u2192 pause \u2192 resume \u2192 kill."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Pause"
+                  },
+                  {
+                    "type": "text",
+                    "text": " keeps state intact in memory or durable storage without terminating the process."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Resume"
+                  },
+                  {
+                    "type": "text",
+                    "text": " loads the checkpoint and continues from the exact paused state."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Kill"
+                  },
+                  {
+                    "type": "text",
+                    "text": " ends the session and cleans up resources, optionally checkpointing final state."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "This is the foundation for making agents "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "trustworthy, governable, and production-ready"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u2014"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "How It Works in Practice"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Understanding the internals of agent lifecycle management (start, pause, resume, kill) helps you predict its behavior and debug issues effectively."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "When a request is processed, several layers of the system interact: the client library validates inputs and manages retries, the transport layer handles HTTP/2 connection multiplexing, and the API server routes to the appropriate model instance. Each layer introduces latency that you can measure and optimize."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For production deployments, understanding this pipeline helps you allocate timeout budgets appropriately. The network round-trip typically adds 50-100ms, while model processing time scales with output length. A response generating 1,000 tokens takes 2-4x longer than one generating 250 tokens for the same model."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production experience with agent lifecycle management (start, pause, resume, kill) has surfaced these practices that consistently improve reliability and performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use async clients for concurrent workloads \u2014 Python's AsyncAnthropic and TypeScript's async/await patterns avoid blocking the event loop during API calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache system prompts with cache_control \u2014 stable system prompts hit the cache ~90% of the time after the first call, reducing both latency and cost significantly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stream responses for interactive use \u2014 streaming reduces time-to-first-token from seconds to milliseconds, dramatically improving perceived responsiveness."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement structured retry logic \u2014 use exponential backoff starting at 1 second, with jitter to prevent thundering herd problems under rate limiting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log structured metadata \u2014 capture model, input_tokens, output_tokens, latency, and request_id in every log entry for effective debugging and cost tracking."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set explicit max_tokens \u2014 always specify max_tokens to bound cost and prevent unexpectedly long responses that consume your token budget."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Common Pitfalls"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Awareness of these common failure modes prevents hours of debugging in production."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not validating response structure \u2014 even when you request JSON, parse it with a try/catch. Models occasionally produce malformed output under high load or edge-case inputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Accumulating conversation history without truncation \u2014 after 10-20 turns, conversations can exceed context windows. Implement a sliding window or summarization strategy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Mixing prompt concerns \u2014 put behavior instructions in system prompts, task-specific content in user turns. Mixing them reduces clarity and makes iteration harder."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring stop_reason \u2014 check if stop_reason is \"max_tokens\" rather than \"end_turn\". Truncated responses need handling differently than complete ones."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Creating new client instances per request \u2014 instantiate the Anthropic client once at module load time to benefit from connection pooling across requests."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance Benchmarks and Cost Analysis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Making informed architectural decisions requires concrete numbers. These benchmarks are representative of typical production workloads."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Haiku 3.5: ~$0.80/MTok input, ~$4/MTok output. Best for high-volume, simple tasks like classification, extraction, and summarization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Sonnet 4: ~$3/MTok input, ~$15/MTok output. The best quality-to-cost ratio for most production use cases requiring reasoning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt cache hit rate: After the first call, 85-95% of requests hit the cache for stable prompts. Cache tokens cost 10% of normal input token price."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Message Batches API: 50% cost reduction for async workloads processed within 24 hours. Ideal for nightly data processing, evaluation runs, and bulk content generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Typical latency: 1-3s for Haiku, 3-10s for Sonnet, 10-30s for Opus. Streaming makes all models feel 2-5x faster from the user's perspective."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security Considerations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Deploying agent lifecycle management (start, pause, resume, kill) in production requires careful attention to security boundaries and trust models."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "API key management \u2014 store keys in environment variables or secrets managers (AWS Secrets Manager, HashiCorp Vault). Never commit to version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt injection prevention \u2014 when embedding user input in prompts, use XML tags to clearly delimit user content from instructions, reducing injection attack surface."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output sanitization \u2014 before rendering AI-generated content in web UIs, escape HTML to prevent XSS attacks from model-produced content."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limiting user requests \u2014 implement per-user rate limits in addition to API limits to prevent cost abuse and ensure fair service distribution."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Agent lifecycle management (start, pause, resume, kill) is a foundational capability for building production-ready Claude integrations. By following the patterns in this guide \u2014 proper error handling, async clients, prompt caching, and structured monitoring \u2014 you can build reliable, cost-efficient applications that scale gracefully from prototype to production."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Advanced Best Practices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Production experience with agent lifecycle management (start, pause, resume, kill) has surfaced these practices that consistently improve reliability and performance."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use async clients for concurrent workloads \u2014 Python's AsyncAnthropic and TypeScript's async/await patterns avoid blocking the event loop during API calls."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Cache system prompts with cache_control \u2014 stable system prompts hit the cache ~90% of the time after the first call, reducing both latency and cost significantly."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stream responses for interactive use \u2014 streaming reduces time-to-first-token from seconds to milliseconds, dramatically improving perceived responsiveness."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Implement structured retry logic \u2014 use exponential backoff starting at 1 second, with jitter to prevent thundering herd problems under rate limiting."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Log structured metadata \u2014 capture model, input_tokens, output_tokens, latency, and request_id in every log entry for effective debugging and cost tracking."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Set explicit max_tokens \u2014 always specify max_tokens to bound cost and prevent unexpectedly long responses that consume your token budget."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Advanced Common Pitfalls"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Awareness of these common failure modes prevents hours of debugging in production."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Not validating response structure \u2014 even when you request JSON, parse it with a try/catch. Models occasionally produce malformed output under high load or edge-case inputs."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Accumulating conversation history without truncation \u2014 after 10-20 turns, conversations can exceed context windows. Implement a sliding window or summarization strategy."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Mixing prompt concerns \u2014 put behavior instructions in system prompts, task-specific content in user turns. Mixing them reduces clarity and makes iteration harder."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ignoring stop_reason \u2014 check if stop_reason is \"max_tokens\" rather than \"end_turn\". Truncated responses need handling differently than complete ones."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Creating new client instances per request \u2014 instantiate the Anthropic client once at module load time to benefit from connection pooling across requests."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Performance Benchmarks and Cost Analysis"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Making informed architectural decisions requires concrete numbers. These benchmarks are representative of typical production workloads."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Haiku 3.5: ~$0.80/MTok input, ~$4/MTok output. Best for high-volume, simple tasks like classification, extraction, and summarization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude Sonnet 4: ~$3/MTok input, ~$15/MTok output. The best quality-to-cost ratio for most production use cases requiring reasoning."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt cache hit rate: After the first call, 85-95% of requests hit the cache for stable prompts. Cache tokens cost 10% of normal input token price."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Message Batches API: 50% cost reduction for async workloads processed within 24 hours. Ideal for nightly data processing, evaluation runs, and bulk content generation."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Typical latency: 1-3s for Haiku, 3-10s for Sonnet, 10-30s for Opus. Streaming makes all models feel 2-5x faster from the user's perspective."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Security Considerations"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Deploying agent lifecycle management (start, pause, resume, kill) in production requires careful attention to security boundaries and trust models."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "API key management \u2014 store keys in environment variables or secrets managers (AWS Secrets Manager, HashiCorp Vault). Never commit to version control."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Prompt injection prevention \u2014 when embedding user input in prompts, use XML tags to clearly delimit user content from instructions, reducing injection attack surface."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Output sanitization \u2014 before rendering AI-generated content in web UIs, escape HTML to prevent XSS attacks from model-produced content."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rate limiting user requests \u2014 implement per-user rate limits in addition to API limits to prevent cost abuse and ensure fair service distribution."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Summary"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Agent lifecycle management (start, pause, resume, kill) is a foundational capability for building production-ready Claude integrations. By following the patterns in this guide \u2014 proper error handling, async clients, prompt caching, and structured monitoring \u2014 you can build reliable, cost-efficient applications that scale gracefully from prototype to production."
+          }
+        ]
+      }
+    ]
+  }
+}

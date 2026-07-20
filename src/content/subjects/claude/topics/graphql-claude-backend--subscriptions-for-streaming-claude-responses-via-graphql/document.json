@@ -1,1 +1,2032 @@
-{"format":"tiptap/v1","updatedAt":"2026-06-21T07:28:43.127Z","doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"GraphQL subscriptions are a strong pattern for streaming Claude responses when you treat the Claude SSE stream as an internal event source and publish typed GraphQL events to subscribed clients. The clean architecture is usually: mutation starts a run, backend opens Claude streaming ("},{"type":"text","marks":[{"type":"code"}],"text":"stream: true"},{"type":"text","text":"), server maps Claude deltas/lifecycle events into GraphQL subscription events, and clients subscribe to those typed events over a long-lived GraphQL connection."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Core pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude streaming happens as an event stream, typically SSE, when you call the Messages API with "},{"type":"text","marks":[{"type":"code"}],"text":"stream: true"},{"type":"text","text":". GraphQL subscriptions are also built for long-lived real-time updates, but instead of exposing raw SSE frames directly, the server should convert them into your app’s own typed event model so the frontend subscribes to meaningful domain events like "},{"type":"text","marks":[{"type":"code"}],"text":"textDelta"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"toolUseRequested"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"runCompleted"},{"type":"text","text":", or "},{"type":"text","marks":[{"type":"code"}],"text":"runFailed"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","text":"In plain language:\n- Claude streams tokens/events to your backend.\n- Your backend translates them into GraphQL events.\n- The frontend receives those events through a subscription and updates the chat UI in real time."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Why subscriptions fit well"}]},{"type":"paragraph","content":[{"type":"text","text":"GraphQL subscriptions are designed for updates that happen over time rather than one request–one response interactions. That matches conversational AI extremely well because an AI response is not always a single blob; it may arrive as many deltas, tool requests, intermediate states, and a final completion event."}]},{"type":"paragraph","content":[{"type":"text","text":"This gives several benefits:\n- Strongly typed streaming payloads.\n- A unified API style for query, mutation, and streaming.\n- Better frontend ergonomics than hand-parsing raw SSE.\n- Easier integration with Apollo, GraphQL.js, or Hasura-style subscription infrastructure."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Recommended architecture"}]},{"type":"paragraph","content":[{"type":"text","text":"The most reliable architecture is "},{"type":"text","marks":[{"type":"bold"}],"text":"mutation to start, subscription to stream"},{"type":"text","text":"."}]},{"type":"orderedList","attrs":{"start":1,"type":null},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Client sends a mutation like "},{"type":"text","marks":[{"type":"code"}],"text":"sendMessage"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"createRun"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Backend persists the user message and creates a run record."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Backend starts Claude streaming with "},{"type":"text","marks":[{"type":"code"}],"text":"stream: true"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Backend publishes typed events into a pub/sub layer."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Client subscribes to "},{"type":"text","marks":[{"type":"code"}],"text":"runEvents(conversationId)"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"runEvents(runId)"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"UI renders deltas as they arrive and marks completion/failure when final events are published."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This pattern is better than trying to make the mutation itself return a stream, because GraphQL mutations are not designed to emit multiple payloads over time, while subscriptions are."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Schema design"}]},{"type":"paragraph","content":[{"type":"text","text":"A strong schema exposes event types, not raw Claude events."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Good subscription shape"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"type Subscription {\n  runEvents(runId: ID!): RunEvent!\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"Then define a union:"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"union RunEvent =\n    RunStartedEvent\n  | TextDeltaEvent\n  | ContentBlockStartEvent\n  | ToolUseRequestedEvent\n  | ToolResultRequiredEvent\n  | RunCompletedEvent\n  | RunFailedEvent"}]},{"type":"paragraph","content":[{"type":"text","text":"This follows GraphQL design guidance for polymorphic event streams and makes the subscription self-documenting."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Example event types"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"type RunStartedEvent {\n  runId: ID!\n  conversationId: ID!\n  startedAt: DateTime!\n}\n\ntype TextDeltaEvent {\n  runId: ID!\n  messageId: ID!\n  delta: String!\n  index: Int!\n}\n\ntype ToolUseRequestedEvent {\n  runId: ID!\n  toolUseId: ID!\n  toolName: String!\n  input: JSON!\n}\n\ntype RunCompletedEvent {\n  runId: ID!\n  messageId: ID!\n  usage: UsageSummary!\n  completedAt: DateTime!\n}\n\ntype RunFailedEvent {\n  runId: ID!\n  error: RunError!\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"This is better than publishing one loose "},{"type":"text","marks":[{"type":"code"}],"text":"JSON"},{"type":"text","text":" event because clients can safely pattern-match on event types."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Event mapping from Claude"}]},{"type":"paragraph","content":[{"type":"text","text":"Claude streaming emits multiple event kinds over SSE when "},{"type":"text","marks":[{"type":"code"}],"text":"stream: true"},{"type":"text","text":" is enabled. Your backend should translate them into stable GraphQL events."}]},{"type":"paragraph","content":[{"type":"text","text":"Typical mapping approach:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude stream opened → "},{"type":"text","marks":[{"type":"code"}],"text":"RunStartedEvent"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude text delta / partial content → "},{"type":"text","marks":[{"type":"code"}],"text":"TextDeltaEvent"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude begins tool-use block → "},{"type":"text","marks":[{"type":"code"}],"text":"ToolUseRequestedEvent"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude finishes successfully → "},{"type":"text","marks":[{"type":"code"}],"text":"RunCompletedEvent"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude error / upstream failure → "},{"type":"text","marks":[{"type":"code"}],"text":"RunFailedEvent"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"The reason to translate rather than pass through raw provider events is portability and API stability. If Claude changes event naming or you later support Bedrock or another provider, your GraphQL contract can stay the same."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Resolver pattern"}]},{"type":"paragraph","content":[{"type":"text","text":"GraphQL.js explains that subscriptions are executed as async iterables, meaning your server can yield multiple execution results over time rather than one response. In practice, a common Node/Apollo pattern is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Use a pub/sub bus."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Publish events keyed by "},{"type":"text","marks":[{"type":"code"}],"text":"runId"},{"type":"text","text":" or "},{"type":"text","marks":[{"type":"code"}],"text":"conversationId"},{"type":"text","text":"."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Subscription resolver returns an async iterator."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Optionally wrap it in filters so each client only gets authorized events."}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Conceptually:"}]},{"type":"codeBlock","attrs":{"language":"typescript"},"content":[{"type":"text","text":"Subscription: {\n  runEvents: {\n    subscribe: withFilter(\n      () => pubsub.asyncIterableIterator(['RUN_EVENT']),\n      (payload, variables, context) => {\n        return payload.runId === variables.runId\n          && payload.tenantId === context.tenantId;\n      }\n    )\n  }\n}"}]},{"type":"paragraph","content":[{"type":"text","text":"The "},{"type":"text","marks":[{"type":"code"}],"text":"withFilter"},{"type":"text","text":" pattern is specifically documented in common GraphQL subscription tooling and is extremely important for multi-tenant Claude apps so subscribers do not receive other users’ runs."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Multi-tenant isolation"}]},{"type":"paragraph","content":[{"type":"text","text":"For GraphQL + Claude, subscription authorization is at least as important as the stream itself."}]},{"type":"paragraph","content":[{"type":"text","text":"You should enforce:\n- The subscriber belongs to the tenant owning the run.\n- The subscriber is allowed to see that conversation.\n- The pub/sub event includes tenant metadata.\n- Subscription filters check both run identity and tenant identity."}]},{"type":"paragraph","content":[{"type":"text","text":"A safe internal event payload usually includes:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"tenantId"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"conversationId"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"runId"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"userId"},{"type":"text","text":" or actor context\n- event-specific payload"}]},{"type":"paragraph","content":[{"type":"text","text":"Without tenant-aware filtering, GraphQL subscriptions can become a cross-tenant broadcast leak."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Per-run vs per-conversation subscriptions"}]},{"type":"paragraph","content":[{"type":"text","text":"There are two common designs."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"1. Per-run subscription"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"runEvents(runId: ID!): RunEvent!"}]},{"type":"paragraph","content":[{"type":"text","text":"Best when:\n- One UI component is following one active assistant response.\n- You want tight scoping and simpler filtering.\n- The client already knows the run ID from the mutation response."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"2. Per-conversation subscription"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"conversationEvents(conversationId: ID!): ConversationEvent!"}]},{"type":"paragraph","content":[{"type":"text","text":"Best when:\n- You want a single stream for all changes in the chat thread.\n- Multiple events can happen in the same conversation over time.\n- The UI wants message creation, edits, completions, and tool activity all in one feed."}]},{"type":"paragraph","content":[{"type":"text","text":"Per-run is usually simpler for Claude response streaming; per-conversation is often better for full chat synchronization."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Mutation + subscription workflow"}]},{"type":"paragraph","content":[{"type":"text","text":"A very clean frontend/backend workflow is:"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Step 1: subscribe"}]},{"type":"paragraph","content":[{"type":"text","text":"Client subscribes to "},{"type":"text","marks":[{"type":"code"}],"text":"runEvents(runId)"},{"type":"text","text":" or conversation events."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Step 2: mutate"}]},{"type":"paragraph","content":[{"type":"text","text":"Client sends:"}]},{"type":"codeBlock","attrs":{"language":"graphql"},"content":[{"type":"text","text":"mutation SendMessage($input: SendMessageInput!) {\n  sendMessage(input: $input) {\n    conversation { id }\n    userMessage { id }\n    run { id status }\n  }\n}"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Step 3: stream"}]},{"type":"paragraph","content":[{"type":"text","text":"Backend publishes events as Claude streams."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Step 4: finalize"}]},{"type":"paragraph","content":[{"type":"text","text":"Client receives "},{"type":"text","marks":[{"type":"code"}],"text":"RunCompletedEvent"},{"type":"text","text":" and optionally refetches the final normalized message if needed."}]},{"type":"paragraph","content":[{"type":"text","text":"This mirrors long-standing GraphQL streaming advice: commands go in through mutations, and ongoing results come back through subscriptions."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Streaming granularity"}]},{"type":"paragraph","content":[{"type":"text","text":"You have three main choices."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Token or text delta streaming"}]},{"type":"paragraph","content":[{"type":"text","text":"Publish small "},{"type":"text","marks":[{"type":"code"}],"text":"delta"},{"type":"text","text":" chunks as soon as Claude emits them."}]},{"type":"paragraph","content":[{"type":"text","text":"Pros:\n- Fastest perceived latency.\n- Best “typing” UX."}]},{"type":"paragraph","content":[{"type":"text","text":"Cons:\n- More event volume.\n- Requires client-side buffering."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"Block-level streaming"}]},{"type":"paragraph","content":[{"type":"text","text":"Buffer partial deltas and publish slightly larger text chunks or content-block milestones."}]},{"type":"paragraph","content":[{"type":"text","text":"Pros:\n- Fewer events.\n- Easier UI handling."}]},{"type":"paragraph","content":[{"type":"text","text":"Cons:\n- Slightly less live feel."}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"State-only streaming"}]},{"type":"paragraph","content":[{"type":"text","text":"Only publish "},{"type":"text","marks":[{"type":"code"}],"text":"started"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"waiting_for_tool"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"completed"},{"type":"text","text":", "},{"type":"text","marks":[{"type":"code"}],"text":"failed"},{"type":"text","text":", and fetch final message separately."}]},{"type":"paragraph","content":[{"type":"text","text":"Pros:\n- Simplest schema and infrastructure.\n- Works well for non-chat workloads."}]},{"type":"paragraph","content":[{"type":"text","text":"Cons:\n- Loses the real-time typing experience."}]},{"type":"paragraph","content":[{"type":"text","text":"For chat UIs, token/text delta or small buffered chunk streaming is usually best."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Tool use and subscriptions"}]},{"type":"paragraph","content":[{"type":"text","text":"If Claude tool use is involved, your subscription schema should represent it explicitly rather than hiding it inside text. Claude’s stream can include structured tool-related events, and those can map naturally into GraphQL event types such as "},{"type":"text","marks":[{"type":"code"}],"text":"ToolUseRequestedEvent"},{"type":"text","text":" and "},{"type":"text","marks":[{"type":"code"}],"text":"ToolResultRequiredEvent"},{"type":"text","text":"."}]},{"type":"paragraph","content":[{"type":"text","text":"This is useful because the client may want to:\n- Show “Claude is checking your CRM…”\n- Render approval UI before executing a high-risk tool.\n- Distinguish thinking/output from action requests."}]},{"type":"paragraph","content":[{"type":"text","text":"If tools are first-class in your product, they should be first-class in your subscription schema too."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Error handling"}]},{"type":"paragraph","content":[{"type":"text","text":"Streaming systems fail in more ways than non-streaming systems, so model failures explicitly."}]},{"type":"paragraph","content":[{"type":"text","text":"Recommended event types:\n- "},{"type":"text","marks":[{"type":"code"}],"text":"RunFailedEvent"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"RunCanceledEvent"},{"type":"text","text":"\n- "},{"type":"text","marks":[{"type":"code"}],"text":"SubscriptionHeartbeatEvent"},{"type":"text","text":" if your infra benefits from keepalive semantics\n- optional "},{"type":"text","marks":[{"type":"code"}],"text":"RunRetriedEvent"}]},{"type":"paragraph","content":[{"type":"text","text":"GraphQL subscription docs emphasize that subscriptions are long-lived connections, so failure and reconnection behavior should be designed intentionally, not left as an afterthought."}]},{"type":"paragraph","content":[{"type":"text","text":"A practical pattern is:\n- Publish "},{"type":"text","marks":[{"type":"code"}],"text":"RunFailedEvent"},{"type":"text","text":" for application-level errors.\n- Close the stream only when appropriate.\n- Let the client distinguish provider failure from transport disconnect."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Transport choices"}]},{"type":"paragraph","content":[{"type":"text","text":"GraphQL subscriptions usually run over WebSocket or other long-lived transports depending on your stack. Claude streaming is typically SSE from your backend’s perspective. So the normal transport bridge is:"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Claude provider → SSE to backend"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Backend → WebSocket/GraphQL subscription to client"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"This is a healthy separation because the frontend only needs to understand GraphQL subscription events, not provider-specific SSE parsing."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Good patterns"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Start runs with a mutation, stream them with a subscription."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Publish typed domain events, not raw provider frames."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Filter subscription events by "},{"type":"text","marks":[{"type":"code"}],"text":"runId"},{"type":"text","text":" and tenant/user authorization."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Include final "},{"type":"text","marks":[{"type":"code"}],"text":"RunCompletedEvent"},{"type":"text","text":" with usage and final message ID."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Persist the final assistant message server-side and treat streaming as a UX layer, not the only source of truth."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Model tool-use events explicitly when relevant."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Bad patterns"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Returning raw Claude SSE payloads directly through GraphQL."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Trying to stream from a mutation response instead of a subscription."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"No typed event union."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"No tenant-aware filtering on subscription channels."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Only streaming text and losing completion, error, and tool lifecycle states."}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"Treating the stream as the source of record instead of persisting final messages."}]}]}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Layman’s explanation"}]},{"type":"paragraph","content":[{"type":"text","text":"Think of Claude as speaking to your backend through a live radio feed, while GraphQL subscriptions are your app’s internal broadcast system. Your backend listens to Claude’s radio, translates what it hears into app-specific announcements like “assistant started,” “here is more text,” “tool needed,” and “finished,” then broadcasts those announcements to the correct user screen."}]},{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Study questions with answers"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why are GraphQL subscriptions a good fit for Claude streaming?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because subscriptions are designed for long-lived real-time updates, while Claude responses can arrive as multiple streaming events over time."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why use a mutation plus subscription instead of one streaming mutation?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because mutations are request/response operations, while subscriptions are designed to emit multiple payloads over time."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"Why not expose raw Claude SSE events directly?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Because typed GraphQL events are more stable, easier for clients, and decouple your API from provider-specific wire formats."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"How do you prevent cross-tenant subscription leaks?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Include tenant metadata in events and use filtered subscription iterators so each client only receives authorized events."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","marks":[{"type":"bold"}],"text":"What should the stream include besides text deltas?"}]}]}]},{"type":"paragraph","content":[{"type":"text","text":"Lifecycle events like started, completed, failed, and tool-use events, because real conversational workflows are more than just text."}]}]}}
+{
+  "format": "tiptap/v1",
+  "updatedAt": "2026-06-21T07:28:43.127Z",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GraphQL subscriptions are a strong pattern for streaming Claude responses when you treat the Claude SSE stream as an internal event source and publish typed GraphQL events to subscribed clients. The clean architecture is usually: mutation starts a run, backend opens Claude streaming ("
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream: true"
+          },
+          {
+            "type": "text",
+            "text": "), server maps Claude deltas/lifecycle events into GraphQL subscription events, and clients subscribe to those typed events over a long-lived GraphQL connection."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Core pattern"
+          }
+        ]
+      },
+      {
+        "type": "image",
+        "attrs": {
+          "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MjAiIGhlaWdodD0iMTYwIiB2aWV3Qm94PSIwIDAgODIwIDE2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojMWE3M2U4O3N0b3Atb3BhY2l0eToxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6IzBkNDdhMTtzdG9wLW9wYWNpdHk6MSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjgyMCIgaGVpZ2h0PSIxNjAiIGZpbGw9InVybCgjZykiIHJ4PSI4Ii8+CiAgPHRleHQgeD0iNDEwIiB5PSI3MCIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIKICAgICAgICBmaWxsPSJ3aGl0ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgb3BhY2l0eT0iMC45Ij5TdWJzY3JpcHRpb25zIGZvciBzdHJlYW1pbmcgQ2xhdWRlIHJlc3BvbnNlcyB2aWEgR3JhcGhRTDwvdGV4dD4KICA8dGV4dCB4PSI0MTAiIHk9IjEwNSIgZm9udC1mYW1pbHk9InN5c3RlbS11aSxzYW5zLXNlcmlmIiBmb250LXNpemU9IjE0IgogICAgICAgIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBvcGFjaXR5PSIwLjc1Ij5DbGF1ZGUgTGVhcm5pbmcgUGF0aDwvdGV4dD4KICA8Y2lyY2xlIGN4PSI2MCIgY3k9IjgwIiByPSIyOCIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KICA8Y2lyY2xlIGN4PSI3NjAiIGN5PSI4MCIgcj0iMjgiIGZpbGw9IndoaXRlIiBvcGFjaXR5PSIwLjE1Ii8+Cjwvc3ZnPg==",
+          "alt": "Diagram for Subscriptions for streaming Claude responses via GraphQL",
+          "title": null
+        }
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude streaming happens as an event stream, typically SSE, when you call the Messages API with "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream: true"
+          },
+          {
+            "type": "text",
+            "text": ". GraphQL subscriptions are also built for long-lived real-time updates, but instead of exposing raw SSE frames directly, the server should convert them into your app\u2019s own typed event model so the frontend subscribes to meaningful domain events like "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "textDelta"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "toolUseRequested"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "runCompleted"
+          },
+          {
+            "type": "text",
+            "text": ", or "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "runFailed"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "In plain language:\n- Claude streams tokens/events to your backend.\n- Your backend translates them into GraphQL events.\n- The frontend receives those events through a subscription and updates the chat UI in real time."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Why subscriptions fit well"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GraphQL subscriptions are designed for updates that happen over time rather than one request\u2013one response interactions. That matches conversational AI extremely well because an AI response is not always a single blob; it may arrive as many deltas, tool requests, intermediate states, and a final completion event."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This gives several benefits:\n- Strongly typed streaming payloads.\n- A unified API style for query, mutation, and streaming.\n- Better frontend ergonomics than hand-parsing raw SSE.\n- Easier integration with Apollo, GraphQL.js, or Hasura-style subscription infrastructure."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended architecture"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The most reliable architecture is "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ],
+            "text": "mutation to start, subscription to stream"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "orderedList",
+        "attrs": {
+          "start": 1,
+          "type": null
+        },
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Client sends a mutation like "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "sendMessage"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "createRun"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Backend persists the user message and creates a run record."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Backend starts Claude streaming with "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "stream: true"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Backend publishes typed events into a pub/sub layer."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Client subscribes to "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "runEvents(conversationId)"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "runEvents(runId)"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "UI renders deltas as they arrive and marks completion/failure when final events are published."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This pattern is better than trying to make the mutation itself return a stream, because GraphQL mutations are not designed to emit multiple payloads over time, while subscriptions are."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Schema design"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A strong schema exposes event types, not raw Claude events."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Good subscription shape"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "type Subscription {\n  runEvents(runId: ID!): RunEvent!\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Then define a union:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "union RunEvent =\n    RunStartedEvent\n  | TextDeltaEvent\n  | ContentBlockStartEvent\n  | ToolUseRequestedEvent\n  | ToolResultRequiredEvent\n  | RunCompletedEvent\n  | RunFailedEvent"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This follows GraphQL design guidance for polymorphic event streams and makes the subscription self-documenting."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Example event types"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "type RunStartedEvent {\n  runId: ID!\n  conversationId: ID!\n  startedAt: DateTime!\n}\n\ntype TextDeltaEvent {\n  runId: ID!\n  messageId: ID!\n  delta: String!\n  index: Int!\n}\n\ntype ToolUseRequestedEvent {\n  runId: ID!\n  toolUseId: ID!\n  toolName: String!\n  input: JSON!\n}\n\ntype RunCompletedEvent {\n  runId: ID!\n  messageId: ID!\n  usage: UsageSummary!\n  completedAt: DateTime!\n}\n\ntype RunFailedEvent {\n  runId: ID!\n  error: RunError!\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is better than publishing one loose "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "JSON"
+          },
+          {
+            "type": "text",
+            "text": " event because clients can safely pattern-match on event types."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Event mapping from Claude"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Claude streaming emits multiple event kinds over SSE when "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "stream: true"
+          },
+          {
+            "type": "text",
+            "text": " is enabled. Your backend should translate them into stable GraphQL events."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Typical mapping approach:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude stream opened \u2192 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "RunStartedEvent"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude text delta / partial content \u2192 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "TextDeltaEvent"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude begins tool-use block \u2192 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "ToolUseRequestedEvent"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude finishes successfully \u2192 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "RunCompletedEvent"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude error / upstream failure \u2192 "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "RunFailedEvent"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The reason to translate rather than pass through raw provider events is portability and API stability. If Claude changes event naming or you later support Bedrock or another provider, your GraphQL contract can stay the same."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Resolver pattern"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GraphQL.js explains that subscriptions are executed as async iterables, meaning your server can yield multiple execution results over time rather than one response. In practice, a common Node/Apollo pattern is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a pub/sub bus."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Publish events keyed by "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "runId"
+                  },
+                  {
+                    "type": "text",
+                    "text": " or "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "conversationId"
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Subscription resolver returns an async iterator."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Optionally wrap it in filters so each client only gets authorized events."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Conceptually:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "typescript"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Subscription: {\n  runEvents: {\n    subscribe: withFilter(\n      () => pubsub.asyncIterableIterator(['RUN_EVENT']),\n      (payload, variables, context) => {\n        return payload.runId === variables.runId\n          && payload.tenantId === context.tenantId;\n      }\n    )\n  }\n}"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "The "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "withFilter"
+          },
+          {
+            "type": "text",
+            "text": " pattern is specifically documented in common GraphQL subscription tooling and is extremely important for multi-tenant Claude apps so subscribers do not receive other users\u2019 runs."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Multi-tenant isolation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For GraphQL + Claude, subscription authorization is at least as important as the stream itself."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "You should enforce:\n- The subscriber belongs to the tenant owning the run.\n- The subscriber is allowed to see that conversation.\n- The pub/sub event includes tenant metadata.\n- Subscription filters check both run identity and tenant identity."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A safe internal event payload usually includes:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "tenantId"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "conversationId"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "runId"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "userId"
+          },
+          {
+            "type": "text",
+            "text": " or actor context\n- event-specific payload"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Without tenant-aware filtering, GraphQL subscriptions can become a cross-tenant broadcast leak."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Per-run vs per-conversation subscriptions"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "There are two common designs."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "1. Per-run subscription"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "runEvents(runId: ID!): RunEvent!"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Best when:\n- One UI component is following one active assistant response.\n- You want tight scoping and simpler filtering.\n- The client already knows the run ID from the mutation response."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "2. Per-conversation subscription"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "conversationEvents(conversationId: ID!): ConversationEvent!"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Best when:\n- You want a single stream for all changes in the chat thread.\n- Multiple events can happen in the same conversation over time.\n- The UI wants message creation, edits, completions, and tool activity all in one feed."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Per-run is usually simpler for Claude response streaming; per-conversation is often better for full chat synchronization."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Mutation + subscription workflow"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A very clean frontend/backend workflow is:"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 1: subscribe"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Client subscribes to "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "runEvents(runId)"
+          },
+          {
+            "type": "text",
+            "text": " or conversation events."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 2: mutate"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Client sends:"
+          }
+        ]
+      },
+      {
+        "type": "codeBlock",
+        "attrs": {
+          "language": "graphql"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "mutation SendMessage($input: SendMessageInput!) {\n  sendMessage(input: $input) {\n    conversation { id }\n    userMessage { id }\n    run { id status }\n  }\n}"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 3: stream"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Backend publishes events as Claude streams."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Step 4: finalize"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Client receives "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunCompletedEvent"
+          },
+          {
+            "type": "text",
+            "text": " and optionally refetches the final normalized message if needed."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This mirrors long-standing GraphQL streaming advice: commands go in through mutations, and ongoing results come back through subscriptions."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming granularity"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "You have three main choices."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Token or text delta streaming"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Publish small "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "delta"
+          },
+          {
+            "type": "text",
+            "text": " chunks as soon as Claude emits them."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pros:\n- Fastest perceived latency.\n- Best \u201ctyping\u201d UX."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cons:\n- More event volume.\n- Requires client-side buffering."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Block-level streaming"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Buffer partial deltas and publish slightly larger text chunks or content-block milestones."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pros:\n- Fewer events.\n- Easier UI handling."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cons:\n- Slightly less live feel."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "State-only streaming"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Only publish "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "started"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "waiting_for_tool"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "completed"
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "failed"
+          },
+          {
+            "type": "text",
+            "text": ", and fetch final message separately."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Pros:\n- Simplest schema and infrastructure.\n- Works well for non-chat workloads."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Cons:\n- Loses the real-time typing experience."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "For chat UIs, token/text delta or small buffered chunk streaming is usually best."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Tool use and subscriptions"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If Claude tool use is involved, your subscription schema should represent it explicitly rather than hiding it inside text. Claude\u2019s stream can include structured tool-related events, and those can map naturally into GraphQL event types such as "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ToolUseRequestedEvent"
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "ToolResultRequiredEvent"
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is useful because the client may want to:\n- Show \u201cClaude is checking your CRM\u2026\u201d\n- Render approval UI before executing a high-risk tool.\n- Distinguish thinking/output from action requests."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "If tools are first-class in your product, they should be first-class in your subscription schema too."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Error handling"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Streaming systems fail in more ways than non-streaming systems, so model failures explicitly."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Recommended event types:\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunFailedEvent"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunCanceledEvent"
+          },
+          {
+            "type": "text",
+            "text": "\n- "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "SubscriptionHeartbeatEvent"
+          },
+          {
+            "type": "text",
+            "text": " if your infra benefits from keepalive semantics\n- optional "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunRetriedEvent"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GraphQL subscription docs emphasize that subscriptions are long-lived connections, so failure and reconnection behavior should be designed intentionally, not left as an afterthought."
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "A practical pattern is:\n- Publish "
+          },
+          {
+            "type": "text",
+            "marks": [
+              {
+                "type": "code"
+              }
+            ],
+            "text": "RunFailedEvent"
+          },
+          {
+            "type": "text",
+            "text": " for application-level errors.\n- Close the stream only when appropriate.\n- Let the client distinguish provider failure from transport disconnect."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Transport choices"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "GraphQL subscriptions usually run over WebSocket or other long-lived transports depending on your stack. Claude streaming is typically SSE from your backend\u2019s perspective. So the normal transport bridge is:"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Claude provider \u2192 SSE to backend"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Backend \u2192 WebSocket/GraphQL subscription to client"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is a healthy separation because the frontend only needs to understand GraphQL subscription events, not provider-specific SSE parsing."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Good patterns"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Start runs with a mutation, stream them with a subscription."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Publish typed domain events, not raw provider frames."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Filter subscription events by "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "runId"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and tenant/user authorization."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Include final "
+                  },
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "code"
+                      }
+                    ],
+                    "text": "RunCompletedEvent"
+                  },
+                  {
+                    "type": "text",
+                    "text": " with usage and final message ID."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Persist the final assistant message server-side and treat streaming as a UX layer, not the only source of truth."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Model tool-use events explicitly when relevant."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Bad patterns"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Returning raw Claude SSE payloads directly through GraphQL."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Trying to stream from a mutation response instead of a subscription."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No typed event union."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "No tenant-aware filtering on subscription channels."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Only streaming text and losing completion, error, and tool lifecycle states."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Treating the stream as the source of record instead of persisting final messages."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Layman\u2019s explanation"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Think of Claude as speaking to your backend through a live radio feed, while GraphQL subscriptions are your app\u2019s internal broadcast system. Your backend listens to Claude\u2019s radio, translates what it hears into app-specific announcements like \u201cassistant started,\u201d \u201chere is more text,\u201d \u201ctool needed,\u201d and \u201cfinished,\u201d then broadcasts those announcements to the correct user screen."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Study questions with answers"
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why are GraphQL subscriptions a good fit for Claude streaming?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because subscriptions are designed for long-lived real-time updates, while Claude responses can arrive as multiple streaming events over time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why use a mutation plus subscription instead of one streaming mutation?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because mutations are request/response operations, while subscriptions are designed to emit multiple payloads over time."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "Why not expose raw Claude SSE events directly?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Because typed GraphQL events are more stable, easier for clients, and decouple your API from provider-specific wire formats."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "How do you prevent cross-tenant subscription leaks?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Include tenant metadata in events and use filtered subscription iterators so each client only receives authorized events."
+          }
+        ]
+      },
+      {
+        "type": "bulletList",
+        "content": [
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ],
+                    "text": "What should the stream include besides text deltas?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Lifecycle events like started, completed, failed, and tool-use events, because real conversational workflows are more than just text."
+          }
+        ]
+      }
+    ]
+  }
+}
